@@ -1,0 +1,14 @@
+{
+  "general": {
+    "page": "Sayfa",
+    "limit": "Limit",
+    "orderBy": "Sıralama Ölçütü",
+    "search": "Arama",
+    "startDate": "Başlangıç Tarihi",
+    "endDate": "Bitiş Tarihi",
+    "sort": {
+      "field": "Alan",
+      "order": "Sıralama"
+    }
+  }
+}
