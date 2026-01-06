@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { ExceptionHandlerModule } from './shared/exception-handler/exception-handler.module';
 import { APP_FILTER } from '@nestjs/core';
 import { GlobalExceptionFilter } from './shared/filters/global-exception.filter';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { ConfigModule } from '@nestjs/config';
+import { dbConfig, DbConfigService } from './shared/config/db.config';
 
 @Module({
   imports: [
@@ -18,6 +21,10 @@ import { GlobalExceptionFilter } from './shared/filters/global-exception.filter'
       resolvers: [AcceptLanguageResolver],
     }),
     ExceptionHandlerModule,
+    TypeOrmModule.forRootAsync({
+      imports: [ConfigModule.forFeature(dbConfig)],
+      useClass: DbConfigService,
+    }),
   ],
   controllers: [AppController],
   providers: [
