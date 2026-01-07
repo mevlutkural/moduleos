@@ -1,19 +1,19 @@
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { ExceptionHandlerModule } from './shared/exception-handler/exception-handler.module';
+import { ExceptionHandlerModule } from './shared/infrastructure/exception-handler/exception-handler.module';
 import { APP_FILTER } from '@nestjs/core';
-import { GlobalExceptionFilter } from './shared/filters/global-exception.filter';
+import { GlobalExceptionFilter } from './shared/infrastructure/filters/global-exception.filter';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
-import { dbConfig } from './shared/config/db.config';
+import { dbConfig } from './shared/infrastructure/config/db.config';
 import { ThrottlerModule } from '@nestjs/throttler';
 import {
   throttlerConfig,
   ThrottlerConfigService,
-} from './shared/config/throttler.config';
+} from './shared/infrastructure/config/throttler.config';
 import { AcceptLanguageResolver, I18nModule } from 'nestjs-i18n';
-import { i18nConfig } from './shared/config/i18n.config';
+import { i18nConfig } from './shared/infrastructure/config/i18n.config';
 
 @Module({
   imports: [
