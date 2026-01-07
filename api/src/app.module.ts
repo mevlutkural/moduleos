@@ -6,24 +6,21 @@ import { APP_FILTER } from '@nestjs/core';
 import { GlobalExceptionFilter } from './shared/filters/global-exception.filter';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
-import { dbConfig, DbConfigService } from './shared/config/db.config';
+import { dbConfig } from './shared/config/db.config';
 import { ThrottlerModule } from '@nestjs/throttler';
 import {
   throttlerConfig,
   ThrottlerConfigService,
 } from './shared/config/throttler.config';
-import { I18nModule } from 'nestjs-i18n';
-import { i18nConfig, I18nConfigService } from './shared/config/i18n.config';
+import { AcceptLanguageResolver, I18nModule } from 'nestjs-i18n';
+import { i18nConfig } from './shared/config/i18n.config';
 
 @Module({
   imports: [
-    TypeOrmModule.forRootAsync({
-      imports: [ConfigModule.forFeature(dbConfig)],
-      useClass: DbConfigService,
-    }),
+    TypeOrmModule.forRootAsync(dbConfig.asProvider()),
     I18nModule.forRootAsync({
-      imports: [ConfigModule.forFeature(i18nConfig)],
-      useClass: I18nConfigService,
+      ...i18nConfig.asProvider(),
+      resolvers: [AcceptLanguageResolver],
     }),
     ExceptionHandlerModule,
     ThrottlerModule.forRootAsync({
