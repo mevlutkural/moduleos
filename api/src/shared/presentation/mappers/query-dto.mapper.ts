@@ -3,10 +3,6 @@ import { TimeRangedQueryDto } from '../dto/time-ranged.query.dto';
 import { FindAllOptions } from '../../domain/specifications/find-all-options.model';
 import { TimeRangedFindAllOptions } from '../../domain/specifications/time-ranged-find-all-options.model';
 
-/**
- * Mapper for converting presentation DTOs to domain models.
- * This is part of the presentation layer anti-corruption layer.
- */
 export class QueryDtoMapper {
   static toFindAllOptions(dto: BaseQueryDto): FindAllOptions {
     return FindAllOptions.create({

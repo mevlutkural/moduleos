@@ -6,10 +6,12 @@ export const dbConfig = registerAs('db', () => ({
   database: process.env.DATABASE ?? 'moduleos.db',
   autoLoadEntities: true,
   entities: [
-    join(__dirname, '../../modules/**/*.entity{.ts,.js}'),
-    join(__dirname, '../../modules/**/*.orm-entity{.ts,.js}'),
+    join(__dirname, '../../../modules/**/*.orm-entity{.ts,.js}'),
+    join(__dirname, '../../../database/example/*.orm-entity{.ts,.js}'),
   ],
-  synchronize: process.env.NODE_ENV !== 'production',
+  migrations: [join(__dirname, '../../../database/migrations/*{.ts,.js}')],
+  synchronize: process.env.NODE_ENV === 'development',
+  migrationsRun: process.env.NODE_ENV === 'production',
   logging: process.env.DB_LOGGING === 'true',
 }));
 

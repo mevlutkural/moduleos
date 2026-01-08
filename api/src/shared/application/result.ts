@@ -1,7 +1,3 @@
-/**
- * Result class for use case responses.
- * Provides a consistent way to handle success/failure without exceptions.
- */
 export class Result<T, E = Error> {
   private constructor(
     private readonly _isSuccess: boolean,
@@ -39,9 +35,6 @@ export class Result<T, E = Error> {
     return new Result<never, E>(false, undefined, error);
   }
 
-  /**
-   * Map the success value to a new value
-   */
   map<U>(fn: (value: T) => U): Result<U, E> {
     if (this._isSuccess) {
       return Result.ok(fn(this._value as T));
@@ -49,9 +42,6 @@ export class Result<T, E = Error> {
     return Result.fail(this._error as E);
   }
 
-  /**
-   * Unwrap the result, throwing the error if failed
-   */
   unwrap(): T {
     if (this._isSuccess) {
       return this._value as T;
