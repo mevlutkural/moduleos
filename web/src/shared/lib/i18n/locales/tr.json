@@ -1,0 +1,38 @@
+{
+  "common": {
+    "loading": "Yükleniyor...",
+    "error": "Bir şeyler yanlış gitti",
+    "retry": "Tekrar Dene",
+    "noData": "Veri bulunamadı",
+    "noResponse": "Sunucudan yanıt alınamadı",
+    "unknownError": "Bilinmeyen bir hata oluştu",
+    "search": "Ara...",
+    "actions": "İşlemler",
+    "status": "Durum",
+    "optimal": "Optimal",
+    "degraded": "Düşük",
+    "down": "Çevrimdışı",
+    "deleted": "{{item}} başarıyla silindi"
+  },
+  "dashboard": {
+    "title": "Panel",
+    "description": "Platform sağlığı, uygulama performansı ve son işlemlerin genel görünümü.",
+    "stats": {
+      "totalApps": "Toplam Uygulama",
+      "running": "Çalışan",
+      "deployments": "Dağıtımlar",
+      "successRate": "Başarı Oranı"
+    },
+    "platformStatus": "Platform Durumu",
+    "recentActivity": "Son Hareketler"
+  },
+  "navigation": {
+    "dashboard": "Panel"
+  },
+  "validation": {
+    "required": "Bu alan zorunludur",
+    "minLength": "En az {{min}} karakter olmalıdır",
+    "maxLength": "En fazla {{max}} karakter olmalıdır",
+    "email": "Geçerli bir e-posta adresi giriniz"
+  }
+}

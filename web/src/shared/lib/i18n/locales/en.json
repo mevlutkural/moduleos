@@ -1,0 +1,38 @@
+{
+  "common": {
+    "loading": "Loading...",
+    "error": "Something went wrong",
+    "retry": "Try Again",
+    "noData": "No data found",
+    "noResponse": "No response received from server",
+    "unknownError": "An unknown error occurred",
+    "search": "Search...",
+    "actions": "Actions",
+    "status": "Status",
+    "optimal": "Optimal",
+    "degraded": "Degraded",
+    "down": "Down",
+    "deleted": "{{item}} deleted successfully"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "description": "Overview of your platform health, application performance, and recent operations.",
+    "stats": {
+      "totalApps": "Total Apps",
+      "running": "Running",
+      "deployments": "Deployments",
+      "successRate": "Success Rate"
+    },
+    "platformStatus": "Platform Status",
+    "recentActivity": "Recent Activity"
+  },
+  "navigation": {
+    "dashboard": "Dashboard"
+  },
+  "validation": {
+    "required": "This field is required",
+    "minLength": "Must be at least {{min}} characters",
+    "maxLength": "Must be at most {{max}} characters",
+    "email": "Enter a valid email address"
+  }
+}
