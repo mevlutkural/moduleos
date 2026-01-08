@@ -1,0 +1,21 @@
+{
+  "required": "{field} alanı zorunludur.",
+  "string": "{field} alanı metin tipinde olmalıdır.",
+  "notEmpty": "{field} alanı boş bırakılamaz.",
+  "email": "Geçerli bir e-posta adresi giriniz.",
+  "phoneNumber": "Geçerli bir telefon numarası giriniz.",
+  "number": "{field} alanı sayı tipinde olmalıdır.",
+  "int": "{field} alanı tam sayı olmalıdır.",
+  "integer": "{field} alanı tam sayı olmalıdır.",
+  "boolean": "{field} alanı mantıksal değer olmalıdır.",
+  "enum": "Geçerli bir {field} seçiniz.",
+  "date": "Geçerli bir tarih giriniz.",
+  "uuid": "Geçerli bir UUID giriniz.",
+  "min": "{field} alanı en az {min} olmalıdır.",
+  "max": "{field} alanı en çok {max} olmalıdır.",
+  "minLength": "{field} alanı en az {minLength} karakter olmalıdır.",
+  "maxLength": "{field} alanı en fazla {maxLength} karakter olmalıdır.",
+  "positive": "{field} alanı pozitif bir sayı olmalıdır.",
+  "ip": "Geçerli bir IP adresi giriniz.",
+  "timeFormat": "Geçerli bir zaman formatı giriniz."
+}

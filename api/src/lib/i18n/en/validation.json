@@ -1,0 +1,21 @@
+{
+  "required": "{field} is required.",
+  "string": "{field} must be a string.",
+  "notEmpty": "{field} cannot be empty.",
+  "email": "Please enter a valid email address.",
+  "phoneNumber": "Please enter a valid phone number.",
+  "number": "{field} must be a number.",
+  "int": "{field} must be an integer.",
+  "integer": "{field} must be an integer.",
+  "boolean": "{field} must be a boolean.",
+  "enum": "Please select a valid {field}.",
+  "date": "Please enter a valid date.",
+  "uuid": "Please enter a valid UUID.",
+  "min": "{field} must be at least {min}.",
+  "max": "{field} must be at most {max}.",
+  "minLength": "{field} must be at least {minLength} characters long.",
+  "maxLength": "{field} must be at most {maxLength} characters long.",
+  "positive": "{field} must be a positive number.",
+  "ip": "Please enter a valid IP address.",
+  "timeFormat": "Please enter a valid time format."
+}

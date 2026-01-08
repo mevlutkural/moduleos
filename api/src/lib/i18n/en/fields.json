@@ -1,0 +1,14 @@
+{
+  "general": {
+    "page": "Page",
+    "limit": "Limit",
+    "orderBy": "Order By",
+    "search": "Search",
+    "startDate": "Start Date",
+    "endDate": "End Date",
+    "sort": {
+      "field": "Field",
+      "order": "Order"
+    }
+  }
+}
