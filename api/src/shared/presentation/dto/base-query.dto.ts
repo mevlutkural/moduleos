@@ -2,14 +2,14 @@ import { IsOptional, IsString, ValidateNested } from 'class-validator';
 import { PaginationQueryDto } from './pagination-query.dto';
 import { SortByDto } from './sort-by.dto';
 import { Type } from 'class-transformer';
-import { VALIDATION_MESSAGES } from '../../constants/validation-messages';
-import { FIELDS } from '../../constants/fields';
+import { ValidationMessages } from '../../constants/validation-messages';
+import { Fields } from '../../constants/fields';
 
 export class BaseQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsString({
-    message: VALIDATION_MESSAGES.STRING,
-    context: { field: FIELDS.GENERAL.SEARCH },
+    message: ValidationMessages.String,
+    context: { field: Fields.General.Search },
   })
   search?: string;
 

@@ -1,15 +1,15 @@
 import { IsDateString, IsOptional } from 'class-validator';
 import { BaseQueryDto } from './base-query.dto';
-import { VALIDATION_MESSAGES } from '../../constants/validation-messages';
-import { FIELDS } from '../../constants/fields';
+import { ValidationMessages } from '../../constants/validation-messages';
+import { Fields } from '../../constants/fields';
 
 export class TimeRangedQueryDto extends BaseQueryDto {
   @IsOptional()
   @IsDateString(
     {},
     {
-      message: VALIDATION_MESSAGES.DATE,
-      context: { field: FIELDS.GENERAL.START_DATE },
+      message: ValidationMessages.Date,
+      context: { field: Fields.General.StartDate },
     },
   )
   startDate?: Date;
@@ -18,8 +18,8 @@ export class TimeRangedQueryDto extends BaseQueryDto {
   @IsDateString(
     {},
     {
-      message: VALIDATION_MESSAGES.DATE,
-      context: { field: FIELDS.GENERAL.END_DATE },
+      message: ValidationMessages.Date,
+      context: { field: Fields.General.EndDate },
     },
   )
   endDate?: Date;

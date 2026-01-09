@@ -1,22 +1,22 @@
-export const FIELDS = {
-  GENERAL: {
-    PAGE: 'fields.general.page',
-    LIMIT: 'fields.general.limit',
-    ORDER_BY: 'fields.general.orderBy',
-    SEARCH: 'fields.general.search',
-    START_DATE: 'fields.general.startDate',
-    END_DATE: 'fields.general.endDate',
-    SORT: {
-      FIELD: 'fields.general.sort.field',
-      ORDER: 'fields.general.sort.order',
+export const Fields = {
+  General: {
+    Page: 'fields.general.page',
+    Limit: 'fields.general.limit',
+    OrderBy: 'fields.general.orderBy',
+    Search: 'fields.general.search',
+    StartDate: 'fields.general.startDate',
+    EndDate: 'fields.general.endDate',
+    Sort: {
+      Field: 'fields.general.sort.field',
+      Order: 'fields.general.sort.order',
     },
   },
-  PROJECT: {
-    NAME: 'fields.project.name',
-    DESCRIPTION: 'fields.project.description',
+  Project: {
+    Name: 'fields.project.name',
+    Description: 'fields.project.description',
   },
-  APPS: {
-    PROJECT_ID: 'fields.apps.projectId',
-    NAME: 'fields.apps.name',
+  Apps: {
+    ProjectId: 'fields.apps.projectId',
+    Name: 'fields.apps.name',
   },
 };
