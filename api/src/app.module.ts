@@ -14,6 +14,7 @@ import {
 } from './shared/infrastructure/config/throttler.config';
 import { AcceptLanguageResolver, I18nModule } from 'nestjs-i18n';
 import { i18nConfig } from './shared/infrastructure/config/i18n.config';
+import { ProjectModule } from './modules/project/project.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { i18nConfig } from './shared/infrastructure/config/i18n.config';
       imports: [ConfigModule.forFeature(throttlerConfig)],
       useClass: ThrottlerConfigService,
     }),
+    ProjectModule,
   ],
   controllers: [AppController],
   providers: [

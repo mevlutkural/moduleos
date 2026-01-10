@@ -8,13 +8,13 @@ export interface PaginationMeta {
 }
 
 export interface PaginatedResult<T> {
-  data: T[];
+  records: T[];
   meta: PaginationMeta;
 }
 
 export class PaginatedResultBuilder {
   static create<T>(
-    data: T[],
+    records: T[],
     totalRecords: number,
     currentPage: number,
     pageSize: number,
@@ -24,7 +24,7 @@ export class PaginatedResultBuilder {
     const hasPreviousPage = currentPage > 1;
 
     return {
-      data,
+      records,
       meta: {
         totalRecords,
         totalPages,
