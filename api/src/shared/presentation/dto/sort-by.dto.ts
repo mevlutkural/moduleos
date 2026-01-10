@@ -1,25 +1,25 @@
 import { IsIn, IsNotEmpty, IsString } from 'class-validator';
-import { VALIDATION_MESSAGES } from '../../constants/validation-messages';
-import { FIELDS } from '../../constants/fields';
+import { ValidationMessages } from '../../constants/validation-messages';
+import { Fields } from '../../constants/fields';
 
 export class SortByDto {
   @IsNotEmpty({
-    message: VALIDATION_MESSAGES.REQUIRED,
-    context: { field: FIELDS.GENERAL.SORT.FIELD },
+    message: ValidationMessages.Required,
+    context: { field: Fields.General.Sort.Field },
   })
   @IsString({
-    message: VALIDATION_MESSAGES.STRING,
-    context: { field: FIELDS.GENERAL.SORT.FIELD },
+    message: ValidationMessages.String,
+    context: { field: Fields.General.Sort.Field },
   })
   field: string;
 
   @IsNotEmpty({
-    message: VALIDATION_MESSAGES.REQUIRED,
-    context: { field: FIELDS.GENERAL.SORT.ORDER },
+    message: ValidationMessages.Required,
+    context: { field: Fields.General.Sort.Order },
   })
   @IsIn(['ASC', 'DESC'], {
-    message: VALIDATION_MESSAGES.ENUM,
-    context: { field: FIELDS.GENERAL.SORT.ORDER, values: ['ASC', 'DESC'] },
+    message: ValidationMessages.Enum,
+    context: { field: Fields.General.Sort.Order, values: ['ASC', 'DESC'] },
   })
   order: 'ASC' | 'DESC';
 }
