@@ -11,10 +11,10 @@ import {
 export class Project extends AggregateRoot<ProjectId> {
   private constructor(
     id: ProjectId,
-    public name: ProjectName,
-    public description: ProjectDescription,
-    public createdAt: Date,
-    public updatedAt: Date,
+    private name: ProjectName,
+    private description: ProjectDescription,
+    private readonly createdAt: Date,
+    private updatedAt: Date,
   ) {
     super(id);
   }
@@ -58,9 +58,33 @@ export class Project extends AggregateRoot<ProjectId> {
     );
   }
 
+  getName(): ProjectName {
+    return this.name;
+  }
+
+  getDescription(): ProjectDescription {
+    return this.description;
+  }
+
+  getCreatedAt(): Date {
+    return this.createdAt;
+  }
+
+  getUpdatedAt(): Date {
+    return this.updatedAt;
+  }
+
   update(name: string, description?: string | null): void {
-    this.name = ProjectName.create(name);
-    this.description = ProjectDescription.create(description ?? null);
+    const newName = ProjectName.create(name);
+    const newDescription = ProjectDescription.create(description ?? null);
+
+    const hasNameChanged = !this.name.equals(newName);
+    const hasDescriptionChanged = !this.description.equals(newDescription);
+
+    if (!hasNameChanged && !hasDescriptionChanged) return;
+
+    this.name = newName;
+    this.description = newDescription;
     this.updatedAt = new Date();
 
     this.addDomainEvent(

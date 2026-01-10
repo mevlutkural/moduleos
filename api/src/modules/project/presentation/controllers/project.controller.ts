@@ -19,26 +19,21 @@ import { GetProjectsQuery } from '../../application/queries/get-projects.query';
 import { ProjectListProjection } from '../../application/queries/projections/project-list.projection';
 import { ProjectDetailProjection } from '../../application/queries/projections/project-detail.projection';
 import { CreateProjectDto, UpdateProjectDto, ProjectResponseDto } from '../dto';
-import { ProjectMapper } from '../mappers/project.mapper';
-
-import type { Project } from '../../domain';
 
 @Controller('projects')
 export class ProjectController {
   constructor(
     private readonly commandBus: CommandBus,
     private readonly queryBus: QueryBus,
-    private readonly mapper: ProjectMapper,
   ) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
   async create(@Body() dto: CreateProjectDto): Promise<ProjectResponseDto> {
     const command = new CreateProjectCommand(dto.name, dto.description);
-    const result = await this.commandBus.execute<CreateProjectCommand, Project>(
+    return this.commandBus.execute<CreateProjectCommand, ProjectResponseDto>(
       command,
     );
-    return this.mapper.toResponse(result);
   }
 
   @Get()
@@ -63,10 +58,9 @@ export class ProjectController {
     @Body() dto: UpdateProjectDto,
   ): Promise<ProjectResponseDto> {
     const command = new UpdateProjectCommand(id, dto.name, dto.description);
-    const result = await this.commandBus.execute<UpdateProjectCommand, Project>(
+    return this.commandBus.execute<UpdateProjectCommand, ProjectResponseDto>(
       command,
     );
-    return this.mapper.toResponse(result);
   }
 
   @Delete(':id')

@@ -1,3 +1,3 @@
 export * from './dto';
-export * from './mappers/project.mapper';
+export * from '../application/mappers/project-response.mapper';
 export * from './controllers/project.controller';

@@ -1,4 +1,4 @@
-import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler, EventBus } from '@nestjs/cqrs';
 import { Inject } from '@nestjs/common';
 import {
   ProjectId,
@@ -13,14 +13,19 @@ export class DeleteProjectHandler implements ICommandHandler<DeleteProjectComman
   constructor(
     @Inject(PROJECT_REPOSITORY)
     private readonly projectRepository: ProjectRepository,
+    private readonly eventBus: EventBus,
   ) {}
 
   async execute(command: DeleteProjectCommand): Promise<void> {
     const projectId = ProjectId.fromString(command.id);
-    const exists = await this.projectRepository.exists(projectId);
+    const project = await this.projectRepository.findById(projectId);
 
-    if (!exists) throw new ProjectNotFoundException(command.id);
+    if (!project) throw new ProjectNotFoundException(command.id);
 
-    await this.projectRepository.delete(projectId);
+    project.delete();
+
+    await this.projectRepository.delete(project.getId());
+
+    this.eventBus.publishAll(project.pullDomainEvents());
   }
 }

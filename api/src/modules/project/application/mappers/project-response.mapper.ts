@@ -1,17 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { Project } from '../../domain';
-import { ProjectResponseDto } from '../dto';
+import { ProjectResponseDto } from '../../presentation/dto';
+import { DtoTransformer } from '@/shared/presentation';
 
 @Injectable()
-export class ProjectMapper {
+export class ProjectResponseMapper {
   toResponse(project: Project): ProjectResponseDto {
-    return {
-      id: project.getId().getValue(),
-      name: project.name.value,
-      description: project.description.value,
-      createdAt: project.createdAt,
-      updatedAt: project.updatedAt,
-    };
+    return DtoTransformer.toDto(ProjectResponseDto, project);
   }
 
   toResponseList(projects: Project[]): ProjectResponseDto[] {
