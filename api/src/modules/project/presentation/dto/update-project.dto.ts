@@ -9,5 +9,5 @@ export class UpdateProjectDto {
   @IsString()
   @IsOptional()
   @MaxLength(2000)
-  description?: string | null;
+  description?: string;
 }

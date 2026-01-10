@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Project } from '../../domain';
-import { ProjectResponseDto } from '../../presentation/dto';
+import { ProjectResponseDto } from '../dto/project-response.dto';
 import { DtoTransformer } from '@/shared/presentation';
 
 @Injectable()

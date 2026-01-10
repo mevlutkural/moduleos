@@ -1,10 +1,9 @@
 import { SelectQueryBuilder, Brackets, ObjectLiteral } from 'typeorm';
 import { BadRequestException } from '@nestjs/common';
 import { I18nService } from 'nestjs-i18n';
-import { FindAllOptions } from '../../domain/specifications/find-all-options.model';
-import { TimeRangedFindAllOptions } from '../../domain/specifications/time-ranged-find-all-options.model';
+import { QueryParams, TimeRangedQueryParams } from '../../application/query';
 
-type QueryOptions = FindAllOptions | TimeRangedFindAllOptions;
+type QueryOptions = QueryParams | TimeRangedQueryParams;
 
 export class TypeOrmQueryApplicator<Entity extends ObjectLiteral> {
   constructor(
@@ -14,8 +13,8 @@ export class TypeOrmQueryApplicator<Entity extends ObjectLiteral> {
   ) {}
 
   applyPagination(): this {
-    const page = this.options.page || 1;
-    const limit = this.options.limit || 10;
+    const page = this.options.page;
+    const limit = this.options.limit;
 
     this.builder.skip((page - 1) * limit).take(limit);
 
@@ -49,22 +48,24 @@ export class TypeOrmQueryApplicator<Entity extends ObjectLiteral> {
   }
 
   applyDateRange(dateColumn: string = 'created_at'): this {
-    if (!(this.options instanceof TimeRangedFindAllOptions)) {
+    const timeRangedOptions = this.options as TimeRangedQueryParams;
+
+    if (!timeRangedOptions.startDate && !timeRangedOptions.endDate) {
       return this;
     }
 
-    if (this.options.startDate) {
+    if (timeRangedOptions.startDate) {
       this.builder.andWhere(
         `${this.builder.alias}.${dateColumn} >= :startDate`,
         {
-          startDate: this.options.startDate,
+          startDate: timeRangedOptions.startDate,
         },
       );
     }
 
-    if (this.options.endDate) {
+    if (timeRangedOptions.endDate) {
       this.builder.andWhere(`${this.builder.alias}.${dateColumn} <= :endDate`, {
-        endDate: this.options.endDate,
+        endDate: timeRangedOptions.endDate,
       });
     }
 

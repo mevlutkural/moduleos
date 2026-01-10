@@ -6,6 +6,7 @@ import {
   type ProjectQueryRepository,
   PROJECT_QUERY_REPOSITORY,
 } from './repositories/project-query.repository';
+import { PaginatedResult } from '@/shared/application/query';
 
 @QueryHandler(GetProjectsQuery)
 export class GetProjectsHandler implements IQueryHandler<GetProjectsQuery> {
@@ -14,7 +15,9 @@ export class GetProjectsHandler implements IQueryHandler<GetProjectsQuery> {
     private readonly queryRepository: ProjectQueryRepository,
   ) {}
 
-  async execute(): Promise<ProjectListProjection[]> {
-    return this.queryRepository.findAll();
+  async execute(
+    query: GetProjectsQuery,
+  ): Promise<PaginatedResult<ProjectListProjection>> {
+    return this.queryRepository.findAll(query.params);
   }
 }
