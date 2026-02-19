@@ -15,6 +15,9 @@ import { CommandBus, QueryBus } from '@nestjs/cqrs';
 import { CreateAppCommand } from '../../application/commands/create-app.command';
 import { UpdateAppConfigCommand } from '../../application/commands/update-app-config.command';
 import { DeleteAppCommand } from '../../application/commands/delete-app.command';
+import { StartAppCommand } from '../../application/commands/start-app.command';
+import { StopAppCommand } from '../../application/commands/stop-app.command';
+import { RestartAppCommand } from '../../application/commands/restart-app.command';
 import { GetAppQuery } from '../../application/queries/get-app.query';
 import { GetAppsQuery } from '../../application/queries/get-apps.query';
 import { AppListProjection } from '../../application/queries/projections/app-list.projection';
@@ -92,6 +95,7 @@ export class AppController {
       dto.memoryLimit,
       dto.cpuLimit,
       dto.envVars,
+      dto.image,
     );
     const result = await this.commandBus.execute<
       UpdateAppConfigCommand,
@@ -106,5 +110,34 @@ export class AppController {
   async remove(@Param('appId', ParseUUIDPipe) appId: string): Promise<void> {
     const command = new DeleteAppCommand(appId);
     await this.commandBus.execute<DeleteAppCommand>(command);
+  }
+
+  @Post(':appId/start')
+  async start(
+    @Param('appId', ParseUUIDPipe) appId: string,
+    @I18n() i18n: I18nContext,
+  ): Promise<ApiResponse<void>> {
+    await this.commandBus.execute<StartAppCommand>(new StartAppCommand(appId));
+    return ApiResponse.success(i18n.translate(Messages.App.Started), null);
+  }
+
+  @Post(':appId/stop')
+  async stop(
+    @Param('appId', ParseUUIDPipe) appId: string,
+    @I18n() i18n: I18nContext,
+  ): Promise<ApiResponse<void>> {
+    await this.commandBus.execute<StopAppCommand>(new StopAppCommand(appId));
+    return ApiResponse.success(i18n.translate(Messages.App.Stopped), null);
+  }
+
+  @Post(':appId/restart')
+  async restart(
+    @Param('appId', ParseUUIDPipe) appId: string,
+    @I18n() i18n: I18nContext,
+  ): Promise<ApiResponse<void>> {
+    await this.commandBus.execute<RestartAppCommand>(
+      new RestartAppCommand(appId),
+    );
+    return ApiResponse.success(i18n.translate(Messages.App.Restarted), null);
   }
 }

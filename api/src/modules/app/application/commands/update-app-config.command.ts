@@ -10,5 +10,6 @@ export class UpdateAppConfigCommand implements ICommand {
     public readonly memoryLimit?: string | null,
     public readonly cpuLimit?: string | null,
     public readonly envVars?: AppEnvVar[],
+    public readonly image?: string,
   ) {}
 }

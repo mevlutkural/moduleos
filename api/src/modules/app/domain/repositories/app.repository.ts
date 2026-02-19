@@ -6,4 +6,5 @@ export const APP_REPOSITORY = Symbol('APP_REPOSITORY');
 
 export interface AppRepository extends Repository<App, AppId> {
   findByProjectId(projectId: string): Promise<App[]>;
+  findByName(name: string, projectId: string): Promise<App | null>;
 }

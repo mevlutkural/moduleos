@@ -1,15 +1,16 @@
 import { ValueObject, InvalidValueException } from '@/shared/domain';
+import {
+  APP_NAME_PATTERN,
+  APP_NAME_MIN_LENGTH,
+  APP_NAME_MAX_LENGTH,
+  APP_NAME_VALIDATION_MESSAGE,
+} from '../constants/app-name.constants';
 
 interface AppNameProps {
   value: string;
 }
 
 export class AppName extends ValueObject<AppNameProps> {
-  private static readonly MIN_LENGTH = 1;
-  private static readonly MAX_LENGTH = 100;
-  private static readonly VALID_PATTERN =
-    /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
-
   private constructor(props: AppNameProps) {
     super(props);
   }
@@ -17,22 +18,19 @@ export class AppName extends ValueObject<AppNameProps> {
   static create(value: string): AppName {
     const trimmedValue = value?.trim().toLowerCase();
 
-    if (!trimmedValue || trimmedValue.length < AppName.MIN_LENGTH) {
+    if (!trimmedValue || trimmedValue.length < APP_NAME_MIN_LENGTH) {
       throw new InvalidValueException('AppName', 'Name cannot be empty');
     }
 
-    if (trimmedValue.length > AppName.MAX_LENGTH) {
+    if (trimmedValue.length > APP_NAME_MAX_LENGTH) {
       throw new InvalidValueException(
         'AppName',
-        `Name cannot exceed ${AppName.MAX_LENGTH} characters`,
+        `Name cannot exceed ${APP_NAME_MAX_LENGTH} characters`,
       );
     }
 
-    if (!AppName.VALID_PATTERN.test(trimmedValue)) {
-      throw new InvalidValueException(
-        'AppName',
-        'Name must contain only lowercase letters, numbers, and dashes. Cannot start or end with a dash.',
-      );
+    if (!APP_NAME_PATTERN.test(trimmedValue)) {
+      throw new InvalidValueException('AppName', APP_NAME_VALIDATION_MESSAGE);
     }
 
     return new AppName({ value: trimmedValue });

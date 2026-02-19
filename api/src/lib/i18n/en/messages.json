@@ -10,6 +10,9 @@
     "retrieved": "App retrieved successfully",
     "created": "App created successfully",
     "updated": "App updated successfully",
-    "deleted": "App deleted successfully"
+    "deleted": "App deleted successfully",
+    "started": "App started successfully",
+    "stopped": "App stopped successfully",
+    "restarted": "App restarted successfully"
   }
 }

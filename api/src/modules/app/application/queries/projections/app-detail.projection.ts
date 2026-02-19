@@ -10,6 +10,7 @@ export class AppDetailProjection {
     public readonly memoryLimit: string | null,
     public readonly cpuLimit: string | null,
     public readonly swarmServiceId: string | null,
+    public readonly image: string,
     public readonly envVars: { key: string; value: string }[],
     public readonly createdAt: Date,
     public readonly updatedAt: Date,

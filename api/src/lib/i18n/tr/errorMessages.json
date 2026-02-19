@@ -3,6 +3,7 @@
     "validationError": "Doğrulama hatası oluştu"
   },
   "app": {
-    "notFound": "Uygulama bulunamadı"
+    "notFound": "Uygulama bulunamadı",
+    "nameAlreadyExists": "Bu isimde bir uygulama projede zaten mevcut"
   }
 }

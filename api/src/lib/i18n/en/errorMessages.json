@@ -3,6 +3,7 @@
     "validationError": "Validation error occurred"
   },
   "app": {
-    "notFound": "App not found"
+    "notFound": "App not found",
+    "nameAlreadyExists": "An app with this name already exists in the project"
   }
 }

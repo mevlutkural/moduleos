@@ -12,5 +12,8 @@ export const Messages = {
     Created: 'messages.app.created',
     Updated: 'messages.app.updated',
     Deleted: 'messages.app.deleted',
+    Started: 'messages.app.started',
+    Stopped: 'messages.app.stopped',
+    Restarted: 'messages.app.restarted',
   },
 };

@@ -13,6 +13,7 @@ import {
   type ContainerOrchestrator,
   CONTAINER_ORCHESTRATOR,
 } from '../ports/container-orchestrator.port';
+import { buildServiceSpec } from '../mappers/service-spec.mapper';
 
 @CommandHandler(UpdateAppConfigCommand)
 export class UpdateAppConfigHandler implements ICommandHandler<UpdateAppConfigCommand> {
@@ -41,13 +42,22 @@ export class UpdateAppConfigHandler implements ICommandHandler<UpdateAppConfigCo
       cpuLimit: command.cpuLimit,
     });
 
+    if (command.image !== undefined) {
+      app.updateImage(command.image);
+    }
+
     if (command.envVars !== undefined) {
       app.updateEnvVars(command.envVars);
     }
 
     await this.appRepository.save(app);
 
-    await this.orchestrator.updateService(app, app.getProjectId());
+    if (app.getSwarmServiceId()) {
+      await this.orchestrator.updateService(
+        app.getSwarmServiceId()!,
+        buildServiceSpec(app),
+      );
+    }
 
     this.eventBus.publishAll(app.pullDomainEvents());
 

@@ -10,6 +10,9 @@
     "retrieved": "Uygulama başarıyla getirildi",
     "created": "Uygulama başarıyla oluşturuldu",
     "updated": "Uygulama başarıyla güncellendi",
-    "deleted": "Uygulama başarıyla silindi"
+    "deleted": "Uygulama başarıyla silindi",
+    "started": "Uygulama başarıyla başlatıldı",
+    "stopped": "Uygulama başarıyla durduruldu",
+    "restarted": "Uygulama başarıyla yeniden başlatıldı"
   }
 }

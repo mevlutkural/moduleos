@@ -73,6 +73,7 @@ export class TypeOrmAppQueryRepository implements AppQueryRepository {
       entity.memoryLimit,
       entity.cpuLimit,
       entity.swarmServiceId,
+      entity.image,
       (entity.envVars ?? []).map((ev) => ({ key: ev.key, value: ev.value })),
       entity.createdAt,
       entity.updatedAt,

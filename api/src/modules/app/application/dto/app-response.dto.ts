@@ -32,6 +32,9 @@ export class AppResponseDto {
   swarmServiceId: string | null;
 
   @Expose()
+  image: string;
+
+  @Expose()
   createdAt: Date;
 
   @Expose()

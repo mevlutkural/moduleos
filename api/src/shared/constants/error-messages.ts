@@ -4,5 +4,6 @@ export const ErrorMessages = {
   },
   App: {
     NotFound: 'errorMessages.app.notFound',
+    NameAlreadyExists: 'errorMessages.app.nameAlreadyExists',
   },
 };

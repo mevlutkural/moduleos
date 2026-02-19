@@ -15,6 +15,7 @@ export class AppPersistenceMapper {
       memoryLimit: entity.memoryLimit,
       cpuLimit: entity.cpuLimit,
       swarmServiceId: entity.swarmServiceId,
+      image: entity.image,
       envVars: (entity.envVars ?? []).map((ev) => ({
         key: ev.key,
         value: ev.value,
@@ -36,6 +37,7 @@ export class AppPersistenceMapper {
     entity.memoryLimit = domain.getMemoryLimit();
     entity.cpuLimit = domain.getCpuLimit();
     entity.swarmServiceId = domain.getSwarmServiceId();
+    entity.image = domain.getImage();
     entity.createdAt = domain.getCreatedAt();
     entity.updatedAt = domain.getUpdatedAt();
 

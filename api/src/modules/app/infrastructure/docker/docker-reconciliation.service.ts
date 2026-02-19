@@ -1,11 +1,16 @@
 import { Injectable, Inject, Logger } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import Docker from 'dockerode';
+import { EventBus } from '@nestjs/cqrs';
 import { DOCKER_CLIENT } from '@/shared/infrastructure/docker/docker-client.provider';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Not, In } from 'typeorm';
-import { AppOrmEntity } from '../persistence/entities/app.orm-entity';
-import { AppStatusEnum } from '../../domain/value-objects/app-status.value-object';
+import {
+  type AppRepository,
+  APP_REPOSITORY,
+  App,
+  AppId,
+  AppStatusEnum,
+} from '../../domain';
+import { determineAppStatus } from './docker-status.util';
 
 @Injectable()
 export class DockerReconciliationService {
@@ -14,26 +19,21 @@ export class DockerReconciliationService {
   constructor(
     @Inject(DOCKER_CLIENT)
     private readonly docker: Docker,
-    @InjectRepository(AppOrmEntity)
-    private readonly appRepository: Repository<AppOrmEntity>,
+    @Inject(APP_REPOSITORY)
+    private readonly appRepository: AppRepository,
+    private readonly eventBus: EventBus,
   ) {}
 
   @Interval(30000)
   async reconcile(): Promise<void> {
     try {
-      const apps = await this.appRepository.find({
-        where: {
-          swarmServiceId: Not(''),
-          status: Not(In([AppStatusEnum.STOPPED])),
-        },
-      });
+      const apps = await this.getActiveApps();
 
       if (apps.length === 0) return;
 
       this.logger.debug(`Reconciling ${apps.length} app(s) with Docker Swarm`);
 
       for (const app of apps) {
-        if (!app.swarmServiceId) continue;
         await this.reconcileApp(app);
       }
     } catch (error: unknown) {
@@ -42,57 +42,71 @@ export class DockerReconciliationService {
     }
   }
 
-  private async reconcileApp(app: AppOrmEntity): Promise<void> {
+  private async getActiveApps(): Promise<App[]> {
     try {
-      const service = this.docker.getService(app.swarmServiceId!);
-      const inspectData = await service.inspect();
-
-      const tasks: any[] = await this.docker.listTasks({
-        filters: { service: [inspectData.Spec.Name] },
+      const managedServices: Array<{
+        Spec?: { Labels?: Record<string, string> };
+      }> = await this.docker.listServices({
+        filters: { label: ['moduleos.managed=true'] },
       });
 
-      const runningTasks = tasks.filter(
-        (t) => t.Status?.State === 'running',
-      ).length;
-      const desiredReplicas = inspectData.Spec.Mode?.Replicated?.Replicas ?? 0;
+      const apps: App[] = [];
+      for (const svc of managedServices) {
+        const appIdStr = svc.Spec?.Labels?.['moduleos.app.id'];
+        if (!appIdStr) continue;
 
-      let expectedStatus: AppStatusEnum;
-      if (runningTasks === desiredReplicas && desiredReplicas > 0) {
-        expectedStatus = AppStatusEnum.RUNNING;
-      } else if (runningTasks > 0) {
-        expectedStatus = AppStatusEnum.DEPLOYING;
-      } else {
-        const failedTasks = tasks.filter(
-          (t) => t.Status?.State === 'failed' || t.Status?.State === 'rejected',
+        const app = await this.appRepository.findById(
+          AppId.fromString(appIdStr),
         );
-        expectedStatus =
-          failedTasks.length > 0 ? AppStatusEnum.FAILED : AppStatusEnum.CREATED;
+        if (app?.getSwarmServiceId()) {
+          apps.push(app);
+        }
       }
 
-      const currentStatus = app.status as AppStatusEnum;
+      return apps;
+    } catch {
+      return [];
+    }
+  }
+
+  private async reconcileApp(app: App): Promise<void> {
+    try {
+      const serviceId = app.getSwarmServiceId()!;
+      const service = this.docker.getService(serviceId);
+      const inspectData = await service.inspect();
+
+      const tasks: Array<{ Status?: { State?: string } }> =
+        await this.docker.listTasks({
+          filters: { service: [inspectData.Spec.Name] },
+        });
+
+      const desiredReplicas: number =
+        inspectData.Spec.Mode?.Replicated?.Replicas ?? 0;
+      const expectedStatus = determineAppStatus(tasks, desiredReplicas);
+      const currentStatus = app.getStatus().value;
 
       if (expectedStatus !== currentStatus) {
         this.logger.log(
-          `Drift detected for app ${app.id}: DB=${currentStatus}, Swarm=${expectedStatus}`,
+          `Drift detected for app ${app.getId().getValue()}: DB=${currentStatus}, Swarm=${expectedStatus}`,
         );
-        await this.appRepository.update(
-          { id: app.id },
-          { status: expectedStatus },
-        );
+        app.updateStatus(expectedStatus);
+        await this.appRepository.save(app);
+        this.eventBus.publishAll(app.pullDomainEvents());
       }
     } catch (error: unknown) {
       const statusCode = (error as { statusCode?: number }).statusCode;
       if (statusCode === 404) {
         this.logger.warn(
-          `Service ${app.swarmServiceId} not found in Swarm, marking app ${app.id} as stopped`,
+          `Service ${app.getSwarmServiceId()} not found in Swarm, marking app ${app.getId().getValue()} as stopped`,
         );
-        await this.appRepository.update(
-          { id: app.id },
-          { status: AppStatusEnum.STOPPED, swarmServiceId: null as any },
-        );
+        app.updateStatus(AppStatusEnum.STOPPED);
+        await this.appRepository.save(app);
+        this.eventBus.publishAll(app.pullDomainEvents());
       } else {
         const message = error instanceof Error ? error.message : String(error);
-        this.logger.error(`Failed to reconcile app ${app.id}: ${message}`);
+        this.logger.error(
+          `Failed to reconcile app ${app.getId().getValue()}: ${message}`,
+        );
       }
     }
   }

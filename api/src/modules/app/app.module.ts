@@ -13,17 +13,24 @@ import { CONTAINER_ORCHESTRATOR } from './application/ports/container-orchestrat
 import { CreateAppHandler } from './application/commands/create-app.handler';
 import { UpdateAppConfigHandler } from './application/commands/update-app-config.handler';
 import { DeleteAppHandler } from './application/commands/delete-app.handler';
+import { StartAppHandler } from './application/commands/start-app.handler';
+import { StopAppHandler } from './application/commands/stop-app.handler';
+import { RestartAppHandler } from './application/commands/restart-app.handler';
 import { GetAppHandler } from './application/queries/get-app.handler';
 import { GetAppsHandler } from './application/queries/get-apps.handler';
 import { AppResponseMapper } from './application/mappers/app-response.mapper';
 import { DockerSwarmService } from './infrastructure/docker/docker-swarm.service';
 import { DockerEventListenerService } from './infrastructure/docker/docker-event-listener.service';
 import { DockerReconciliationService } from './infrastructure/docker/docker-reconciliation.service';
+import { ProjectModule } from '../project/project.module';
 
 const CommandHandlers = [
   CreateAppHandler,
   UpdateAppConfigHandler,
   DeleteAppHandler,
+  StartAppHandler,
+  StopAppHandler,
+  RestartAppHandler,
 ];
 
 const QueryHandlers = [GetAppHandler, GetAppsHandler];
@@ -39,6 +46,7 @@ const DockerServices = [
     TypeOrmModule.forFeature([AppOrmEntity, AppEnvVarOrmEntity]),
     CqrsModule,
     ScheduleModule.forRoot(),
+    ProjectModule,
   ],
   controllers: [AppController],
   providers: [

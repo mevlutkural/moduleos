@@ -4,14 +4,13 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
-  ManyToOne,
   OneToMany,
-  JoinColumn,
+  Unique,
 } from 'typeorm';
-import { ProjectOrmEntity } from '@/modules/project/infrastructure/persistence/entities/project.orm-entity';
 import { AppEnvVarOrmEntity } from './app-env-var.orm-entity';
 
 @Entity('apps')
+@Unique(['projectId', 'name'])
 export class AppOrmEntity {
   @PrimaryColumn('uuid')
   id: string;
@@ -21,10 +20,6 @@ export class AppOrmEntity {
 
   @Column({ name: 'project_id', type: 'uuid' })
   projectId: string;
-
-  @ManyToOne(() => ProjectOrmEntity, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'project_id' })
-  project: ProjectOrmEntity;
 
   @Column({ type: 'varchar', length: 20, default: 'created' })
   status: string;
@@ -56,6 +51,13 @@ export class AppOrmEntity {
     nullable: true,
   })
   swarmServiceId: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: 255,
+    default: 'nginx:alpine',
+  })
+  image: string;
 
   @OneToMany(() => AppEnvVarOrmEntity, (envVar) => envVar.app, {
     cascade: true,

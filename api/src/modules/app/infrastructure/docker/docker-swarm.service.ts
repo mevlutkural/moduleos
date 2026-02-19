@@ -1,11 +1,12 @@
 import { Injectable, Inject, Logger } from '@nestjs/common';
 import Docker from 'dockerode';
 import { DOCKER_CLIENT } from '@/shared/infrastructure/docker/docker-client.provider';
-import { App } from '../../domain';
 import {
   type ContainerOrchestrator,
+  type ServiceSpec,
   type ServiceInfo,
 } from '../../application/ports/container-orchestrator.port';
+import { determineAppStatus } from './docker-status.util';
 
 @Injectable()
 export class DockerSwarmService implements ContainerOrchestrator {
@@ -16,50 +17,50 @@ export class DockerSwarmService implements ContainerOrchestrator {
     private readonly docker: Docker,
   ) {}
 
-  async createService(app: App, projectId: string): Promise<string> {
-    const serviceName = this.buildServiceName(projectId, app.getName().value);
+  async createService(spec: ServiceSpec): Promise<string> {
+    const serviceName = this.buildServiceName(spec.projectId, spec.name);
 
     this.logger.log(`Creating Swarm service: ${serviceName}`);
 
-    const envVars = app.getEnvVars().map((ev) => `${ev.key}=${ev.value}`);
+    const envVars = spec.envVars.map((ev) => `${ev.key}=${ev.value}`);
 
     const service = await this.docker.createService({
       Name: serviceName,
       Labels: {
-        'moduleos.app.id': app.getId().getValue(),
-        'moduleos.project.id': projectId,
+        'moduleos.app.id': spec.appId,
+        'moduleos.project.id': spec.projectId,
         'moduleos.managed': 'true',
       },
       TaskTemplate: {
         ContainerSpec: {
-          Image: 'nginx:alpine',
+          Image: spec.image,
           Env: envVars,
         },
         Resources: {
           Limits: {
-            ...(app.getMemoryLimit()
-              ? { MemoryBytes: this.parseMemoryLimit(app.getMemoryLimit()!) }
+            ...(spec.memoryLimit
+              ? { MemoryBytes: this.parseMemoryLimit(spec.memoryLimit) }
               : {}),
-            ...(app.getCpuLimit()
-              ? { NanoCPUs: this.parseCpuLimit(app.getCpuLimit()!) }
+            ...(spec.cpuLimit
+              ? { NanoCPUs: this.parseCpuLimit(spec.cpuLimit) }
               : {}),
           },
         },
         RestartPolicy: {
-          Condition: app.getRestartPolicy(),
+          Condition: spec.restartPolicy,
           MaxAttempts: 3,
         },
       },
       Mode: {
         Replicated: {
-          Replicas: app.getReplicas(),
+          Replicas: spec.replicas,
         },
       },
       EndpointSpec: {
         Ports: [
           {
             Protocol: 'tcp',
-            TargetPort: app.getContainerPort(),
+            TargetPort: spec.containerPort,
             PublishMode: 'ingress',
           },
         ],
@@ -72,24 +73,16 @@ export class DockerSwarmService implements ContainerOrchestrator {
     return serviceId;
   }
 
-  async updateService(app: App, projectId: string): Promise<void> {
-    const serviceId = app.getSwarmServiceId();
-    if (!serviceId) {
-      this.logger.warn(
-        `App ${app.getId().getValue()} has no Swarm service ID, skipping update`,
-      );
-      return;
-    }
-
+  async updateService(serviceId: string, spec: ServiceSpec): Promise<void> {
     this.logger.log(
-      `Updating Swarm service: ${serviceId} (project: ${projectId})`,
+      `Updating Swarm service: ${serviceId} (project: ${spec.projectId})`,
     );
 
     const service = this.docker.getService(serviceId);
     const inspectData = await service.inspect();
     const version = inspectData.Version.Index;
 
-    const envVars = app.getEnvVars().map((ev) => `${ev.key}=${ev.value}`);
+    const envVars = spec.envVars.map((ev) => `${ev.key}=${ev.value}`);
 
     await service.update({
       version,
@@ -97,34 +90,34 @@ export class DockerSwarmService implements ContainerOrchestrator {
       Labels: inspectData.Spec.Labels,
       TaskTemplate: {
         ContainerSpec: {
-          Image: inspectData.Spec.TaskTemplate.ContainerSpec.Image,
+          Image: spec.image,
           Env: envVars,
         },
         Resources: {
           Limits: {
-            ...(app.getMemoryLimit()
-              ? { MemoryBytes: this.parseMemoryLimit(app.getMemoryLimit()!) }
+            ...(spec.memoryLimit
+              ? { MemoryBytes: this.parseMemoryLimit(spec.memoryLimit) }
               : {}),
-            ...(app.getCpuLimit()
-              ? { NanoCPUs: this.parseCpuLimit(app.getCpuLimit()!) }
+            ...(spec.cpuLimit
+              ? { NanoCPUs: this.parseCpuLimit(spec.cpuLimit) }
               : {}),
           },
         },
         RestartPolicy: {
-          Condition: app.getRestartPolicy(),
+          Condition: spec.restartPolicy,
           MaxAttempts: 3,
         },
       },
       Mode: {
         Replicated: {
-          Replicas: app.getReplicas(),
+          Replicas: spec.replicas,
         },
       },
       EndpointSpec: {
         Ports: [
           {
             Protocol: 'tcp',
-            TargetPort: app.getContainerPort(),
+            TargetPort: spec.containerPort,
             PublishMode: 'ingress',
           },
         ],
@@ -143,33 +136,63 @@ export class DockerSwarmService implements ContainerOrchestrator {
     this.logger.log(`Swarm service removed: ${swarmServiceId}`);
   }
 
+  async stopService(swarmServiceId: string): Promise<void> {
+    this.logger.log(`Stopping Swarm service (scaling to 0): ${swarmServiceId}`);
+
+    const service = this.docker.getService(swarmServiceId);
+    const inspectData = await service.inspect();
+    const version = inspectData.Version.Index;
+
+    await service.update({
+      version,
+      Name: inspectData.Spec.Name,
+      Labels: inspectData.Spec.Labels,
+      TaskTemplate: inspectData.Spec.TaskTemplate,
+      Mode: { Replicated: { Replicas: 0 } },
+      EndpointSpec: inspectData.Spec.EndpointSpec,
+    });
+
+    this.logger.log(`Swarm service stopped: ${swarmServiceId}`);
+  }
+
+  async startService(swarmServiceId: string, replicas: number): Promise<void> {
+    this.logger.log(
+      `Starting Swarm service (scaling to ${replicas}): ${swarmServiceId}`,
+    );
+
+    const service = this.docker.getService(swarmServiceId);
+    const inspectData = await service.inspect();
+    const version = inspectData.Version.Index;
+
+    await service.update({
+      version,
+      Name: inspectData.Spec.Name,
+      Labels: inspectData.Spec.Labels,
+      TaskTemplate: inspectData.Spec.TaskTemplate,
+      Mode: { Replicated: { Replicas: replicas } },
+      EndpointSpec: inspectData.Spec.EndpointSpec,
+    });
+
+    this.logger.log(`Swarm service started: ${swarmServiceId}`);
+  }
+
   async getServiceInfo(swarmServiceId: string): Promise<ServiceInfo | null> {
     try {
       const service = this.docker.getService(swarmServiceId);
       const inspectData = await service.inspect();
 
-      const tasks: any[] = await this.docker.listTasks({
-        filters: { service: [inspectData.Spec.Name] },
-      });
+      const tasks: Array<{ Status?: { State?: string } }> =
+        await this.docker.listTasks({
+          filters: { service: [inspectData.Spec.Name] },
+        });
+
+      const desiredReplicas: number =
+        inspectData.Spec.Mode?.Replicated?.Replicas ?? 0;
+      const status = determineAppStatus(tasks, desiredReplicas);
 
       const runningTasks = tasks.filter(
         (t) => t.Status?.State === 'running',
       ).length;
-      const desiredReplicas = inspectData.Spec.Mode?.Replicated?.Replicas ?? 0;
-
-      let status = 'created';
-      if (runningTasks === desiredReplicas && desiredReplicas > 0) {
-        status = 'running';
-      } else if (runningTasks > 0) {
-        status = 'deploying';
-      } else {
-        const failedTasks = tasks.filter(
-          (t) => t.Status?.State === 'failed' || t.Status?.State === 'rejected',
-        );
-        if (failedTasks.length > 0) {
-          status = 'failed';
-        }
-      }
 
       return {
         id: swarmServiceId,

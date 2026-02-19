@@ -6,11 +6,15 @@ import {
   OnModuleDestroy,
 } from '@nestjs/common';
 import Docker from 'dockerode';
+import { EventBus } from '@nestjs/cqrs';
 import { DOCKER_CLIENT } from '@/shared/infrastructure/docker/docker-client.provider';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { AppOrmEntity } from '../persistence/entities/app.orm-entity';
-import { AppStatusEnum } from '../../domain/value-objects/app-status.value-object';
+import {
+  type AppRepository,
+  APP_REPOSITORY,
+  AppId,
+  AppStatusEnum,
+} from '../../domain';
+import { determineAppStatus } from './docker-status.util';
 
 @Injectable()
 export class DockerEventListenerService
@@ -23,12 +27,13 @@ export class DockerEventListenerService
   constructor(
     @Inject(DOCKER_CLIENT)
     private readonly docker: Docker,
-    @InjectRepository(AppOrmEntity)
-    private readonly appRepository: Repository<AppOrmEntity>,
+    @Inject(APP_REPOSITORY)
+    private readonly appRepository: AppRepository,
+    private readonly eventBus: EventBus,
   ) {}
 
-  async onModuleInit(): Promise<void> {
-    await this.startListening();
+  onModuleInit(): void {
+    void this.startListening();
   }
 
   onModuleDestroy(): void {
@@ -52,8 +57,11 @@ export class DockerEventListenerService
 
       this.eventStream.on('data', (chunk: Buffer) => {
         try {
-          const event = JSON.parse(chunk.toString());
-          this.handleEvent(event);
+          const event = JSON.parse(chunk.toString()) as {
+            Action: string;
+            Actor: { Attributes: Record<string, string> };
+          };
+          void this.handleEvent(event);
         } catch {
           this.logger.warn('Failed to parse Docker event');
         }
@@ -62,24 +70,18 @@ export class DockerEventListenerService
       this.eventStream.on('error', (error: Error) => {
         this.logger.error(`Docker event stream error: ${error.message}`);
         this.isListening = false;
-        setTimeout(() => {
-          this.startListening();
-        }, 5000);
+        setTimeout(() => void this.startListening(), 5000);
       });
 
       this.eventStream.on('end', () => {
         this.logger.warn('Docker event stream ended, reconnecting...');
         this.isListening = false;
-        setTimeout(() => {
-          this.startListening();
-        }, 5000);
+        setTimeout(() => void this.startListening(), 5000);
       });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`Failed to start Docker event listener: ${message}`);
-      setTimeout(() => {
-        this.startListening();
-      }, 10000);
+      setTimeout(() => void this.startListening(), 10000);
     }
   }
 
@@ -113,64 +115,55 @@ export class DockerEventListenerService
     }
   }
 
-  private async syncAppStatus(appId: string): Promise<void> {
+  private async syncAppStatus(appIdStr: string): Promise<void> {
     try {
-      const app = await this.appRepository.findOne({ where: { id: appId } });
-      if (!app || !app.swarmServiceId) return;
+      const app = await this.appRepository.findById(AppId.fromString(appIdStr));
+      if (!app?.getSwarmServiceId()) return;
 
-      const service = this.docker.getService(app.swarmServiceId);
+      const service = this.docker.getService(app.getSwarmServiceId()!);
       const inspectData = await service.inspect();
 
-      const tasks: any[] = await this.docker.listTasks({
-        filters: { service: [inspectData.Spec.Name] },
-      });
+      const tasks: Array<{ Status?: { State?: string } }> =
+        await this.docker.listTasks({
+          filters: { service: [inspectData.Spec.Name] },
+        });
 
-      const runningTasks = tasks.filter(
-        (t) => t.Status?.State === 'running',
-      ).length;
-      const desiredReplicas = inspectData.Spec.Mode?.Replicated?.Replicas ?? 0;
+      const desiredReplicas: number =
+        inspectData.Spec.Mode?.Replicated?.Replicas ?? 0;
+      const newStatus = determineAppStatus(tasks, desiredReplicas);
 
-      let newStatus = app.status;
-      if (runningTasks === desiredReplicas && desiredReplicas > 0) {
-        newStatus = AppStatusEnum.RUNNING;
-      } else if (runningTasks > 0) {
-        newStatus = AppStatusEnum.DEPLOYING;
-      } else {
-        const failedTasks = tasks.filter(
-          (t) => t.Status?.State === 'failed' || t.Status?.State === 'rejected',
-        );
-        if (failedTasks.length > 0) {
-          newStatus = AppStatusEnum.FAILED;
-        }
-      }
-
-      if (newStatus !== app.status) {
+      if (newStatus !== app.getStatus().value) {
         this.logger.log(
-          `Updating app ${appId} status: ${app.status} → ${newStatus}`,
+          `Updating app ${appIdStr} status: ${app.getStatus().value} → ${newStatus}`,
         );
-        await this.appRepository.update({ id: appId }, { status: newStatus });
+        app.updateStatus(newStatus);
+        await this.appRepository.save(app);
+        this.eventBus.publishAll(app.pullDomainEvents());
       }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Failed to sync status for app ${appId}: ${message}`);
+      this.logger.error(
+        `Failed to sync status for app ${appIdStr}: ${message}`,
+      );
     }
   }
 
-  private async markAppAsRemoved(appId: string): Promise<void> {
+  private async markAppAsRemoved(appIdStr: string): Promise<void> {
     try {
-      const app = await this.appRepository.findOne({ where: { id: appId } });
+      const app = await this.appRepository.findById(AppId.fromString(appIdStr));
       if (!app) return;
 
       this.logger.log(
-        `Marking app ${appId} as stopped (service removed externally)`,
+        `Marking app ${appIdStr} as stopped (service removed externally)`,
       );
-      await this.appRepository.update(
-        { id: appId },
-        { status: AppStatusEnum.STOPPED, swarmServiceId: null as any },
-      );
+      app.updateStatus(AppStatusEnum.STOPPED);
+      await this.appRepository.save(app);
+      this.eventBus.publishAll(app.pullDomainEvents());
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Failed to mark app ${appId} as removed: ${message}`);
+      this.logger.error(
+        `Failed to mark app ${appIdStr} as removed: ${message}`,
+      );
     }
   }
 }

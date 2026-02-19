@@ -37,6 +37,7 @@ export class App extends AggregateRoot<AppId> {
     private memoryLimit: string | null,
     private cpuLimit: string | null,
     private swarmServiceId: string | null,
+    private image: string,
     private envVars: AppEnvVar[],
     private readonly createdAt: Date,
     private updatedAt: Date,
@@ -47,9 +48,11 @@ export class App extends AggregateRoot<AppId> {
   static create(name: string, projectId: string): App {
     const now = new Date();
     const id = AppId.create();
+    const appName = AppName.create(name);
+    const image = `moduleos/${appName.value}`;
     const app = new App(
       id,
-      AppName.create(name),
+      appName,
       projectId,
       AppStatus.created(),
       80, // default container port
@@ -58,6 +61,7 @@ export class App extends AggregateRoot<AppId> {
       null, // no memory limit
       null, // no cpu limit
       null, // no swarm service id yet
+      image,
       [], // no env vars
       now,
       now,
@@ -81,6 +85,7 @@ export class App extends AggregateRoot<AppId> {
     memoryLimit: string | null;
     cpuLimit: string | null;
     swarmServiceId: string | null;
+    image: string;
     envVars: AppEnvVar[];
     createdAt: Date;
     updatedAt: Date;
@@ -96,6 +101,7 @@ export class App extends AggregateRoot<AppId> {
       props.memoryLimit,
       props.cpuLimit,
       props.swarmServiceId,
+      props.image,
       props.envVars,
       props.createdAt,
       props.updatedAt,
@@ -136,6 +142,10 @@ export class App extends AggregateRoot<AppId> {
 
   getSwarmServiceId(): string | null {
     return this.swarmServiceId;
+  }
+
+  getImage(): string {
+    return this.image;
   }
 
   getEnvVars(): AppEnvVar[] {
@@ -205,6 +215,20 @@ export class App extends AggregateRoot<AppId> {
     );
   }
 
+  updateImage(image: string): void {
+    if (this.image === image) return;
+    this.image = image;
+    this.updatedAt = new Date();
+
+    this.addDomainEvent(
+      new AppConfigUpdatedEvent(
+        this.getId().getValue(),
+        ['image'],
+        this.updatedAt,
+      ),
+    );
+  }
+
   updateEnvVars(envVars: AppEnvVar[]): void {
     this.envVars = [...envVars];
     this.updatedAt = new Date();
@@ -229,6 +253,18 @@ export class App extends AggregateRoot<AppId> {
     this.addDomainEvent(
       new AppStatusChangedEvent(this.getId().getValue(), oldStatus, newStatus),
     );
+  }
+
+  start(): void {
+    this.updateStatus(AppStatusEnum.DEPLOYING);
+  }
+
+  stop(): void {
+    this.updateStatus(AppStatusEnum.STOPPED);
+  }
+
+  markFailed(): void {
+    this.updateStatus(AppStatusEnum.FAILED);
   }
 
   delete(): void {

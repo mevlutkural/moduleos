@@ -12,3 +12,4 @@ export { APP_REPOSITORY } from './repositories/app.repository';
 
 export * from './events';
 export * from './exceptions';
+export * from './constants/app-name.constants';
