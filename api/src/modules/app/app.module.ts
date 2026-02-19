@@ -9,6 +9,7 @@ import { TypeOrmAppRepository } from './infrastructure/persistence/repositories/
 import { TypeOrmAppQueryRepository } from './infrastructure/persistence/repositories/typeorm-app-query.repository';
 import { APP_REPOSITORY } from './domain/repositories/app.repository';
 import { APP_QUERY_REPOSITORY } from './application/queries/repositories/app-query.repository';
+import { CONTAINER_ORCHESTRATOR } from './application/ports/container-orchestrator.port';
 import { CreateAppHandler } from './application/commands/create-app.handler';
 import { UpdateAppConfigHandler } from './application/commands/update-app-config.handler';
 import { DeleteAppHandler } from './application/commands/delete-app.handler';
@@ -53,7 +54,11 @@ const DockerServices = [
       provide: APP_QUERY_REPOSITORY,
       useClass: TypeOrmAppQueryRepository,
     },
+    {
+      provide: CONTAINER_ORCHESTRATOR,
+      useClass: DockerSwarmService,
+    },
   ],
-  exports: [APP_REPOSITORY, DockerSwarmService],
+  exports: [APP_REPOSITORY, CONTAINER_ORCHESTRATOR],
 })
 export class AppFeatureModule {}

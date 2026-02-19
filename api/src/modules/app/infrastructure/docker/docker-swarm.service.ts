@@ -2,15 +2,13 @@ import { Injectable, Inject, Logger } from '@nestjs/common';
 import Docker from 'dockerode';
 import { DOCKER_CLIENT } from '@/shared/infrastructure/docker/docker-client.provider';
 import { App } from '../../domain';
-
-export interface SwarmServiceInfo {
-  id: string;
-  status: string;
-  replicas: { running: number; desired: number };
-}
+import {
+  type ContainerOrchestrator,
+  type ServiceInfo,
+} from '../../application/ports/container-orchestrator.port';
 
 @Injectable()
-export class DockerSwarmService {
+export class DockerSwarmService implements ContainerOrchestrator {
   private readonly logger = new Logger(DockerSwarmService.name);
 
   constructor(
@@ -74,7 +72,7 @@ export class DockerSwarmService {
     return serviceId;
   }
 
-  async updateService(app: App): Promise<void> {
+  async updateService(app: App, projectId: string): Promise<void> {
     const serviceId = app.getSwarmServiceId();
     if (!serviceId) {
       this.logger.warn(
@@ -83,7 +81,9 @@ export class DockerSwarmService {
       return;
     }
 
-    this.logger.log(`Updating Swarm service: ${serviceId}`);
+    this.logger.log(
+      `Updating Swarm service: ${serviceId} (project: ${projectId})`,
+    );
 
     const service = this.docker.getService(serviceId);
     const inspectData = await service.inspect();
@@ -143,9 +143,7 @@ export class DockerSwarmService {
     this.logger.log(`Swarm service removed: ${swarmServiceId}`);
   }
 
-  async getServiceInfo(
-    swarmServiceId: string,
-  ): Promise<SwarmServiceInfo | null> {
+  async getServiceInfo(swarmServiceId: string): Promise<ServiceInfo | null> {
     try {
       const service = this.docker.getService(swarmServiceId);
       const inspectData = await service.inspect();
@@ -202,7 +200,7 @@ export class DockerSwarmService {
   }
 
   private parseMemoryLimit(limit: string): number {
-    const match = limit.match(/^(\d+)(m|g)$/i);
+    const match = /^(\d+)([mg])$/i.exec(limit);
     if (!match) return 0;
 
     const value = Number.parseInt(match[1], 10);

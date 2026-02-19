@@ -7,7 +7,10 @@ import {
   AppNotFoundException,
 } from '../../domain';
 import { DeleteAppCommand } from './delete-app.command';
-import { DockerSwarmService } from '../../infrastructure/docker/docker-swarm.service';
+import {
+  type ContainerOrchestrator,
+  CONTAINER_ORCHESTRATOR,
+} from '../ports/container-orchestrator.port';
 
 @CommandHandler(DeleteAppCommand)
 export class DeleteAppHandler implements ICommandHandler<DeleteAppCommand> {
@@ -15,7 +18,8 @@ export class DeleteAppHandler implements ICommandHandler<DeleteAppCommand> {
     @Inject(APP_REPOSITORY)
     private readonly appRepository: AppRepository,
     private readonly eventBus: EventBus,
-    private readonly dockerSwarmService: DockerSwarmService,
+    @Inject(CONTAINER_ORCHESTRATOR)
+    private readonly orchestrator: ContainerOrchestrator,
   ) {}
 
   async execute(command: DeleteAppCommand): Promise<void> {
@@ -27,7 +31,7 @@ export class DeleteAppHandler implements ICommandHandler<DeleteAppCommand> {
     }
 
     if (app.getSwarmServiceId()) {
-      await this.dockerSwarmService.removeService(app.getSwarmServiceId()!);
+      await this.orchestrator.removeService(app.getSwarmServiceId()!);
     }
 
     app.delete();

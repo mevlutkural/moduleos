@@ -4,7 +4,10 @@ import { App, type AppRepository, APP_REPOSITORY } from '../../domain';
 import { CreateAppCommand } from './create-app.command';
 import { AppResponseMapper } from '../mappers/app-response.mapper';
 import { AppResponseDto } from '../dto/app-response.dto';
-import { DockerSwarmService } from '../../infrastructure/docker/docker-swarm.service';
+import {
+  type ContainerOrchestrator,
+  CONTAINER_ORCHESTRATOR,
+} from '../ports/container-orchestrator.port';
 
 @CommandHandler(CreateAppCommand)
 export class CreateAppHandler implements ICommandHandler<CreateAppCommand> {
@@ -13,7 +16,8 @@ export class CreateAppHandler implements ICommandHandler<CreateAppCommand> {
     private readonly appRepository: AppRepository,
     private readonly mapper: AppResponseMapper,
     private readonly eventBus: EventBus,
-    private readonly dockerSwarmService: DockerSwarmService,
+    @Inject(CONTAINER_ORCHESTRATOR)
+    private readonly orchestrator: ContainerOrchestrator,
   ) {}
 
   async execute(command: CreateAppCommand): Promise<AppResponseDto> {
@@ -21,7 +25,7 @@ export class CreateAppHandler implements ICommandHandler<CreateAppCommand> {
 
     await this.appRepository.save(app);
 
-    const swarmServiceId = await this.dockerSwarmService.createService(
+    const swarmServiceId = await this.orchestrator.createService(
       app,
       command.projectId,
     );

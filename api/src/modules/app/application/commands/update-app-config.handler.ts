@@ -9,7 +9,10 @@ import {
 import { UpdateAppConfigCommand } from './update-app-config.command';
 import { AppResponseMapper } from '../mappers/app-response.mapper';
 import { AppResponseDto } from '../dto/app-response.dto';
-import { DockerSwarmService } from '../../infrastructure/docker/docker-swarm.service';
+import {
+  type ContainerOrchestrator,
+  CONTAINER_ORCHESTRATOR,
+} from '../ports/container-orchestrator.port';
 
 @CommandHandler(UpdateAppConfigCommand)
 export class UpdateAppConfigHandler implements ICommandHandler<UpdateAppConfigCommand> {
@@ -18,7 +21,8 @@ export class UpdateAppConfigHandler implements ICommandHandler<UpdateAppConfigCo
     private readonly appRepository: AppRepository,
     private readonly mapper: AppResponseMapper,
     private readonly eventBus: EventBus,
-    private readonly dockerSwarmService: DockerSwarmService,
+    @Inject(CONTAINER_ORCHESTRATOR)
+    private readonly orchestrator: ContainerOrchestrator,
   ) {}
 
   async execute(command: UpdateAppConfigCommand): Promise<AppResponseDto> {
@@ -43,7 +47,7 @@ export class UpdateAppConfigHandler implements ICommandHandler<UpdateAppConfigCo
 
     await this.appRepository.save(app);
 
-    await this.dockerSwarmService.updateService(app);
+    await this.orchestrator.updateService(app, app.getProjectId());
 
     this.eventBus.publishAll(app.pullDomainEvents());
 
