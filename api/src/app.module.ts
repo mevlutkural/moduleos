@@ -20,6 +20,7 @@ import { DockerModule } from './shared/infrastructure/docker/docker.module';
 
 @Module({
   imports: [
+    ConfigModule.forRoot(),
     TypeOrmModule.forRootAsync(dbConfig.asProvider()),
     I18nModule.forRootAsync({
       ...i18nConfig.asProvider(),
