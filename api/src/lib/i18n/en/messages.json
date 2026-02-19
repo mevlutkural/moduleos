@@ -4,5 +4,12 @@
     "created": "Project created successfully",
     "updated": "Project updated successfully",
     "deleted": "Project deleted successfully"
+  },
+  "app": {
+    "listed": "Apps listed successfully",
+    "retrieved": "App retrieved successfully",
+    "created": "App created successfully",
+    "updated": "App updated successfully",
+    "deleted": "App deleted successfully"
   }
 }

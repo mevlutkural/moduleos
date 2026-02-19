@@ -1,5 +1,8 @@
 {
   "common": {
     "validationError": "Validation error occurred"
+  },
+  "app": {
+    "notFound": "App not found"
   }
 }

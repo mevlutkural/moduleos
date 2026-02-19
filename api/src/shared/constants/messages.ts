@@ -6,4 +6,11 @@ export const Messages = {
     Updated: 'messages.project.updated',
     Deleted: 'messages.project.deleted',
   },
+  App: {
+    Listed: 'messages.app.listed',
+    Retrieved: 'messages.app.retrieved',
+    Created: 'messages.app.created',
+    Updated: 'messages.app.updated',
+    Deleted: 'messages.app.deleted',
+  },
 };

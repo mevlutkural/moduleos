@@ -4,5 +4,12 @@
     "created": "Proje başarıyla oluşturuldu",
     "updated": "Proje başarıyla güncellendi",
     "deleted": "Proje başarıyla silindi"
+  },
+  "app": {
+    "listed": "Uygulamalar başarıyla listelendi",
+    "retrieved": "Uygulama başarıyla getirildi",
+    "created": "Uygulama başarıyla oluşturuldu",
+    "updated": "Uygulama başarıyla güncellendi",
+    "deleted": "Uygulama başarıyla silindi"
   }
 }

@@ -1,5 +1,8 @@
 {
   "common": {
     "validationError": "Doğrulama hatası oluştu"
+  },
+  "app": {
+    "notFound": "Uygulama bulunamadı"
   }
 }
