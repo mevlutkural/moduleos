@@ -1,0 +1,54 @@
+name: Feature proposal
+description: Propose a scoped capability or improvement for ModuleOS.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the problem and constraints. A proposed implementation is useful, but it should not replace the problem statement.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operator problem needs to be solved, and who experiences it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior and acceptance criteria without assuming a specific implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: direction
+    attributes:
+      label: Proposed direction
+      description: If you have an approach in mind, explain it and the alternatives considered.
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Architecture and operational impact
+      description: Consider public APIs, stored state, reconciliation, security, compatibility, deployment, and failure behavior.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add examples, prior art, diagrams, or related issues.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing issues and discussions for related work.
+          required: true
+        - label: I described the problem independently of my preferred solution.
+          required: true

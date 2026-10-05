@@ -1,0 +1,45 @@
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Temporary files and logs
+tmp/
+temp/
+*.log
+*.pid
+
+# Build and test output
+bin/
+dist/
+build/
+coverage/
+*.out
+
+# Go
+vendor/
+
+# JavaScript and web tooling
+node_modules/
+.next/
+.turbo/
+
+# Local data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
