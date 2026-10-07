@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/store"
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/swarm"
+	"github.com/mevlutkural/moduleos/apps/control-plane/internal/testkit/swarmfake"
 )
 
 type recordingQueue struct {
@@ -40,14 +41,14 @@ func (q *recordingQueue) reset() {
 	q.names = nil
 }
 
-func newEdgeService(t *testing.T) (*Service, *store.SQLiteStore, *swarm.MockClient, *recordingQueue) {
+func newEdgeService(t *testing.T) (*Service, *store.SQLiteStore, *swarmfake.Client, *recordingQueue) {
 	t.Helper()
 	st, err := store.NewSQLiteStore(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	mock := swarm.NewMockClient()
+	mock := swarmfake.New()
 	queue := &recordingQueue{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	service := NewService(st, mock, "moduleos.local", logger).WithReconcileQueue(queue)
@@ -150,7 +151,7 @@ func TestServiceConfigurationAndAccessors(t *testing.T) {
 	if service.maxReplicas != 3 || service.deploymentTimeout != 2*time.Second || service.IngressNetwork() != "custom-ingress" {
 		t.Fatal("non-positive or empty overrides changed existing limits")
 	}
-	serviceWithDefaultLogger := NewService(st, swarm.NewMockClient(), "moduleos.local", nil)
+	serviceWithDefaultLogger := NewService(st, swarmfake.New(), "moduleos.local", nil)
 	if serviceWithDefaultLogger.log == nil {
 		t.Fatal("nil logger was not replaced with a safe default")
 	}

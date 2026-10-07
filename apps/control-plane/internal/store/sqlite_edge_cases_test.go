@@ -93,8 +93,8 @@ func TestStoreHealthAndListPaths(t *testing.T) {
 	if err != nil || len(links) != 1 || links[0].ID != link.ID {
 		t.Fatalf("ListProjectLinksByProject = %#v, %v", links, err)
 	}
-	if err := st.MarkProjectLinksObserved(ctx, app.ID); err != nil {
-		t.Fatalf("MarkProjectLinksObserved: %v", err)
+	if err := st.MarkProjectLinkObserved(ctx, link.ID, link.DesiredGeneration); err != nil {
+		t.Fatalf("MarkProjectLinkObserved: %v", err)
 	}
 	observed, err := st.GetProjectLink(ctx, link.ID)
 	if err != nil {
@@ -103,8 +103,11 @@ func TestStoreHealthAndListPaths(t *testing.T) {
 	if observed.ObservedGeneration != observed.DesiredGeneration {
 		t.Fatalf("observed generation = %d, want %d", observed.ObservedGeneration, observed.DesiredGeneration)
 	}
-	if err := st.MarkProjectLinksObserved(ctx, "missing-app"); err != nil {
-		t.Fatalf("marking no matching links must be idempotent: %v", err)
+	if err := st.MarkProjectLinkObserved(ctx, link.ID, link.DesiredGeneration+1); !errors.Is(err, ErrStaleObservation) {
+		t.Fatalf("stale link observation error = %v", err)
+	}
+	if err := st.MarkProjectLinkObserved(ctx, "missing-link", 1); !errors.Is(err, ErrStaleObservation) {
+		t.Fatalf("missing link observation error = %v", err)
 	}
 }
 

@@ -378,6 +378,7 @@ func (c *DockerClient) WatchEvents(ctx context.Context) (<-chan SwarmEvent, <-ch
 
 	go func() {
 		defer close(out)
+		defer close(errCh)
 		for {
 			select {
 			case <-ctx.Done():

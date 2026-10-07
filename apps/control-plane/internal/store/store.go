@@ -20,7 +20,7 @@ type Store interface {
 	DeleteProjectLink(ctx context.Context, id string) error
 	ListProjectLinksByProject(ctx context.Context, projectID string) ([]*ProjectLink, error)
 	ListProjectLinksByApp(ctx context.Context, appID string) ([]*ProjectLink, error)
-	MarkProjectLinksObserved(ctx context.Context, appID string) error
+	MarkProjectLinkObserved(ctx context.Context, linkID string, generation int64) error
 
 	// Application
 	CreateApplication(ctx context.Context, app *Application) error

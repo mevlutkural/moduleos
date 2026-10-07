@@ -285,9 +285,23 @@ func (s *SQLiteStore) DeleteProjectLink(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *SQLiteStore) MarkProjectLinksObserved(ctx context.Context, appID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE project_links SET observed_generation = desired_generation WHERE target_app_id = ? AND deletion_timestamp IS NULL`, appID)
-	return err
+func (s *SQLiteStore) MarkProjectLinkObserved(ctx context.Context, linkID string, generation int64) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE project_links SET observed_generation = ?
+		WHERE id = ? AND desired_generation = ? AND deletion_timestamp IS NULL`,
+		generation, linkID, generation,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrStaleObservation
+	}
+	return nil
 }
 
 func (s *SQLiteStore) ListProjectLinksByProject(ctx context.Context, projectID string) ([]*ProjectLink, error) {

@@ -1,4 +1,4 @@
-package swarm
+package swarmfake
 
 import (
 	"bytes"
@@ -9,14 +9,15 @@ import (
 	"sync"
 
 	"github.com/containerd/errdefs"
+	"github.com/mevlutkural/moduleos/apps/control-plane/internal/swarm"
 )
 
-// MockClient is a fake Client implementation for use in tests.
-type MockClient struct {
+// Client is an in-memory swarm.Client for control-plane tests.
+type Client struct {
 	mu               sync.Mutex
-	Services         map[string]*ServiceInfo
-	Networks         map[string][]NetworkAttachment
-	NetworkResources map[string]*NetworkInfo
+	Services         map[string]*swarm.ServiceInfo
+	Networks         map[string][]swarm.NetworkAttachment
+	NetworkResources map[string]*swarm.NetworkInfo
 	AttachCalls      []NetworkMutationCall
 	DetachCalls      []NetworkMutationCall
 	CreateCalls      int
@@ -35,23 +36,23 @@ type MockClient struct {
 	HealthError        error
 }
 
-func (m *MockClient) Health(_ context.Context) error { return m.HealthError }
+func (m *Client) Health(_ context.Context) error { return m.HealthError }
 
 type NetworkMutationCall struct {
 	ServiceID  string
-	Attachment NetworkAttachment
+	Attachment swarm.NetworkAttachment
 	Network    string
 }
 
-func NewMockClient() *MockClient {
-	return &MockClient{
-		Services:         make(map[string]*ServiceInfo),
-		Networks:         make(map[string][]NetworkAttachment),
-		NetworkResources: make(map[string]*NetworkInfo),
+func New() *Client {
+	return &Client{
+		Services:         make(map[string]*swarm.ServiceInfo),
+		Networks:         make(map[string][]swarm.NetworkAttachment),
+		NetworkResources: make(map[string]*swarm.NetworkInfo),
 	}
 }
 
-func (m *MockClient) EnsureNetwork(_ context.Context, name string) error {
+func (m *Client) EnsureNetwork(_ context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.EnsureCalls++
@@ -59,33 +60,33 @@ func (m *MockClient) EnsureNetwork(_ context.Context, name string) error {
 		return m.EnsureNetworkError
 	}
 	if _, exists := m.NetworkResources[name]; !exists {
-		m.NetworkResources[name] = &NetworkInfo{ID: "mock-network-" + name, Name: name, Driver: "overlay", Attachable: true}
+		m.NetworkResources[name] = &swarm.NetworkInfo{ID: "mock-network-" + name, Name: name, Driver: "overlay", Attachable: true}
 	}
 	return nil
 }
 
-func (m *MockClient) EnsureProjectNetwork(ctx context.Context, name, projectID, projectSlug string) error {
+func (m *Client) EnsureProjectNetwork(ctx context.Context, name, projectID, projectSlug string) error {
 	if err := m.EnsureNetwork(ctx, name); err != nil {
 		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.NetworkResources[name].Labels = map[string]string{
-		LabelManagedBy: "true", LabelResourceKind: "project-network",
-		LabelProjectID: projectID, LabelProject: projectSlug, LabelSchema: SchemaVersion,
+		swarm.LabelManagedBy: "true", swarm.LabelResourceKind: "project-network",
+		swarm.LabelProjectID: projectID, swarm.LabelProject: projectSlug, swarm.LabelSchema: swarm.SchemaVersion,
 	}
 	return nil
 }
 
-func (m *MockClient) CreateService(_ context.Context, spec ServiceSpec) error {
+func (m *Client) CreateService(_ context.Context, spec swarm.ServiceSpec) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.CreateCalls++
 	if m.CreateError != nil {
 		return m.CreateError
 	}
-	name := ServiceName(spec.Name)
-	m.Services[name] = &ServiceInfo{
+	name := swarm.ServiceName(spec.Name)
+	m.Services[name] = &swarm.ServiceInfo{
 		ID:       "mock-id-" + spec.Name,
 		Name:     name,
 		Image:    spec.Image,
@@ -97,11 +98,11 @@ func (m *MockClient) CreateService(_ context.Context, spec ServiceSpec) error {
 	return nil
 }
 
-func (m *MockClient) EnsureNetworkWithOptions(_ context.Context, _ string) error {
+func (m *Client) EnsureNetworkWithOptions(_ context.Context, _ string) error {
 	return nil
 }
 
-func (m *MockClient) UpdateService(_ context.Context, serviceID string, spec ServiceSpec) error {
+func (m *Client) UpdateService(_ context.Context, serviceID string, spec swarm.ServiceSpec) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.UpdateCalls++
@@ -128,7 +129,7 @@ func (m *MockClient) UpdateService(_ context.Context, serviceID string, spec Ser
 	return nil
 }
 
-func (m *MockClient) RemoveService(_ context.Context, serviceID string) error {
+func (m *Client) RemoveService(_ context.Context, serviceID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.RemoveCalls++
@@ -152,7 +153,7 @@ func (m *MockClient) RemoveService(_ context.Context, serviceID string) error {
 	return nil
 }
 
-func (m *MockClient) GetService(_ context.Context, serviceID string) (*ServiceInfo, error) {
+func (m *Client) GetService(_ context.Context, serviceID string) (*swarm.ServiceInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	svc, ok := m.Services[serviceID]
@@ -171,17 +172,17 @@ func (m *MockClient) GetService(_ context.Context, serviceID string) (*ServiceIn
 	return &copy, nil
 }
 
-func (m *MockClient) ListServices(_ context.Context) ([]ServiceInfo, error) {
+func (m *Client) ListServices(_ context.Context) ([]swarm.ServiceInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]ServiceInfo, 0, len(m.Services))
+	result := make([]swarm.ServiceInfo, 0, len(m.Services))
 	for _, svc := range m.Services {
 		result = append(result, *svc)
 	}
 	return result, nil
 }
 
-func (m *MockClient) AttachServiceNetwork(ctx context.Context, serviceID string, attachment NetworkAttachment) error {
+func (m *Client) AttachServiceNetwork(ctx context.Context, serviceID string, attachment swarm.NetworkAttachment) error {
 	m.AttachCalls = append(m.AttachCalls, NetworkMutationCall{ServiceID: serviceID, Attachment: attachment, Network: attachment.Network})
 	if m.AttachHook != nil {
 		m.AttachHook()
@@ -211,7 +212,7 @@ func (m *MockClient) AttachServiceNetwork(ctx context.Context, serviceID string,
 	return nil
 }
 
-func (m *MockClient) DetachServiceNetwork(ctx context.Context, serviceID string, networkName string) error {
+func (m *Client) DetachServiceNetwork(ctx context.Context, serviceID string, networkName string) error {
 	m.DetachCalls = append(m.DetachCalls, NetworkMutationCall{ServiceID: serviceID, Network: networkName})
 	if m.DetachHook != nil {
 		m.DetachHook()
@@ -245,7 +246,7 @@ func containsAlias(aliases []string, target string) bool {
 	return false
 }
 
-func (m *MockClient) GetNetwork(_ context.Context, networkNameOrID string) (*NetworkInfo, error) {
+func (m *Client) GetNetwork(_ context.Context, networkNameOrID string) (*swarm.NetworkInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, network := range m.NetworkResources {
@@ -257,17 +258,17 @@ func (m *MockClient) GetNetwork(_ context.Context, networkNameOrID string) (*Net
 	return nil, fmt.Errorf("%w: network %s", errdefs.ErrNotFound, networkNameOrID)
 }
 
-func (m *MockClient) ListNetworks(_ context.Context) ([]NetworkInfo, error) {
+func (m *Client) ListNetworks(_ context.Context) ([]swarm.NetworkInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]NetworkInfo, 0, len(m.NetworkResources))
+	result := make([]swarm.NetworkInfo, 0, len(m.NetworkResources))
 	for _, network := range m.NetworkResources {
 		result = append(result, *network)
 	}
 	return result, nil
 }
 
-func (m *MockClient) RemoveNetwork(_ context.Context, networkNameOrID string) error {
+func (m *Client) RemoveNetwork(_ context.Context, networkNameOrID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for name, network := range m.NetworkResources {
@@ -279,7 +280,7 @@ func (m *MockClient) RemoveNetwork(_ context.Context, networkNameOrID string) er
 	return fmt.Errorf("%w: network %s", errdefs.ErrNotFound, networkNameOrID)
 }
 
-func (m *MockClient) GetServiceLogs(_ context.Context, _ string, _ string, _ bool) (io.ReadCloser, error) {
+func (m *Client) GetServiceLogs(_ context.Context, _ string, _ string, _ bool) (io.ReadCloser, error) {
 	line := []byte("mock log line\n")
 	header := make([]byte, 8)
 	header[0] = 0x01 // stdout
@@ -288,12 +289,13 @@ func (m *MockClient) GetServiceLogs(_ context.Context, _ string, _ string, _ boo
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (m *MockClient) WatchEvents(ctx context.Context) (<-chan SwarmEvent, <-chan error) {
-	out := make(chan SwarmEvent)
+func (m *Client) WatchEvents(ctx context.Context) (<-chan swarm.SwarmEvent, <-chan error) {
+	out := make(chan swarm.SwarmEvent)
 	errCh := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		close(out)
+		close(errCh)
 	}()
 	return out, errCh
 }

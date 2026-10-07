@@ -13,6 +13,7 @@ Run the control-plane test suite from the repository root:
 
 ```sh
 go test ./apps/control-plane/...
+./scripts/check-coverage.sh
 ```
 
 The production daemon built from this application is named `moduleosd`.

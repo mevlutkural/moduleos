@@ -12,7 +12,7 @@ import (
 
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/app"
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/store"
-	"github.com/mevlutkural/moduleos/apps/control-plane/internal/swarm"
+	"github.com/mevlutkural/moduleos/apps/control-plane/internal/testkit/swarmfake"
 )
 
 type applicationMutationBarrierStore struct {
@@ -56,12 +56,12 @@ func (s *applicationMutationBarrierStore) wait(ctx context.Context, operation st
 	}
 }
 
-func serviceWithStore(st store.Store, mock *swarm.MockClient) *app.Service {
+func serviceWithStore(st store.Store, mock *swarmfake.Client) *app.Service {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	return app.NewService(st, mock, "moduleos.local", log)
 }
 
-func newTestService(t *testing.T) (*app.Service, *store.SQLiteStore, *swarm.MockClient) {
+func newTestService(t *testing.T) (*app.Service, *store.SQLiteStore, *swarmfake.Client) {
 	t.Helper()
 
 	st, err := store.NewSQLiteStore(":memory:")
@@ -70,7 +70,7 @@ func newTestService(t *testing.T) (*app.Service, *store.SQLiteStore, *swarm.Mock
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	mock := swarm.NewMockClient()
+	mock := swarmfake.New()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	svc := app.NewService(st, mock, "moduleos.local", log)
 
