@@ -374,6 +374,61 @@ func TestMissingIngressFailsBeforeServiceCreation(t *testing.T) {
 	}
 }
 
+func TestApplicationReconcileProvisionsProjectNetworkOnDemand(t *testing.T) {
+	reconciler, service, st, mock := newInternalReconciler(t)
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "network-on-demand", Image: "nginx:1.27"})
+	project, err := st.GetProjectByID(t.Context(), created.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mock.GetNetwork(t.Context(), project.Network); !errdefs.IsNotFound(err) {
+		t.Fatalf("project network unexpectedly existed before reconciliation: %v", err)
+	}
+
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatalf("application reconcile waited for a full project scan: %v", err)
+	}
+	if _, err := mock.GetNetwork(t.Context(), project.Network); err != nil {
+		t.Fatalf("project network was not provisioned on demand: %v", err)
+	}
+	if _, err := mock.GetService(t.Context(), swarm.ServiceName(created.Name)); err != nil {
+		t.Fatalf("application service was not created after provisioning its network: %v", err)
+	}
+	persistedProject, err := st.GetProjectByID(t.Context(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedProject.ObservedState != store.ObservedStateReady {
+		t.Fatalf("project state = %q, want ready", persistedProject.ObservedState)
+	}
+}
+
+func TestNetworkDisappearingAfterPreflightIsRetryable(t *testing.T) {
+	reconciler, service, st, mock := newInternalReconciler(t)
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "network-race", Image: "nginx:1.27"})
+	mock.CreateError = errors.Join(errors.New("network disappeared before service creation"), errdefs.ErrNotFound)
+
+	err := reconciler.ReconcileApplication(t.Context(), created.Name)
+	if err == nil || !isRetryable(err) {
+		t.Fatalf("create race error = %v, want retryable", err)
+	}
+	persisted, getErr := st.GetApplication(t.Context(), created.Name)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if persisted.ReconcileErrorCode != "docker_dependency_missing" || !persisted.ReconcileRetryable {
+		t.Fatalf("create race diagnostic = %#v", persisted)
+	}
+
+	mock.CreateError = nil
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatalf("direct retry did not recover without a full scan: %v", err)
+	}
+	if _, err := mock.GetService(t.Context(), swarm.ServiceName(created.Name)); err != nil {
+		t.Fatalf("service missing after direct retry: %v", err)
+	}
+}
+
 func TestStabilizationStateIsBoundedAndResetsOnFailure(t *testing.T) {
 	reconciler, service, st, mock := newInternalReconciler(t)
 	reconciler.WithStabilizationWindow(time.Hour)
@@ -719,6 +774,9 @@ func TestErrorClassificationAndDiagnosticRedaction(t *testing.T) {
 		isRetryable(errors.New("permanent")) {
 		t.Fatal("retry classification mismatch")
 	}
+	if !isRetryableMutation(fmtError(errdefs.ErrNotFound)) {
+		t.Fatal("a Docker mutation dependency race was not retryable")
+	}
 	cases := map[string]string{
 		"https://user:password@example.test/path": "https://[redacted]@example.test/path",
 		"authorization=top-secret":                "authorization=[redacted]",
@@ -740,6 +798,9 @@ func TestErrorClassificationAndDiagnosticRedaction(t *testing.T) {
 	}
 	if code := classifyDockerError(fmtError(errdefs.ErrUnavailable)); code != "docker_unavailable" {
 		t.Fatalf("Docker unavailable code = %q", code)
+	}
+	if code := classifyDockerError(fmtError(errdefs.ErrNotFound)); code != "docker_dependency_missing" {
+		t.Fatalf("Docker missing dependency code = %q", code)
 	}
 	if code := classifyDockerError(errors.New("unexpected mutation failure")); code != "docker_mutation_failed" {
 		t.Fatalf("fallback mutation code = %q", code)

@@ -23,6 +23,7 @@ var ErrNotFound = errors.New("not found")
 var ErrConflict = errors.New("conflict")
 var ErrGenerationConflict = errors.New("generation conflict")
 var ErrStaleObservation = errors.New("stale observation")
+var ErrInvalidTransition = errors.New("invalid state transition")
 var ErrInvalidData = errors.New("invalid persisted data")
 
 type SQLiteStore struct {
@@ -939,6 +940,10 @@ func (s *SQLiteStore) UpdateDeployment(ctx context.Context, d *Deployment) error
 }
 
 func (s *SQLiteStore) MarkDeploymentState(ctx context.Context, id string, generation int64, status DeploymentStatus, code, message string) error {
+	allowedSources, valid := deploymentTransitionSources(status)
+	if !valid {
+		return fmt.Errorf("%w: unknown deployment status %q", ErrInvalidData, status)
+	}
 	now := time.Now().UTC()
 	var startedAt, finishedAt any
 	if status == DeploymentStatusApplying || status == DeploymentStatusInProgress {
@@ -947,10 +952,22 @@ func (s *SQLiteStore) MarkDeploymentState(ctx context.Context, id string, genera
 	if status == DeploymentStatusSucceeded || status == DeploymentStatusSuccess || status == DeploymentStatusFailed || status == DeploymentStatusSuperseded {
 		finishedAt = now
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE deployments SET status = ?, error_code = ?,
-		error_message = ?, started_at = COALESCE(started_at, ?), finished_at = COALESCE(finished_at, ?)
-		WHERE id = ? AND target_generation = ?`, status, code, truncateSafeMessage(message),
-		startedAt, finishedAt, id, generation)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(allowedSources)), ",")
+	query := `UPDATE deployments SET status = ?,
+		error_code = CASE WHEN status IN (?, ?, ?, ?) THEN error_code ELSE ? END,
+		error_message = CASE WHEN status IN (?, ?, ?, ?) THEN error_message ELSE ? END,
+		started_at = COALESCE(started_at, ?), finished_at = COALESCE(finished_at, ?)
+		WHERE id = ? AND target_generation = ? AND status IN (` + placeholders + `)`
+	args := []any{
+		status,
+		DeploymentStatusSuccess, DeploymentStatusSucceeded, DeploymentStatusFailed, DeploymentStatusSuperseded, code,
+		DeploymentStatusSuccess, DeploymentStatusSucceeded, DeploymentStatusFailed, DeploymentStatusSuperseded, truncateSafeMessage(message),
+		startedAt, finishedAt, id, generation,
+	}
+	for _, source := range allowedSources {
+		args = append(args, source)
+	}
+	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -959,15 +976,42 @@ func (s *SQLiteStore) MarkDeploymentState(ctx context.Context, id string, genera
 		return err
 	}
 	if rows == 0 {
-		var exists int
-		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM deployments WHERE id = ?`, id).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		var currentGeneration int64
+		var currentStatus DeploymentStatus
+		if err := s.db.QueryRowContext(ctx, `SELECT target_generation, status FROM deployments WHERE id = ?`, id).Scan(&currentGeneration, &currentStatus); errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		} else if err != nil {
 			return err
 		}
-		return ErrStaleObservation
+		if currentGeneration != generation {
+			return ErrStaleObservation
+		}
+		return fmt.Errorf("%w: deployment cannot move from %q to %q", ErrInvalidTransition, currentStatus, status)
 	}
 	return nil
+}
+
+func deploymentTransitionSources(target DeploymentStatus) ([]DeploymentStatus, bool) {
+	switch target {
+	case DeploymentStatusPending:
+		return []DeploymentStatus{DeploymentStatusPending}, true
+	case DeploymentStatusBuilding:
+		return []DeploymentStatus{DeploymentStatusPending, DeploymentStatusBuilding}, true
+	case DeploymentStatusApplying:
+		return []DeploymentStatus{DeploymentStatusPending, DeploymentStatusBuilding, DeploymentStatusApplying}, true
+	case DeploymentStatusInProgress:
+		return []DeploymentStatus{DeploymentStatusPending, DeploymentStatusBuilding, DeploymentStatusApplying, DeploymentStatusInProgress}, true
+	case DeploymentStatusSuccess, DeploymentStatusSucceeded, DeploymentStatusFailed, DeploymentStatusSuperseded:
+		return []DeploymentStatus{
+			DeploymentStatusPending,
+			DeploymentStatusBuilding,
+			DeploymentStatusApplying,
+			DeploymentStatusInProgress,
+			target,
+		}, true
+	default:
+		return nil, false
+	}
 }
 
 func (s *SQLiteStore) classifyApplicationCASMiss(ctx context.Context, appID string, conflict error) error {

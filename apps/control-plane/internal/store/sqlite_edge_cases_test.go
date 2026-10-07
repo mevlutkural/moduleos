@@ -346,8 +346,22 @@ func TestDeploymentStateTransitionsAndCAS(t *testing.T) {
 	if replayed.FinishedAt == nil || !replayed.FinishedAt.Equal(finishedAt) {
 		t.Fatalf("replayed terminal transition changed finished_at: first=%v replayed=%v", finishedAt, replayed.FinishedAt)
 	}
+	if err := st.MarkDeploymentState(ctx, deployment.ID, 1, DeploymentStatusFailed, "late_failure", "must not replace success"); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("terminal rewrite error = %v, want ErrInvalidTransition", err)
+	}
+	stillSucceeded, err := st.GetDeployment(ctx, deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillSucceeded.Status != DeploymentStatusSucceeded || stillSucceeded.ErrorCode != "" ||
+		stillSucceeded.FinishedAt == nil || !stillSucceeded.FinishedAt.Equal(finishedAt) {
+		t.Fatalf("terminal rewrite mutated succeeded deployment: %#v", stillSucceeded)
+	}
 	if err := st.MarkDeploymentState(ctx, deployment.ID, 0, DeploymentStatusFailed, "stale", "stale"); !errors.Is(err, ErrStaleObservation) {
 		t.Fatalf("stale transition error = %v, want ErrStaleObservation", err)
+	}
+	if err := st.MarkDeploymentState(ctx, deployment.ID, 1, DeploymentStatus("unknown"), "", ""); !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("unknown status error = %v, want ErrInvalidData", err)
 	}
 
 	failed := &Deployment{
@@ -372,6 +386,21 @@ func TestDeploymentStateTransitionsAndCAS(t *testing.T) {
 	}
 	if failedState.FinishedAt == nil || failedState.ErrorCode != "runtime_error" || len(failedState.ErrorMessage) != 1024 {
 		t.Fatalf("failed deployment = %#v", failedState)
+	}
+	failedAt := *failedState.FinishedAt
+	if err := st.MarkDeploymentState(ctx, failed.ID, 1, DeploymentStatusSucceeded, "", ""); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("failed-to-succeeded error = %v, want ErrInvalidTransition", err)
+	}
+	if err := st.MarkDeploymentState(ctx, failed.ID, 1, DeploymentStatusFailed, "replacement", "replacement"); err != nil {
+		t.Fatalf("idempotent failed replay: %v", err)
+	}
+	failedReplay, err := st.GetDeployment(ctx, failed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedReplay.Status != DeploymentStatusFailed || failedReplay.ErrorCode != "runtime_error" ||
+		len(failedReplay.ErrorMessage) != 1024 || failedReplay.FinishedAt == nil || !failedReplay.FinishedAt.Equal(failedAt) {
+		t.Fatalf("terminal replay mutated failed deployment: %#v", failedReplay)
 	}
 	missing := &Deployment{ID: "missing-deployment"}
 	if err := st.UpdateDeployment(ctx, missing); !errors.Is(err, ErrNotFound) {

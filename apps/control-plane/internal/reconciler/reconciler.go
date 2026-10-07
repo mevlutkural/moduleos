@@ -379,7 +379,14 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 				r.Enqueue(name)
 				return nil
 			}
-			return retryableError("deployment_state_write", err)
+			if errors.Is(err, store.ErrInvalidTransition) {
+				deployment, err = r.deploymentForGeneration(ctx, application.ID, generation)
+				if err != nil {
+					return r.persistFailure(ctx, application, "deployment_read", err, true)
+				}
+			} else {
+				return retryableError("deployment_state_write", err)
+			}
 		}
 	}
 
@@ -392,10 +399,13 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 			return r.persistFailureWithDeployment(ctx, application, deployment, "ingress_network_missing", err, true)
 		}
 	}
+	if code, dependencyErr, retryable := r.ensureApplicationProjectNetworks(ctx, application, desired); dependencyErr != nil {
+		return r.persistFailureWithDeployment(ctx, application, deployment, code, dependencyErr, retryable)
+	}
 
 	if missing {
 		if err := r.swarm.CreateService(ctx, desired); err != nil {
-			return r.persistFailureWithDeployment(ctx, application, deployment, classifyDockerError(err), err, isRetryable(err))
+			return r.persistFailureWithDeployment(ctx, application, deployment, classifyDockerError(err), err, isRetryableMutation(err))
 		}
 		observed, err = r.swarm.GetService(ctx, serviceName)
 		if err != nil {
@@ -409,7 +419,7 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 		if len(fields) > 0 {
 			r.log.Info("service drift detected", "app", name, "fields", fields)
 			if err := r.swarm.UpdateService(ctx, observed.ID, desired); err != nil {
-				return r.persistFailureWithDeployment(ctx, application, deployment, classifyDockerError(err), err, isRetryable(err))
+				return r.persistFailureWithDeployment(ctx, application, deployment, classifyDockerError(err), err, isRetryableMutation(err))
 			}
 			observed, err = r.swarm.GetService(ctx, serviceName)
 			if err != nil {
@@ -488,7 +498,8 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 		return retryableError("application_observation_write", err)
 	}
 	if deployment != nil {
-		if err := r.store.MarkDeploymentState(ctx, deployment.ID, generation, store.DeploymentStatusSucceeded, "", ""); err != nil && !errors.Is(err, store.ErrStaleObservation) {
+		if err := r.store.MarkDeploymentState(ctx, deployment.ID, generation, store.DeploymentStatusSucceeded, "", ""); err != nil &&
+			!errors.Is(err, store.ErrStaleObservation) && !errors.Is(err, store.ErrInvalidTransition) {
 			return retryableError("deployment_state_write", err)
 		}
 	}
@@ -513,6 +524,43 @@ func (r *Reconciler) clearStabilization(applicationID string) {
 	r.stableMu.Lock()
 	delete(r.stableSince, applicationID)
 	r.stableMu.Unlock()
+}
+
+func (r *Reconciler) ensureApplicationProjectNetworks(ctx context.Context, application *store.Application, desired swarm.ServiceSpec) (string, error, bool) {
+	primaryProject, err := r.store.GetProjectByID(ctx, application.ProjectID)
+	if err != nil {
+		return "network_dependency_read", err, true
+	}
+	projectsByNetwork := map[string]*store.Project{primaryProject.Network: primaryProject}
+	links, err := r.store.ListProjectLinksByApp(ctx, application.ID)
+	if err != nil {
+		return "network_dependency_read", err, true
+	}
+	for _, link := range links {
+		project, err := r.store.GetProjectByID(ctx, link.SourceProjectID)
+		if err != nil {
+			return "network_dependency_read", err, true
+		}
+		projectsByNetwork[project.Network] = project
+	}
+	for _, attachment := range desired.Networks {
+		if application.Expose && attachment.Network == r.appSvc.IngressNetwork() {
+			continue
+		}
+		project, exists := projectsByNetwork[attachment.Network]
+		if !exists {
+			return "network_dependency_missing", fmt.Errorf("project network %q has no durable owner", attachment.Network), false
+		}
+		if project.DeletionTimestamp != nil {
+			return "network_dependency_deleting", fmt.Errorf("project network %q is being deleted", attachment.Network), false
+		}
+		if err := r.swarm.EnsureProjectNetwork(ctx, project.Network, project.ID, project.Slug); err != nil {
+			retryable := !errors.Is(err, swarm.ErrOwnershipConflict) && !errors.Is(err, swarm.ErrInvalidSpec)
+			return "network_dependency_reconcile_failed", err, retryable
+		}
+		r.markProjectObserved(ctx, project, store.ObservedStateReady, "", "")
+	}
+	return "", nil, false
 }
 
 func (r *Reconciler) reconcileProjects(ctx context.Context, projects []*store.Project) {
@@ -573,7 +621,8 @@ func (r *Reconciler) deploymentForGeneration(ctx context.Context, appID string, 
 func (r *Reconciler) persistFailureWithDeployment(ctx context.Context, application *store.Application, deployment *store.Deployment, code string, cause error, retryable bool) error {
 	var deploymentErr error
 	if deployment != nil && !retryable {
-		if err := r.store.MarkDeploymentState(ctx, deployment.ID, application.DesiredGeneration, store.DeploymentStatusFailed, code, safeDiagnostic(cause.Error())); err != nil && !errors.Is(err, store.ErrStaleObservation) {
+		if err := r.store.MarkDeploymentState(ctx, deployment.ID, application.DesiredGeneration, store.DeploymentStatusFailed, code, safeDiagnostic(cause.Error())); err != nil &&
+			!errors.Is(err, store.ErrStaleObservation) && !errors.Is(err, store.ErrInvalidTransition) {
 			deploymentErr = fmt.Errorf("mark deployment failed: %w", err)
 		}
 	}
@@ -608,9 +657,15 @@ func isRetryable(err error) bool {
 	return errdefs.IsUnavailable(err) || errdefs.IsConflict(err) || errors.Is(err, context.DeadlineExceeded)
 }
 
+func isRetryableMutation(err error) bool {
+	return isRetryable(err) || errdefs.IsNotFound(err)
+}
+
 func classifyDockerError(err error) string {
 	lower := strings.ToLower(err.Error())
 	switch {
+	case errdefs.IsNotFound(err):
+		return "docker_dependency_missing"
 	case errdefs.IsConflict(err):
 		return "docker_conflict"
 	case errdefs.IsUnavailable(err), errors.Is(err, context.DeadlineExceeded):

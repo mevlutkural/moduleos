@@ -566,12 +566,28 @@ func TestRejectedTaskFailsDeploymentWithoutAdvancingObservedImage(t *testing.T) 
 		t.Fatal("expected terminal convergence error")
 	}
 	failed := mustGetDeployment(t, st, ctx, deployment.ID)
-	if failed.Status != store.DeploymentStatusFailed || failed.ErrorCode != "task_rejected" {
+	if failed.Status != store.DeploymentStatusFailed || failed.ErrorCode != "task_rejected" || failed.FinishedAt == nil {
 		t.Fatalf("deployment=%#v", failed)
 	}
+	failedAt := *failed.FinishedAt
 	application := mustGetApp(t, st, ctx, created.Name)
 	if application.ObservedImage != "nginx:1.0" {
 		t.Fatalf("observed image advanced to %q", application.ObservedImage)
+	}
+
+	service.TaskErrors = nil
+	service.Running = service.Replicas
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatalf("runtime recovery reconcile: %v", err)
+	}
+	recovered := mustGetDeployment(t, st, ctx, deployment.ID)
+	if recovered.Status != store.DeploymentStatusFailed || recovered.ErrorCode != "task_rejected" ||
+		recovered.FinishedAt == nil || !recovered.FinishedAt.Equal(failedAt) {
+		t.Fatalf("runtime recovery rewrote terminal deployment: %#v", recovered)
+	}
+	application = mustGetApp(t, st, ctx, created.Name)
+	if application.ObservedImage != "missing.invalid/image:nope" {
+		t.Fatalf("recovered runtime image was not observed: %q", application.ObservedImage)
 	}
 }
 
