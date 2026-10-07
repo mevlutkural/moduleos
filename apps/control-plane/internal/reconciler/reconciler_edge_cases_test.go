@@ -55,10 +55,13 @@ func mustCreateInternalProject(t *testing.T, service *app.Service, name, slug st
 
 type faultStore struct {
 	store.Store
-	listProjectsErr    error
-	listDeploymentsErr error
-	diagnosticsErr     error
-	finalizeAppErr     error
+	listProjectsErr          error
+	listDeploymentsErr       error
+	getProjectByIDErr        error
+	listProjectLinksByAppErr error
+	diagnosticsErr           error
+	deploymentStateErr       error
+	finalizeAppErr           error
 }
 
 func (s *faultStore) FinalizeApplicationDeletion(ctx context.Context, appID string, generation int64) error {
@@ -82,11 +85,32 @@ func (s *faultStore) ListDeployments(ctx context.Context, appID string) ([]*stor
 	return s.Store.ListDeployments(ctx, appID)
 }
 
+func (s *faultStore) GetProjectByID(ctx context.Context, id string) (*store.Project, error) {
+	if s.getProjectByIDErr != nil {
+		return nil, s.getProjectByIDErr
+	}
+	return s.Store.GetProjectByID(ctx, id)
+}
+
+func (s *faultStore) ListProjectLinksByApp(ctx context.Context, appID string) ([]*store.ProjectLink, error) {
+	if s.listProjectLinksByAppErr != nil {
+		return nil, s.listProjectLinksByAppErr
+	}
+	return s.Store.ListProjectLinksByApp(ctx, appID)
+}
+
 func (s *faultStore) PersistReconcileDiagnostics(ctx context.Context, appID string, generation int64, code, message string, retryable bool, attempt int) error {
 	if s.diagnosticsErr != nil {
 		return s.diagnosticsErr
 	}
 	return s.Store.PersistReconcileDiagnostics(ctx, appID, generation, code, message, retryable, attempt)
+}
+
+func (s *faultStore) MarkDeploymentState(ctx context.Context, id string, generation int64, status store.DeploymentStatus, code, message string) error {
+	if s.deploymentStateErr != nil {
+		return s.deploymentStateErr
+	}
+	return s.Store.MarkDeploymentState(ctx, id, generation, status, code, message)
 }
 
 type panicCreateClient struct{ *swarmfake.Client }
@@ -115,6 +139,30 @@ type projectNetworkFaultClient struct {
 	swarm.Client
 	getErr    error
 	removeErr error
+}
+
+type taskInventoryFailureClient struct {
+	swarm.Client
+	err error
+}
+
+type nthLinkReadFailureStore struct {
+	store.Store
+	failAt int
+	calls  int
+	err    error
+}
+
+func (s *nthLinkReadFailureStore) ListProjectLinksByApp(ctx context.Context, appID string) ([]*store.ProjectLink, error) {
+	s.calls++
+	if s.calls == s.failAt {
+		return nil, s.err
+	}
+	return s.Store.ListProjectLinksByApp(ctx, appID)
+}
+
+func (c *taskInventoryFailureClient) GetService(context.Context, string) (*swarm.ServiceInfo, error) {
+	return nil, c.err
 }
 
 func (c *projectNetworkFaultClient) GetNetwork(ctx context.Context, name string) (*swarm.NetworkInfo, error) {
@@ -151,6 +199,27 @@ type linkSnapshotRaceStore struct {
 	mu         sync.Mutex
 	calls      int
 	injectLink *store.ProjectLink
+}
+
+type linkDeletionRaceStore struct {
+	store.Store
+	base   *store.SQLiteStore
+	mu     sync.Mutex
+	calls  int
+	linkID string
+}
+
+func (s *linkDeletionRaceStore) ListProjectLinksByApp(ctx context.Context, appID string) ([]*store.ProjectLink, error) {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+	if call == 2 {
+		if err := s.base.DeleteProjectLink(ctx, s.linkID); err != nil {
+			return nil, err
+		}
+	}
+	return s.Store.ListProjectLinksByApp(ctx, appID)
 }
 
 func (s *linkSnapshotRaceStore) ListProjectLinksByApp(ctx context.Context, appID string) ([]*store.ProjectLink, error) {
@@ -305,6 +374,26 @@ func TestStoreFailuresPreventRuntimeMutation(t *testing.T) {
 	}
 }
 
+func TestStaleDiagnosticClearRequeuesWithoutRuntimeMutation(t *testing.T) {
+	_, _, st, mock := newInternalReconciler(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	baseService := app.NewService(st, mock, "moduleos.local", logger)
+	created := mustCreateInternalApp(t, baseService, app.CreateAppRequest{Name: "stale-snapshot", Image: "nginx:1.27"})
+	wrapper := &faultStore{Store: st, diagnosticsErr: store.ErrStaleObservation}
+	service := app.NewService(wrapper, mock, "moduleos.local", logger)
+	reconciler := New(mock, service, logger).WithStabilizationWindow(0)
+
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatalf("stale observation should be requeued without an error: %v", err)
+	}
+	if mock.CreateCalls != 0 || len(mock.Services) != 0 {
+		t.Fatal("runtime was mutated from a stale application snapshot")
+	}
+	if len(reconciler.queue) != 1 || len(reconciler.pending) != 1 {
+		t.Fatalf("stale application was not requeued: queued=%d pending=%d", len(reconciler.queue), len(reconciler.pending))
+	}
+}
+
 func TestDiagnosticPersistenceFailureRemainsRetryable(t *testing.T) {
 	_, service, st, mock := newInternalReconciler(t)
 	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "diagnostic-retry", Image: "nginx:1.27"})
@@ -320,6 +409,64 @@ func TestDiagnosticPersistenceFailureRemainsRetryable(t *testing.T) {
 		if !isRetryable(err) || !errors.Is(err, cause) || !errors.Is(err, persistFailure) {
 			t.Fatalf("retryable=%t diagnostic failure = %v", originalRetryable, err)
 		}
+	}
+}
+
+func TestDeploymentStatePersistenceFailureRemainsRetryable(t *testing.T) {
+	_, service, st, mock := newInternalReconciler(t)
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "deployment-state-retry", Image: "nginx:1.27"})
+	deployment := &store.Deployment{
+		ID:               uuid.NewString(),
+		AppID:            created.ID,
+		SourceType:       store.SourceTypeImage,
+		Image:            created.Image,
+		Status:           store.DeploymentStatusApplying,
+		TriggeredBy:      store.TriggeredByAPI,
+		CreatedAt:        time.Now().UTC(),
+		TargetGeneration: created.DesiredGeneration,
+	}
+	if err := st.CreateDeployment(t.Context(), deployment); err != nil {
+		t.Fatal(err)
+	}
+	persistFailure := errors.New("deployment state store unavailable")
+	cause := errors.New("task rejected")
+	wrapper := &faultStore{Store: st, deploymentStateErr: persistFailure}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	wrapperService := app.NewService(wrapper, mock, "moduleos.local", logger)
+	reconciler := New(mock, wrapperService, logger)
+
+	err := reconciler.persistFailureWithDeployment(t.Context(), created, deployment, "task_rejected", cause, false)
+	if !isRetryable(err) || !errors.Is(err, cause) || !errors.Is(err, persistFailure) {
+		t.Fatalf("deployment state persistence failure = %v", err)
+	}
+}
+
+func TestLegacyDeploymentWithoutGenerationDoesNotChangeTaskTemplate(t *testing.T) {
+	reconciler, service, st, mock := newInternalReconciler(t)
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "legacy-deployment", Image: "nginx:1.27"})
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy := &store.Deployment{
+		ID:               uuid.NewString(),
+		AppID:            created.ID,
+		SourceType:       store.SourceTypeImage,
+		Image:            created.Image,
+		Status:           store.DeploymentStatusFailed,
+		TriggeredBy:      store.TriggeredByAPI,
+		CreatedAt:        time.Now().UTC(),
+		TargetGeneration: 0,
+	}
+	if err := st.CreateDeployment(t.Context(), legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if mock.UpdateCalls != 0 {
+		t.Fatalf("legacy generation-zero history triggered %d runtime updates", mock.UpdateCalls)
 	}
 }
 
@@ -341,6 +488,32 @@ func TestDeletionBypassesInvalidRuntimeSpecAndMissingIngress(t *testing.T) {
 	}
 	if _, err := st.GetApplication(t.Context(), created.Name); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("application was not finalized: %v", err)
+	}
+}
+
+func TestDeletionDoesNotDependOnTaskInventory(t *testing.T) {
+	reconciler, service, st, mock := newInternalReconciler(t)
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "delete-without-tasks", Image: "nginx:1.27"})
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.DeleteAppIntent(t.Context(), created.Name, created.DesiredGeneration); err != nil {
+		t.Fatal(err)
+	}
+
+	failure := errors.New("task inventory unavailable")
+	client := &taskInventoryFailureClient{Client: mock, err: failure}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	deletionService := app.NewService(st, client, "moduleos.local", logger)
+	deletionReconciler := New(client, deletionService, logger).WithStabilizationWindow(0)
+	if err := deletionReconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatalf("deletion was blocked by task inventory: %v", err)
+	}
+	if _, err := st.GetApplication(t.Context(), created.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("application was not finalized: %v", err)
+	}
+	if _, err := mock.InspectService(t.Context(), swarm.ServiceName(created.Name)); !errdefs.IsNotFound(err) {
+		t.Fatalf("service was not removed: %v", err)
 	}
 }
 
@@ -481,6 +654,219 @@ func TestStabilizationStateIsBoundedAndResetsOnFailure(t *testing.T) {
 	}
 }
 
+func TestCompletedStabilizationPersistsAcrossHealthyScans(t *testing.T) {
+	reconciler, service, _, _ := newInternalReconciler(t)
+	reconciler.WithStabilizationWindow(time.Hour)
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "stable-scans", Image: "nginx:1.27"})
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err == nil {
+		t.Fatal("expected initial stabilization retry")
+	}
+	reconciler.stableMu.Lock()
+	observation := reconciler.stableSince[created.ID]
+	observation.since = time.Now().Add(-2 * time.Hour)
+	reconciler.stableSince[created.ID] = observation
+	reconciler.stableMu.Unlock()
+
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatalf("completed stabilization: %v", err)
+	}
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatalf("healthy rescan restarted stabilization: %v", err)
+	}
+	reconciler.stableMu.Lock()
+	defer reconciler.stableMu.Unlock()
+	if persisted, exists := reconciler.stableSince[created.ID]; !exists || persisted.generation != created.DesiredGeneration {
+		t.Fatalf("completed stabilization state = %#v", reconciler.stableSince)
+	}
+}
+
+func TestTaskReplacementRestartsCompletedStabilization(t *testing.T) {
+	reconciler, service, st, mock := newInternalReconciler(t)
+	reconciler.WithStabilizationWindow(time.Hour)
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "replacement-stability", Image: "nginx:1.27"})
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err == nil {
+		t.Fatal("expected initial stabilization retry")
+	}
+	reconciler.stableMu.Lock()
+	observation := reconciler.stableSince[created.ID]
+	observation.since = time.Now().Add(-2 * time.Hour)
+	reconciler.stableSince[created.ID] = observation
+	reconciler.stableMu.Unlock()
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatalf("completed stabilization: %v", err)
+	}
+
+	runtimeService := mock.Services[swarm.ServiceName(created.Name)]
+	runtimeService.TaskSetFingerprint = "replacement-task-set"
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err == nil {
+		t.Fatal("replacement task set reused completed stabilization")
+	}
+	persisted, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ReconcileErrorCode != "stabilizing" || !persisted.ReconcileRetryable {
+		t.Fatalf("replacement stabilization diagnostic = %#v", persisted)
+	}
+	reconciler.stableMu.Lock()
+	defer reconciler.stableMu.Unlock()
+	refreshed := reconciler.stableSince[created.ID]
+	if refreshed.taskSetFingerprint != "replacement-task-set" || !refreshed.since.After(observation.since) {
+		t.Fatalf("replacement stability state = %#v", refreshed)
+	}
+}
+
+func TestRuntimeMutationRestartsCompletedStabilization(t *testing.T) {
+	for name, mutateRuntime := range map[string]func(*swarmfake.Client, string){
+		"missing service": func(mock *swarmfake.Client, serviceName string) {
+			delete(mock.Services, serviceName)
+		},
+		"drifted service": func(mock *swarmfake.Client, serviceName string) {
+			runtimeService := mock.Services[serviceName]
+			runtimeService.Image = "redis:7"
+			runtimeService.Spec.Image = "redis:7"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reconciler, service, st, mock := newInternalReconciler(t)
+			reconciler.WithStabilizationWindow(time.Hour)
+			created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "restart-stability", Image: "nginx:1.27"})
+			if err := reconciler.ReconcileApplication(t.Context(), created.Name); err == nil {
+				t.Fatal("expected initial stabilization retry")
+			}
+			reconciler.stableMu.Lock()
+			observation := reconciler.stableSince[created.ID]
+			observation.since = time.Now().Add(-2 * time.Hour)
+			reconciler.stableSince[created.ID] = observation
+			reconciler.stableMu.Unlock()
+			if err := reconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+				t.Fatalf("complete stabilization: %v", err)
+			}
+
+			mutateRuntime(mock, swarm.ServiceName(created.Name))
+			if err := reconciler.ReconcileApplication(t.Context(), created.Name); err == nil {
+				t.Fatal("runtime replacement reused completed stabilization")
+			}
+			application, err := st.GetApplication(t.Context(), created.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if application.ReconcileErrorCode != "stabilizing" || !application.ReconcileRetryable {
+				t.Fatalf("replacement stabilization diagnostic = %#v", application)
+			}
+		})
+	}
+}
+
+func TestDesiredSpecDependencyReadFailureDoesNotFailDeployment(t *testing.T) {
+	for name, configure := range map[string]func(*faultStore, error){
+		"project": func(wrapper *faultStore, failure error) { wrapper.getProjectByIDErr = failure },
+		"links":   func(wrapper *faultStore, failure error) { wrapper.listProjectLinksByAppErr = failure },
+	} {
+		t.Run(name, func(t *testing.T) {
+			initialReconciler, service, st, mock := newInternalReconciler(t)
+			created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "dependency-" + name, Image: "nginx:1.27"})
+			if err := initialReconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+				t.Fatal(err)
+			}
+			deployment, err := service.DeployApp(t.Context(), app.DeployAppRequest{AppName: created.Name, Image: "nginx:1.28"})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			failure := errors.New("temporary store read failure")
+			wrapper := &faultStore{Store: st}
+			configure(wrapper, failure)
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			wrappedService := app.NewService(wrapper, mock, "moduleos.local", logger)
+			reconciler := New(mock, wrappedService, logger).WithStabilizationWindow(0)
+			if err := reconciler.ReconcileApplication(t.Context(), created.Name); !errors.Is(err, failure) {
+				t.Fatalf("dependency read error = %v", err)
+			}
+			persisted, err := st.GetDeployment(t.Context(), deployment.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Status != store.DeploymentStatusApplying || persisted.FinishedAt != nil {
+				t.Fatalf("transient dependency failure terminalized deployment: %#v", persisted)
+			}
+			application, err := st.GetApplication(t.Context(), created.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if application.ReconcileErrorCode != "desired_spec_dependency_read" || !application.ReconcileRetryable {
+				t.Fatalf("dependency diagnostic = %#v", application)
+			}
+		})
+	}
+}
+
+func TestFinalDesiredSpecDependencyReadFailureDoesNotFailDeployment(t *testing.T) {
+	initialReconciler, service, st, mock := newInternalReconciler(t)
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "final-dependency-read", Image: "nginx:1.27"})
+	if err := initialReconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := service.DeployApp(t.Context(), app.DeployAppRequest{AppName: created.Name, Image: "nginx:1.28"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failure := errors.New("temporary final consistency read failure")
+	wrapper := &nthLinkReadFailureStore{Store: st, failAt: 4, err: failure}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	wrappedService := app.NewService(wrapper, mock, "moduleos.local", logger)
+	reconciler := New(mock, wrappedService, logger).WithStabilizationWindow(0)
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); !errors.Is(err, failure) {
+		t.Fatalf("final desired-spec error = %v", err)
+	}
+	persisted, err := st.GetDeployment(t.Context(), deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != store.DeploymentStatusApplying || persisted.FinishedAt != nil {
+		t.Fatalf("final dependency failure terminalized deployment: %#v", persisted)
+	}
+	application, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if application.ReconcileErrorCode != "desired_spec_dependency_read" || !application.ReconcileRetryable {
+		t.Fatalf("final dependency diagnostic = %#v", application)
+	}
+}
+
+func TestDeploymentDeadlineAppliesDuringStabilization(t *testing.T) {
+	initialReconciler, service, st, mock := newInternalReconciler(t)
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "stabilization-deadline", Image: "nginx:1.27"})
+	if err := initialReconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := service.DeployApp(t.Context(), app.DeployAppRequest{AppName: created.Name, Image: "nginx:1.28"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-time.Minute)
+	deployment.ConvergenceDeadline = &past
+	if err := st.UpdateDeployment(t.Context(), deployment); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stabilizingService := app.NewService(st, mock, "moduleos.local", logger)
+	reconciler := New(mock, stabilizingService, logger).WithStabilizationWindow(time.Hour)
+	if err := reconciler.ReconcileApplication(t.Context(), created.Name); err == nil {
+		t.Fatal("deployment exceeded its deadline during stabilization")
+	}
+	persisted, err := st.GetDeployment(t.Context(), deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != store.DeploymentStatusFailed || persisted.ErrorCode != "convergence_timeout" || persisted.FinishedAt == nil {
+		t.Fatalf("expired stabilizing deployment = %#v", persisted)
+	}
+}
+
 func TestLinkCreatedDuringObservationIsNotFalselyMarkedObserved(t *testing.T) {
 	reconciler, service, st, mock := newInternalReconciler(t)
 	target := mustCreateInternalProject(t, service, "Target", "target")
@@ -532,6 +918,65 @@ func TestLinkCreatedDuringObservationIsNotFalselyMarkedObserved(t *testing.T) {
 	}
 	if persisted.ObservedGeneration != persisted.DesiredGeneration {
 		t.Fatalf("new link did not converge on retry: %#v", persisted)
+	}
+}
+
+func TestLinkDeletedDuringDesiredReadRetriesActiveDeployment(t *testing.T) {
+	initialReconciler, service, st, mock := newInternalReconciler(t)
+	target := mustCreateInternalProject(t, service, "Delete Race Target", "delete-race-target")
+	source := mustCreateInternalProject(t, service, "Delete Race Source", "delete-race-source")
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "link-delete-race", ProjectSlug: target.Slug, Image: "nginx:1.27"})
+	link, err := service.CreateProjectLink(t.Context(), source.Slug, created.Name, "source.link-delete-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialReconciler.Reconcile(t.Context())
+	deployment, err := service.DeployApp(t.Context(), app.DeployAppRequest{AppName: created.Name, Image: "nginx:1.28"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wrapper := &linkDeletionRaceStore{Store: st, base: st, linkID: link.ID}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	raceService := app.NewService(wrapper, mock, "moduleos.local", logger)
+	raceReconciler := New(mock, raceService, logger).WithStabilizationWindow(0)
+	firstErr := raceReconciler.ReconcileApplication(t.Context(), created.Name)
+	if firstErr == nil || !isRetryable(firstErr) {
+		t.Fatalf("link deletion race error = %v, want retryable", firstErr)
+	}
+	inProgress, err := st.GetDeployment(t.Context(), deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inProgress.Status != store.DeploymentStatusApplying || inProgress.FinishedAt != nil {
+		t.Fatalf("link deletion race terminalized deployment: %#v", inProgress)
+	}
+	application, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if application.ReconcileErrorCode != "network_dependency_changed" || !application.ReconcileRetryable {
+		t.Fatalf("link deletion race diagnostic = %#v", application)
+	}
+
+	if err := raceReconciler.ReconcileApplication(t.Context(), created.Name); err != nil {
+		t.Fatalf("link deletion retry did not converge: %v", err)
+	}
+	succeeded, err := st.GetDeployment(t.Context(), deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if succeeded.Status != store.DeploymentStatusSucceeded || succeeded.FinishedAt == nil {
+		t.Fatalf("deployment did not recover after link deletion race: %#v", succeeded)
+	}
+	observed, err := mock.GetService(t.Context(), swarm.ServiceName(created.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, network := range observed.Spec.Networks {
+		if network.Network == source.Network {
+			t.Fatalf("deleted link network remained attached: %#v", observed.Spec.Networks)
+		}
 	}
 }
 
@@ -705,7 +1150,7 @@ func TestWatcherEventsAndFullScanShareTheReconcileQueue(t *testing.T) {
 
 	fast := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "event-fast", Image: "nginx:1.27"})
 	for range 20 {
-		client.events <- swarm.SwarmEvent{Type: "task", Action: "update", Target: swarm.ServiceName(fast.Name)}
+		client.events <- swarm.SwarmEvent{Type: "container", Action: "die", Target: swarm.ServiceName(fast.Name)}
 	}
 	deadline = time.Now().Add(2 * time.Second)
 	for {
@@ -789,6 +1234,7 @@ func TestShortDeterministicDriftRepairSoak(t *testing.T) {
 func TestErrorClassificationAndDiagnosticRedaction(t *testing.T) {
 	if !isRetryable(retryableError("temporary", errors.New("failure"))) ||
 		!isRetryable(fmtError(errdefs.ErrUnavailable)) ||
+		!isRetryable(&timeoutError{}) ||
 		isRetryable(errors.New("permanent")) {
 		t.Fatal("retry classification mismatch")
 	}
@@ -824,6 +1270,12 @@ func TestErrorClassificationAndDiagnosticRedaction(t *testing.T) {
 		t.Fatalf("fallback mutation code = %q", code)
 	}
 }
+
+type timeoutError struct{}
+
+func (*timeoutError) Error() string   { return "temporary network timeout" }
+func (*timeoutError) Timeout() bool   { return true }
+func (*timeoutError) Temporary() bool { return true }
 
 func fmtError(err error) error {
 	return errors.Join(errors.New("wrapped"), err)

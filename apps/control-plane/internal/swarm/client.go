@@ -10,6 +10,8 @@ import (
 type ServiceSpec struct {
 	Name             string
 	Image            string
+	ServiceMode      string
+	EndpointMode     string
 	Replicas         uint64
 	EnvVars          []string // ["KEY=VALUE", ...]
 	Ports            []PortConfig
@@ -18,17 +20,21 @@ type ServiceSpec struct {
 	Networks         []NetworkAttachment
 	TaskTemplateHash string
 	Update           UpdatePolicy
+	Rollback         UpdatePolicy
 	Restart          RestartPolicy
 }
 
 type UpdatePolicy struct {
-	Parallelism uint64
-	Delay       time.Duration
-	Monitor     time.Duration
+	Parallelism   uint64
+	Delay         time.Duration
+	Monitor       time.Duration
+	FailureAction string
+	Order         string
 }
 
 type RestartPolicy struct {
-	Delay time.Duration
+	Condition string
+	Delay     time.Duration
 }
 
 // NetworkAttachment defines the network and aliases a service is attached to.
@@ -52,14 +58,16 @@ type VolumeConfig struct {
 
 // ServiceInfo holds the runtime state of a Swarm service.
 type ServiceInfo struct {
-	ID         string
-	Name       string
-	Image      string
-	Replicas   uint64
-	Running    uint64 // number of running tasks for the current task template
-	Labels     map[string]string
-	Spec       ServiceSpec
-	TaskErrors []string
+	ID                 string
+	Name               string
+	Image              string
+	Replicas           uint64
+	Running            uint64 // desired-running tasks that are running on the current task template
+	Terminating        uint64 // shutdown-desired tasks still running for the service
+	TaskSetFingerprint string
+	Labels             map[string]string
+	Spec               ServiceSpec
+	TaskErrors         []string
 }
 
 type NetworkInfo struct {
@@ -72,8 +80,8 @@ type NetworkInfo struct {
 
 // SwarmEvent represents an event received from Docker.
 type SwarmEvent struct {
-	Type   string // "service" | "task"
-	Action string // "create" | "update" | "remove"
+	Type   string // "service" | "container"
+	Action string
 	Target string // service name or ID
 }
 
@@ -84,6 +92,7 @@ type Client interface {
 	CreateService(ctx context.Context, spec ServiceSpec) error
 	UpdateService(ctx context.Context, serviceID string, spec ServiceSpec) error
 	RemoveService(ctx context.Context, serviceID string) error
+	InspectService(ctx context.Context, serviceID string) (*ServiceInfo, error)
 	GetService(ctx context.Context, serviceID string) (*ServiceInfo, error)
 	ListServices(ctx context.Context) ([]ServiceInfo, error)
 	GetServiceLogs(ctx context.Context, serviceID string, tail string, follow bool) (io.ReadCloser, error)

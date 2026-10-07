@@ -38,7 +38,7 @@ func TestProcessEventsOnlyEnqueuesManagedResources(t *testing.T) {
 	watch := &Watcher{queue: queue, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	events := make(chan swarm.SwarmEvent, 2)
 	errs := make(chan error)
-	events <- swarm.SwarmEvent{Type: "task", Action: "failed", Target: "moduleos_api"}
+	events <- swarm.SwarmEvent{Type: "container", Action: "die", Target: "moduleos_api"}
 	events <- swarm.SwarmEvent{Type: "service", Action: "update", Target: "external"}
 	close(events)
 	close(errs)

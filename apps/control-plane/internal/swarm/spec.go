@@ -62,9 +62,11 @@ func BuildDesiredServiceSpec(input DesiredServiceInput) (ServiceSpec, error) {
 	if input.Image == "" {
 		return ServiceSpec{}, fmt.Errorf("%w: image is required", ErrInvalidSpec)
 	}
-	if _, err := reference.ParseNormalizedNamed(input.Image); err != nil {
+	namedImage, err := reference.ParseNormalizedNamed(input.Image)
+	if err != nil {
 		return ServiceSpec{}, fmt.Errorf("%w: invalid image reference", ErrInvalidSpec)
 	}
+	input.Image = reference.FamiliarString(reference.TagNameOnly(namedImage))
 	if input.Replicas < 0 || input.Generation < 0 {
 		return ServiceSpec{}, fmt.Errorf("%w: replicas and generation cannot be negative", ErrInvalidSpec)
 	}
@@ -112,20 +114,31 @@ func BuildDesiredServiceSpec(input DesiredServiceInput) (ServiceSpec, error) {
 		replicas = 0
 	}
 	result := ServiceSpec{
-		Name:     input.Name,
-		Image:    input.Image,
-		Replicas: replicas,
-		EnvVars:  environment,
-		Ports:    ports,
-		Volumes:  volumes,
-		Labels:   labels,
-		Networks: networks,
+		Name:         input.Name,
+		Image:        input.Image,
+		ServiceMode:  "replicated",
+		EndpointMode: "vip",
+		Replicas:     replicas,
+		EnvVars:      environment,
+		Ports:        ports,
+		Volumes:      volumes,
+		Labels:       labels,
+		Networks:     networks,
 		Update: UpdatePolicy{
-			Parallelism: 1,
-			Delay:       2 * time.Second,
-			Monitor:     10 * time.Second,
+			Parallelism:   1,
+			Delay:         2 * time.Second,
+			Monitor:       10 * time.Second,
+			FailureAction: "pause",
+			Order:         "stop-first",
 		},
-		Restart: RestartPolicy{Delay: 5 * time.Second},
+		Rollback: UpdatePolicy{
+			Parallelism:   1,
+			Delay:         2 * time.Second,
+			Monitor:       10 * time.Second,
+			FailureAction: "pause",
+			Order:         "stop-first",
+		},
+		Restart: RestartPolicy{Condition: "any", Delay: 5 * time.Second},
 	}
 	return WithRolloutIdentity(result, input.RolloutIdentity)
 }

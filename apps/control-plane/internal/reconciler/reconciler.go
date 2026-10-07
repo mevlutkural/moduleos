@@ -36,8 +36,9 @@ type retryState struct {
 }
 
 type stabilityObservation struct {
-	generation int64
-	since      time.Time
+	generation         int64
+	taskSetFingerprint string
+	since              time.Time
 }
 
 type Diagnostics struct {
@@ -340,17 +341,21 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 		return retryableError("store_read", err)
 	}
 	generation := application.DesiredGeneration
-	if err := r.store.PersistReconcileDiagnostics(ctx, application.ID, generation, "", "", false, 0); err != nil && !errors.Is(err, store.ErrStaleObservation) {
+	if err := r.store.PersistReconcileDiagnostics(ctx, application.ID, generation, "", "", false, 0); err != nil {
+		if errors.Is(err, store.ErrStaleObservation) {
+			r.Enqueue(name)
+			return nil
+		}
 		return retryableError("diagnostic_clear", err)
 	}
 	serviceName := swarm.ServiceName(application.Name)
-	observed, inspectErr := r.swarm.GetService(ctx, serviceName)
-	missing := errdefs.IsNotFound(inspectErr)
-	if inspectErr != nil && !missing {
-		return r.persistFailure(ctx, application, "docker_unavailable", inspectErr, true)
-	}
 
 	if application.DeletionTimestamp != nil {
+		observed, inspectErr := r.swarm.InspectService(ctx, serviceName)
+		missing := errdefs.IsNotFound(inspectErr)
+		if inspectErr != nil && !missing {
+			return r.persistFailure(ctx, application, "docker_unavailable", inspectErr, true)
+		}
 		r.clearStabilization(application.ID)
 		if missing {
 			if err := r.store.FinalizeApplicationDeletion(ctx, application.ID, generation); err != nil {
@@ -369,7 +374,12 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 		}
 		return nil
 	}
-	deployment, err := r.deploymentForGeneration(ctx, application.ID, generation)
+	observed, inspectErr := r.swarm.GetService(ctx, serviceName)
+	missing := errdefs.IsNotFound(inspectErr)
+	if inspectErr != nil && !missing {
+		return r.persistFailure(ctx, application, "docker_unavailable", inspectErr, true)
+	}
+	deployment, rolloutIdentity, err := r.deploymentStateForGeneration(ctx, application.ID, generation)
 	if err != nil {
 		return r.persistFailure(ctx, application, "deployment_read", err, true)
 	}
@@ -380,7 +390,7 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 				return nil
 			}
 			if errors.Is(err, store.ErrInvalidTransition) {
-				deployment, err = r.deploymentForGeneration(ctx, application.ID, generation)
+				deployment, rolloutIdentity, err = r.deploymentStateForGeneration(ctx, application.ID, generation)
 				if err != nil {
 					return r.persistFailure(ctx, application, "deployment_read", err, true)
 				}
@@ -392,10 +402,10 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 
 	desired, err := r.appSvc.BuildDesiredServiceSpec(ctx, application)
 	if err != nil {
-		return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", err, false)
+		return r.persistDesiredSpecFailure(ctx, application, deployment, err)
 	}
-	if deployment != nil {
-		desired, err = swarm.WithRolloutIdentity(desired, deployment.ID)
+	if rolloutIdentity != "" {
+		desired, err = swarm.WithRolloutIdentity(desired, rolloutIdentity)
 		if err != nil {
 			return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", err, false)
 		}
@@ -410,6 +420,7 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 	}
 
 	if missing {
+		r.clearStabilization(application.ID)
 		if err := r.swarm.CreateService(ctx, desired); err != nil {
 			return r.persistFailureWithDeployment(ctx, application, deployment, classifyDockerError(err), err, isRetryableMutation(err))
 		}
@@ -424,6 +435,7 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 		fields := swarm.DiffServiceSpec(desired, observed.Spec)
 		if len(fields) > 0 {
 			r.log.Info("service drift detected", "app", name, "fields", fields)
+			r.clearStabilization(application.ID)
 			if err := r.swarm.UpdateService(ctx, observed.ID, desired); err != nil {
 				return r.persistFailureWithDeployment(ctx, application, deployment, classifyDockerError(err), err, isRetryableMutation(err))
 			}
@@ -441,9 +453,9 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 		message := fmt.Sprintf("running tasks %d/%d: %s", observed.Running, desired.Replicas, strings.Join(observed.TaskErrors, "; "))
 		return r.persistFailureWithDeployment(ctx, application, deployment, "task_rejected", errors.New(message), false)
 	}
-	if observed.Running != desired.Replicas {
-		message := fmt.Sprintf("running tasks %d/%d", observed.Running, desired.Replicas)
-		if deployment != nil && deployment.ConvergenceDeadline != nil && time.Now().UTC().After(*deployment.ConvergenceDeadline) {
+	if observed.Running != desired.Replicas || observed.Terminating > 0 {
+		message := fmt.Sprintf("running tasks %d/%d, terminating tasks %d", observed.Running, desired.Replicas, observed.Terminating)
+		if deploymentHasActiveDeadline(deployment) && time.Now().UTC().After(*deployment.ConvergenceDeadline) {
 			return r.persistFailureWithDeployment(ctx, application, deployment, "convergence_timeout", errors.New(message), false)
 		}
 		return r.persistFailureWithDeployment(ctx, application, deployment, "tasks_not_converged", errors.New(message), true)
@@ -451,16 +463,20 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 	if r.stabilization > 0 && desired.Replicas > 0 {
 		r.stableMu.Lock()
 		observation, exists := r.stableSince[application.ID]
-		if !exists || observation.generation != generation {
-			observation = stabilityObservation{generation: generation, since: time.Now().UTC()}
+		if !exists || observation.generation != generation || observation.taskSetFingerprint != observed.TaskSetFingerprint {
+			observation = stabilityObservation{
+				generation:         generation,
+				taskSetFingerprint: observed.TaskSetFingerprint,
+				since:              time.Now().UTC(),
+			}
 			r.stableSince[application.ID] = observation
 		}
 		stable := time.Since(observation.since) >= r.stabilization
-		if stable {
-			delete(r.stableSince, application.ID)
-		}
 		r.stableMu.Unlock()
 		if !stable {
+			if deploymentHasActiveDeadline(deployment) && time.Now().UTC().After(*deployment.ConvergenceDeadline) {
+				return r.persistFailureWithDeployment(ctx, application, deployment, "convergence_timeout", errors.New("tasks did not remain stable before the deployment deadline"), false)
+			}
 			return r.persistFailureWithDeployment(ctx, application, deployment, "stabilizing", errors.New("tasks are running within stabilization window"), true)
 		}
 	} else {
@@ -482,10 +498,10 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 	}
 	currentDesired, err := r.appSvc.BuildDesiredServiceSpec(ctx, current)
 	if err != nil {
-		return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", err, false)
+		return r.persistDesiredSpecFailure(ctx, application, deployment, err)
 	}
-	if deployment != nil {
-		currentDesired, err = swarm.WithRolloutIdentity(currentDesired, deployment.ID)
+	if rolloutIdentity != "" {
+		currentDesired, err = swarm.WithRolloutIdentity(currentDesired, rolloutIdentity)
 		if err != nil {
 			return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", err, false)
 		}
@@ -561,7 +577,7 @@ func (r *Reconciler) ensureApplicationProjectNetworks(ctx context.Context, appli
 		}
 		project, exists := projectsByNetwork[attachment.Network]
 		if !exists {
-			return "network_dependency_missing", fmt.Errorf("project network %q has no durable owner", attachment.Network), false
+			return "network_dependency_changed", fmt.Errorf("project network %q changed while desired state was being read", attachment.Network), true
 		}
 		if project.DeletionTimestamp != nil {
 			return "network_dependency_deleting", fmt.Errorf("project network %q is being deleted", attachment.Network), false
@@ -617,17 +633,38 @@ func (r *Reconciler) markProjectObserved(ctx context.Context, project *store.Pro
 	}
 }
 
-func (r *Reconciler) deploymentForGeneration(ctx context.Context, appID string, generation int64) (*store.Deployment, error) {
+func (r *Reconciler) deploymentStateForGeneration(ctx context.Context, appID string, generation int64) (*store.Deployment, string, error) {
 	deployments, err := r.store.ListDeployments(ctx, appID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
+	var current *store.Deployment
+	var latest *store.Deployment
 	for _, deployment := range deployments {
 		if deployment.TargetGeneration == generation {
-			return deployment, nil
+			current = deployment
+		}
+		if deployment.TargetGeneration > 0 && deployment.TargetGeneration <= generation &&
+			(latest == nil || deployment.TargetGeneration > latest.TargetGeneration) {
+			latest = deployment
 		}
 	}
-	return nil, nil
+	if latest == nil {
+		return current, "", nil
+	}
+	return current, latest.ID, nil
+}
+
+func deploymentHasActiveDeadline(deployment *store.Deployment) bool {
+	if deployment == nil || deployment.ConvergenceDeadline == nil {
+		return false
+	}
+	switch deployment.Status {
+	case store.DeploymentStatusPending, store.DeploymentStatusBuilding, store.DeploymentStatusApplying, store.DeploymentStatusInProgress:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Reconciler) persistFailureWithDeployment(ctx context.Context, application *store.Application, deployment *store.Deployment, code string, cause error, retryable bool) error {
@@ -638,7 +675,18 @@ func (r *Reconciler) persistFailureWithDeployment(ctx context.Context, applicati
 			deploymentErr = fmt.Errorf("mark deployment failed: %w", err)
 		}
 	}
-	return errors.Join(r.persistFailure(ctx, application, code, cause, retryable), deploymentErr)
+	failure := r.persistFailure(ctx, application, code, cause, retryable)
+	if deploymentErr != nil {
+		return retryableError("deployment_state_write", errors.Join(failure, deploymentErr))
+	}
+	return failure
+}
+
+func (r *Reconciler) persistDesiredSpecFailure(ctx context.Context, application *store.Application, deployment *store.Deployment, cause error) error {
+	if errors.Is(cause, store.ErrInvalidData) || errors.Is(cause, swarm.ErrInvalidSpec) {
+		return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", cause, false)
+	}
+	return r.persistFailureWithDeployment(ctx, application, deployment, "desired_spec_dependency_read", cause, true)
 }
 
 func verifyOwnership(info *swarm.ServiceInfo, application *store.Application) error {
@@ -666,7 +714,7 @@ func isRetryable(err error) bool {
 	if errors.As(err, &classified) {
 		return classified.retryable
 	}
-	return errdefs.IsUnavailable(err) || errdefs.IsConflict(err) || errors.Is(err, context.DeadlineExceeded)
+	return swarm.IsTransientError(err)
 }
 
 func isRetryableMutation(err error) bool {
@@ -680,7 +728,7 @@ func classifyDockerError(err error) string {
 		return "docker_dependency_missing"
 	case errdefs.IsConflict(err):
 		return "docker_conflict"
-	case errdefs.IsUnavailable(err), errors.Is(err, context.DeadlineExceeded):
+	case swarm.IsTransientError(err):
 		return "docker_unavailable"
 	case strings.Contains(lower, "port is already allocated"), strings.Contains(lower, "port is already in use"):
 		return "published_port_conflict"

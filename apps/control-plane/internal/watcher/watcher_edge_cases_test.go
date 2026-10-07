@@ -50,7 +50,7 @@ func (c *reconnectingEventClient) WatchEvents(ctx context.Context) (<-chan swarm
 	errs := make(chan error)
 	go func() {
 		if call == 1 {
-			events <- swarm.SwarmEvent{Type: "task", Action: "failed", Target: "moduleos_first"}
+			events <- swarm.SwarmEvent{Type: "container", Action: "die", Target: "moduleos_first"}
 			close(events)
 			return
 		}

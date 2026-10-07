@@ -264,6 +264,20 @@ func TestReconcileDiagnosticsStateAndCAS(t *testing.T) {
 		len(degraded.ReconcileErrorMessage) != 1024 || !degraded.ReconcileRetryable || degraded.ReconcileAttempt != 7 || degraded.LastReconciledAt == nil {
 		t.Fatalf("degraded diagnostics = %#v", degraded)
 	}
+	if degraded.Status != AppStatusCreated {
+		t.Fatalf("retryable diagnostics changed application status to %q", degraded.Status)
+	}
+
+	if err := st.PersistReconcileDiagnostics(ctx, app.ID, 1, "invalid_desired_spec", "terminal failure", false, 8); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := st.GetApplicationByID(ctx, app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.ObservedState != ObservedStateFailed || failed.Status != AppStatusFailed || failed.ReconcileRetryable {
+		t.Fatalf("terminal diagnostics = %#v", failed)
+	}
 
 	if err := st.PersistReconcileDiagnostics(ctx, app.ID, 1, "", "retry cleared", false, 0); err != nil {
 		t.Fatal(err)
@@ -552,8 +566,8 @@ func TestDeploymentIntentDefaultsSupersedeAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if superseded.Status != DeploymentStatusSuperseded {
-		t.Fatalf("first deployment status = %s, want superseded", superseded.Status)
+	if superseded.Status != DeploymentStatusSuperseded || superseded.FinishedAt == nil {
+		t.Fatalf("first deployment was not terminally superseded: %#v", superseded)
 	}
 
 	duplicate := &Deployment{ID: second.ID, Image: "nginx:must-rollback", CreatedAt: time.Now().UTC()}
@@ -584,6 +598,131 @@ func TestDeploymentIntentDefaultsSupersedeAndRollback(t *testing.T) {
 	}
 	if _, err := st.CreateDeploymentIntent(ctx, deleting.Name, &Deployment{ID: uuid.NewString(), Image: "nginx:blocked", CreatedAt: time.Now().UTC()}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("deployment during deletion error = %v, want ErrConflict", err)
+	}
+}
+
+func TestOrdinaryApplicationIntentsSupersedeActiveDeployments(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(context.Context, *SQLiteStore, *Application) (*Application, error)
+	}{
+		{
+			name: "configuration update",
+			mutate: func(ctx context.Context, st *SQLiteStore, application *Application) (*Application, error) {
+				replicas := 2
+				return st.UpdateApplicationIntent(ctx, application.Name, application.DesiredGeneration, ApplicationMutation{Replicas: &replicas})
+			},
+		},
+		{
+			name: "deletion",
+			mutate: func(ctx context.Context, st *SQLiteStore, application *Application) (*Application, error) {
+				return st.CreateDeletionIntent(ctx, application.Name, application.DesiredGeneration)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st := newInternalTestStore(t)
+			ctx := t.Context()
+			application := createInternalTestApp(t, st, "supersede-"+strings.ReplaceAll(test.name, " ", "-"))
+			deployment := &Deployment{ID: uuid.NewString(), Image: "nginx:2.0", CreatedAt: time.Now().UTC()}
+			application, err := st.CreateDeploymentIntent(ctx, application.Name, deployment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.MarkDeploymentState(ctx, deployment.ID, deployment.TargetGeneration, DeploymentStatusApplying, "", ""); err != nil {
+				t.Fatal(err)
+			}
+
+			application, err = test.mutate(ctx, st, application)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if application.DesiredGeneration != deployment.TargetGeneration+1 {
+				t.Fatalf("new generation = %d, deployment target = %d", application.DesiredGeneration, deployment.TargetGeneration)
+			}
+			persisted, err := st.GetDeployment(ctx, deployment.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Status != DeploymentStatusSuperseded || persisted.FinishedAt == nil {
+				t.Fatalf("overtaken deployment remained active: %#v", persisted)
+			}
+		})
+	}
+}
+
+func TestObservedDeploymentIsSucceededWhenLaterIntentOvertakesIt(t *testing.T) {
+	st := newInternalTestStore(t)
+	ctx := t.Context()
+	application := createInternalTestApp(t, st, "observed-before-deployment-terminal")
+	deployment := &Deployment{ID: uuid.NewString(), Image: "nginx:2.0", CreatedAt: time.Now().UTC()}
+	application, err := st.CreateDeploymentIntent(ctx, application.Name, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkDeploymentState(ctx, deployment.ID, deployment.TargetGeneration, DeploymentStatusApplying, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkApplicationObserved(ctx, application.ID, ObservedApplicationUpdate{
+		Generation: deployment.TargetGeneration,
+		State:      ObservedStateRunning,
+		Image:      deployment.Image,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application, err = st.GetApplication(ctx, application.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replicas := 2
+	if _, err := st.UpdateApplicationIntent(ctx, application.Name, application.DesiredGeneration, ApplicationMutation{Replicas: &replicas}); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := st.GetDeployment(ctx, deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != DeploymentStatusSucceeded || persisted.FinishedAt == nil {
+		t.Fatalf("observed deployment was not preserved as successful: %#v", persisted)
+	}
+}
+
+func TestOlderUnobservedDeploymentIsSupersededByLaterObservedGeneration(t *testing.T) {
+	st := newInternalTestStore(t)
+	ctx := t.Context()
+	application := createInternalTestApp(t, st, "older-unobserved-deployment")
+	deployment := &Deployment{ID: uuid.NewString(), Image: "nginx:2.0", CreatedAt: time.Now().UTC()}
+	application, err := st.CreateDeploymentIntent(ctx, application.Name, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkDeploymentState(ctx, deployment.ID, deployment.TargetGeneration, DeploymentStatusApplying, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.db.ExecContext(ctx, `UPDATE applications SET
+		desired_generation = 3, observed_generation = 3, image = 'nginx:3.0', observed_image = 'nginx:3.0'
+		WHERE id = ?`, application.ID); err != nil {
+		t.Fatal(err)
+	}
+	application, err = st.GetApplication(ctx, application.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replicas := 2
+	if _, err := st.UpdateApplicationIntent(ctx, application.Name, application.DesiredGeneration, ApplicationMutation{Replicas: &replicas}); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := st.GetDeployment(ctx, deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != DeploymentStatusSuperseded || persisted.FinishedAt == nil {
+		t.Fatalf("unobserved deployment was not superseded: %#v", persisted)
 	}
 }
 

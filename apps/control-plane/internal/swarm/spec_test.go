@@ -178,6 +178,30 @@ func TestBuildDesiredServiceSpecStopped(t *testing.T) {
 	}
 }
 
+func TestBuildDesiredServiceSpecNormalizesImageReference(t *testing.T) {
+	tests := map[string]struct {
+		input string
+		want  string
+	}{
+		"short name receives implicit tag": {input: "nginx", want: "nginx:latest"},
+		"explicit tag remains unchanged":   {input: "nginx:1.27", want: "nginx:1.27"},
+		"digest remains unchanged":         {input: validDesiredInput().Image, want: validDesiredInput().Image},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			input := validDesiredInput()
+			input.Image = test.input
+			spec, err := BuildDesiredServiceSpec(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if spec.Image != test.want {
+				t.Fatalf("normalized image = %q, want %q", spec.Image, test.want)
+			}
+		})
+	}
+}
+
 func TestBuildDesiredServiceSpecRejectsInvalidInput(t *testing.T) {
 	tests := map[string]func(*DesiredServiceInput){
 		"empty image":                  func(in *DesiredServiceInput) { in.Image = "" },

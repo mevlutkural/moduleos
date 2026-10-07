@@ -616,6 +616,9 @@ func (s *SQLiteStore) UpdateApplicationIntent(ctx context.Context, name string, 
 	if err := updateApplicationTx(ctx, tx, app); err != nil {
 		return nil, err
 	}
+	if err := terminalizeOvertakenDeploymentsTx(ctx, tx, app.ID, app.DesiredGeneration, app.ObservedGeneration, now); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -707,9 +710,7 @@ func (s *SQLiteStore) CreateDeploymentIntent(ctx context.Context, name string, d
 	if err := updateApplicationTx(ctx, tx, app); err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE deployments SET status = ?
-		WHERE app_id = ? AND status IN (?, ?, ?)`, DeploymentStatusSuperseded, app.ID,
-		DeploymentStatusPending, DeploymentStatusApplying, DeploymentStatusInProgress); err != nil {
+	if err := terminalizeOvertakenDeploymentsTx(ctx, tx, app.ID, app.DesiredGeneration, app.ObservedGeneration, now); err != nil {
 		return nil, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO deployments
@@ -798,6 +799,9 @@ func (s *SQLiteStore) CreateDeletionIntent(ctx context.Context, name string, exp
 	if err := updateApplicationTx(ctx, tx, app); err != nil {
 		return nil, err
 	}
+	if err := terminalizeOvertakenDeploymentsTx(ctx, tx, app.ID, app.DesiredGeneration, app.ObservedGeneration, now); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -824,9 +828,11 @@ func (s *SQLiteStore) PersistReconcileDiagnostics(ctx context.Context, appID str
 	result, err := s.db.ExecContext(ctx, `UPDATE applications SET reconcile_error_code = ?,
 		reconcile_error_message = ?, reconcile_retryable = ?, reconcile_attempt = ?,
 		observed_state = CASE WHEN ? = '' THEN 'reconciling' WHEN ? = 1 THEN 'degraded' ELSE 'failed' END,
+		status = CASE WHEN ? <> '' AND ? = 0 THEN 'failed' ELSE status END,
 		last_reconciled_at = ?, updated_at = ? WHERE id = ? AND desired_generation = ?`,
 		code, truncateSafeMessage(message), boolToInt(retryable), attempt,
-		code, boolToInt(retryable), time.Now().UTC(), time.Now().UTC(), appID, generation)
+		code, boolToInt(retryable), code, boolToInt(retryable),
+		time.Now().UTC(), time.Now().UTC(), appID, generation)
 	if err != nil {
 		return err
 	}
@@ -1012,6 +1018,17 @@ func deploymentTransitionSources(target DeploymentStatus) ([]DeploymentStatus, b
 	default:
 		return nil, false
 	}
+}
+
+func terminalizeOvertakenDeploymentsTx(ctx context.Context, tx *sql.Tx, appID string, generation, observedGeneration int64, finishedAt time.Time) error {
+	_, err := tx.ExecContext(ctx, `UPDATE deployments SET
+			status = CASE WHEN target_generation > 0 AND target_generation = ? THEN ? ELSE ? END,
+		finished_at = COALESCE(finished_at, ?)
+		WHERE app_id = ? AND target_generation < ? AND status IN (?, ?, ?, ?)`,
+		observedGeneration, DeploymentStatusSucceeded, DeploymentStatusSuperseded,
+		finishedAt, appID, generation,
+		DeploymentStatusPending, DeploymentStatusBuilding, DeploymentStatusApplying, DeploymentStatusInProgress)
+	return err
 }
 
 func (s *SQLiteStore) classifyApplicationCASMiss(ctx context.Context, appID string, conflict error) error {

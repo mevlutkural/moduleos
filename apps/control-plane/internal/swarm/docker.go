@@ -2,9 +2,12 @@ package swarm
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -157,6 +160,14 @@ func (c *DockerClient) RemoveService(ctx context.Context, serviceID string) erro
 		return fmt.Errorf("failed to remove service: %w", err)
 	}
 	return nil
+}
+
+func (c *DockerClient) InspectService(ctx context.Context, serviceID string) (*ServiceInfo, error) {
+	result, err := c.docker.ServiceInspect(ctx, serviceID, client.ServiceInspectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("service not found: %w", err)
+	}
+	return toServiceInfo(result.Service), nil
 }
 
 // AttachServiceNetwork attaches a network to a service, preserving other configurations.
@@ -319,31 +330,57 @@ func (c *DockerClient) GetService(ctx context.Context, serviceID string) (*Servi
 	}
 	filters := make(client.Filters)
 	filters.Add("service", result.Service.ID)
-	filters.Add("desired-state", "running")
 	tasks, taskErr := c.docker.TaskList(ctx, client.TaskListOptions{Filters: filters})
 	if taskErr != nil {
 		return nil, fmt.Errorf("failed to list tasks for service %q: %w", serviceID, taskErr)
 	}
 	info.Running = 0
+	info.Terminating = 0
+	currentTaskIDs := make([]string, 0, len(tasks.Items))
 	for _, task := range tasks.Items {
-		if info.Spec.TaskTemplateHash != "" && taskTemplateMarker(task.Spec) != info.Spec.TaskTemplateHash {
+		if task.Status.State == dockerswarm.TaskStateRunning && task.DesiredState != dockerswarm.TaskStateRunning {
+			info.Terminating++
+		}
+		if !taskMatchesTemplate(task.Spec, result.Service.Spec.TaskTemplate) {
 			continue
 		}
-		if task.Status.State == dockerswarm.TaskStateRunning {
+		if task.DesiredState == dockerswarm.TaskStateRunning {
+			currentTaskIDs = append(currentTaskIDs, task.ID)
+		}
+		if task.Status.State == dockerswarm.TaskStateRunning && task.DesiredState == dockerswarm.TaskStateRunning {
 			info.Running++
 		}
-		if task.Status.Err != "" {
+		if task.DesiredState == dockerswarm.TaskStateRunning && task.Status.Err != "" {
 			info.TaskErrors = append(info.TaskErrors, task.Status.Err)
 		}
 	}
+	sort.Strings(currentTaskIDs)
+	info.TaskSetFingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(currentTaskIDs, "\x00"))))
 	return info, nil
 }
 
-func taskTemplateMarker(spec dockerswarm.TaskSpec) string {
-	if spec.ContainerSpec == nil {
-		return ""
+func taskMatchesTemplate(task, current dockerswarm.TaskSpec) bool {
+	return reflect.DeepEqual(normalizeTaskRuntime(task), normalizeTaskRuntime(current))
+}
+
+func normalizeTaskRuntime(spec dockerswarm.TaskSpec) dockerswarm.TaskSpec {
+	if spec.ContainerSpec != nil && (spec.Runtime == "" || spec.Runtime == dockerswarm.RuntimeContainer) {
+		spec.Runtime = ""
 	}
-	return spec.ContainerSpec.Labels[LabelTaskTemplate]
+	return spec
+}
+
+func IsTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if client.IsErrConnectionFailed(err) || errdefs.IsUnavailable(err) || errdefs.IsConflict(err) ||
+		errdefs.IsResourceExhausted(err) || errdefs.IsInternal(err) ||
+		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary())
 }
 
 // ListServices lists all services managed by moduleos.
@@ -387,7 +424,7 @@ func (c *DockerClient) WatchEvents(ctx context.Context) (<-chan SwarmEvent, <-ch
 	errCh := make(chan error, 1)
 
 	filters := make(client.Filters)
-	filters.Add("type", "service", "task")
+	filters.Add("type", "service", "container")
 	dockerEvents := c.docker.Events(ctx, client.EventsListOptions{Filters: filters})
 
 	go func() {
@@ -407,6 +444,9 @@ func (c *DockerClient) WatchEvents(ctx context.Context) (<-chan SwarmEvent, <-ch
 					return
 				}
 				target := e.Actor.Attributes["com.docker.swarm.service.name"]
+				if target == "" {
+					target = e.Actor.Attributes["service"]
+				}
 				if target == "" {
 					target = e.Actor.Attributes["name"]
 				}
@@ -529,7 +569,7 @@ func buildSwarmSpec(spec ServiceSpec) dockerswarm.ServiceSpec {
 			},
 			Networks: netAttachments,
 			RestartPolicy: &dockerswarm.RestartPolicy{
-				Condition: dockerswarm.RestartPolicyConditionAny,
+				Condition: dockerswarm.RestartPolicyCondition(spec.Restart.Condition),
 				Delay:     &spec.Restart.Delay,
 			},
 		},
@@ -539,22 +579,22 @@ func buildSwarmSpec(spec ServiceSpec) dockerswarm.ServiceSpec {
 			},
 		},
 		EndpointSpec: &dockerswarm.EndpointSpec{
-			Mode:  dockerswarm.ResolutionModeVIP,
+			Mode:  dockerswarm.ResolutionMode(spec.EndpointMode),
 			Ports: ports,
 		},
 		UpdateConfig: &dockerswarm.UpdateConfig{
 			Parallelism:   spec.Update.Parallelism,
 			Delay:         spec.Update.Delay,
 			Monitor:       spec.Update.Monitor,
-			FailureAction: dockerswarm.UpdateFailureActionPause,
-			Order:         dockerswarm.UpdateOrderStopFirst,
+			FailureAction: dockerswarm.FailureAction(spec.Update.FailureAction),
+			Order:         dockerswarm.UpdateOrder(spec.Update.Order),
 		},
 		RollbackConfig: &dockerswarm.UpdateConfig{
-			Parallelism:   1,
-			Delay:         spec.Update.Delay,
-			Monitor:       spec.Update.Monitor,
-			FailureAction: dockerswarm.UpdateFailureActionPause,
-			Order:         dockerswarm.UpdateOrderStopFirst,
+			Parallelism:   spec.Rollback.Parallelism,
+			Delay:         spec.Rollback.Delay,
+			Monitor:       spec.Rollback.Monitor,
+			FailureAction: dockerswarm.FailureAction(spec.Rollback.FailureAction),
+			Order:         dockerswarm.UpdateOrder(spec.Rollback.Order),
 		},
 	}
 }
@@ -583,26 +623,33 @@ func toServiceInfo(svc dockerswarm.Service) *ServiceInfo {
 		running = svc.ServiceStatus.RunningTasks
 	}
 
+	spec := serviceSpecFromDocker(svc.Spec)
 	info := &ServiceInfo{
 		ID:       svc.ID,
 		Name:     svc.Spec.Name,
-		Image:    svc.Spec.TaskTemplate.ContainerSpec.Image,
+		Image:    spec.Image,
 		Replicas: replicas,
 		Running:  running,
 		Labels:   svc.Spec.Labels,
+		Spec:     spec,
 	}
-	info.Spec = serviceSpecFromDocker(svc.Spec)
 	return info
 }
 
 func serviceSpecFromDocker(spec dockerswarm.ServiceSpec) ServiceSpec {
 	result := ServiceSpec{
-		Name:     strings.TrimPrefix(spec.Name, servicePrefix),
-		Labels:   spec.Labels,
-		Replicas: 0,
+		Name:   strings.TrimPrefix(spec.Name, servicePrefix),
+		Labels: spec.Labels,
 	}
 	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas != nil {
+		result.ServiceMode = "replicated"
 		result.Replicas = *spec.Mode.Replicated.Replicas
+	} else if spec.Mode.Global != nil {
+		result.ServiceMode = "global"
+	} else if spec.Mode.ReplicatedJob != nil {
+		result.ServiceMode = "replicated-job"
+	} else if spec.Mode.GlobalJob != nil {
+		result.ServiceMode = "global-job"
 	}
 	if containerSpec := spec.TaskTemplate.ContainerSpec; containerSpec != nil {
 		result.Image = containerSpec.Image
@@ -623,6 +670,7 @@ func serviceSpecFromDocker(spec dockerswarm.ServiceSpec) ServiceSpec {
 		})
 	}
 	if spec.EndpointSpec != nil {
+		result.EndpointMode = string(spec.EndpointSpec.Mode)
 		for _, port := range spec.EndpointSpec.Ports {
 			result.Ports = append(result.Ports, PortConfig{
 				ContainerPort: port.TargetPort,
@@ -634,20 +682,37 @@ func serviceSpecFromDocker(spec dockerswarm.ServiceSpec) ServiceSpec {
 	}
 	if spec.UpdateConfig != nil {
 		result.Update = UpdatePolicy{
-			Parallelism: spec.UpdateConfig.Parallelism,
-			Delay:       spec.UpdateConfig.Delay,
-			Monitor:     spec.UpdateConfig.Monitor,
+			Parallelism:   spec.UpdateConfig.Parallelism,
+			Delay:         spec.UpdateConfig.Delay,
+			Monitor:       spec.UpdateConfig.Monitor,
+			FailureAction: string(spec.UpdateConfig.FailureAction),
+			Order:         string(spec.UpdateConfig.Order),
+		}
+	}
+	if spec.RollbackConfig != nil {
+		result.Rollback = UpdatePolicy{
+			Parallelism:   spec.RollbackConfig.Parallelism,
+			Delay:         spec.RollbackConfig.Delay,
+			Monitor:       spec.RollbackConfig.Monitor,
+			FailureAction: string(spec.RollbackConfig.FailureAction),
+			Order:         string(spec.RollbackConfig.Order),
 		}
 	}
 	if spec.TaskTemplate.RestartPolicy != nil && spec.TaskTemplate.RestartPolicy.Delay != nil {
+		result.Restart.Condition = string(spec.TaskTemplate.RestartPolicy.Condition)
 		result.Restart.Delay = *spec.TaskTemplate.RestartPolicy.Delay
+	} else if spec.TaskTemplate.RestartPolicy != nil {
+		result.Restart.Condition = string(spec.TaskTemplate.RestartPolicy.Condition)
 	}
-	ports, _ := normalizePorts(result.Ports)
-	result.Ports = ports
-	volumes, _ := normalizeVolumes(result.Volumes)
-	result.Volumes = volumes
-	networks, _ := normalizeNetworks(result.Networks)
-	result.Networks = networks
+	if ports, err := normalizePorts(result.Ports); err == nil {
+		result.Ports = ports
+	}
+	if volumes, err := normalizeVolumes(result.Volumes); err == nil {
+		result.Volumes = volumes
+	}
+	if networks, err := normalizeNetworks(result.Networks); err == nil {
+		result.Networks = networks
+	}
 	sort.Strings(result.EnvVars)
 	return result
 }

@@ -850,8 +850,16 @@ func TestConcurrentDeployAndScaleSerializeWithoutLostIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deployments) != 1 || deployments[0].Status != store.DeploymentStatusPending || deployments[0].TargetGeneration != persisted.DesiredGeneration {
-		t.Fatalf("deployment no longer tracks the current generation: %#v", deployments)
+	if len(deployments) != 1 {
+		t.Fatalf("deployment history = %#v", deployments)
+	}
+	if deployments[0].TargetGeneration < persisted.DesiredGeneration {
+		if deployments[0].Status != store.DeploymentStatusSuperseded || deployments[0].FinishedAt == nil ||
+			deployments[0].TargetGeneration != persisted.DesiredGeneration-1 {
+			t.Fatalf("overtaken deployment was not terminalized: %#v", deployments[0])
+		}
+	} else if deployments[0].Status != store.DeploymentStatusPending || deployments[0].TargetGeneration != persisted.DesiredGeneration {
+		t.Fatalf("current deployment lost its generation: %#v", deployments[0])
 	}
 }
 

@@ -215,6 +215,101 @@ func TestReconcileRepairsCanonicalSpecDrift(t *testing.T) {
 	}
 }
 
+func TestReconcileRepairsFixedDockerPolicyDrift(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := context.Background()
+	appSvc := appSvcFromStore(t, st, mock)
+	created, err := appSvc.CreateApp(ctx, app.CreateAppRequest{Name: "policy-drift", Image: "nginx:1.27"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime := mock.Services[swarm.ServiceName(created.Name)]
+	runtime.Spec.EndpointMode = "dnsrr"
+	runtime.Spec.Update.FailureAction = "continue"
+	runtime.Spec.Update.Order = "start-first"
+	runtime.Spec.Rollback.FailureAction = "continue"
+	runtime.Spec.Rollback.Order = "start-first"
+	runtime.Spec.Restart.Condition = "on-failure"
+	updates := mock.UpdateCalls
+
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if mock.UpdateCalls != updates+1 {
+		t.Fatalf("fixed Docker policy drift caused %d updates, want 1", mock.UpdateCalls-updates)
+	}
+	desired := mustBuildDesiredSpec(t, appSvc, ctx, created)
+	if fields := swarm.DiffServiceSpec(desired, runtime.Spec); len(fields) != 0 {
+		t.Fatalf("fixed Docker policy drift remains: %v", fields)
+	}
+}
+
+func TestReconcileConvergesWithUnpublishedContainerPort(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := context.Background()
+	appSvc := appSvcFromStore(t, st, mock)
+	created, err := appSvc.CreateApp(ctx, app.CreateAppRequest{
+		Name:  "internal-port",
+		Image: "nginx:1.27",
+		Ports: []swarm.PortConfig{{ContainerPort: 8080}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	updates := mock.UpdateCalls
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if mock.UpdateCalls != updates {
+		t.Fatalf("stable internal-only port caused %d service updates", mock.UpdateCalls-updates)
+	}
+	persisted := mustGetApp(t, st, ctx, created.Name)
+	if persisted.ObservedGeneration != persisted.DesiredGeneration || persisted.ObservedState != store.ObservedStateRunning {
+		t.Fatalf("internal-only port did not converge: %#v", persisted)
+	}
+}
+
+func TestReconcileRemovesUnexpectedDynamicPublishedPort(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := context.Background()
+	appSvc := appSvcFromStore(t, st, mock)
+	created, err := appSvc.CreateApp(ctx, app.CreateAppRequest{
+		Name:  "dynamic-port-drift",
+		Image: "nginx:1.27",
+		Ports: []swarm.PortConfig{{ContainerPort: 8080}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	service := mock.Services[swarm.ServiceName(created.Name)]
+	service.Spec.Ports = []swarm.PortConfig{{ContainerPort: 8080, Protocol: "tcp", PublishMode: "host"}}
+	updates := mock.UpdateCalls
+
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if mock.UpdateCalls != updates+1 {
+		t.Fatalf("dynamic published port drift caused %d updates, want 1", mock.UpdateCalls-updates)
+	}
+	observed := mustGetRuntimeService(t, mock, ctx, swarm.ServiceName(created.Name))
+	if len(observed.Spec.Ports) != 0 {
+		t.Fatalf("service ports after repair = %#v", observed.Spec.Ports)
+	}
+	if fields := swarm.DiffServiceSpec(mustBuildDesiredSpec(t, appSvc, ctx, created), observed.Spec); len(fields) != 0 {
+		t.Fatalf("service still drifted after repair: %v", fields)
+	}
+}
+
 func TestReconcileOwnershipConflictFailsClosed(t *testing.T) {
 	rec, st, mock := setup(t)
 	ctx := context.Background()
@@ -590,6 +685,42 @@ func TestRedeployOfMutableTagForcesNewTaskTemplate(t *testing.T) {
 	}
 }
 
+func TestScaleAfterDeploymentPreservesTaskTemplate(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := t.Context()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "scale-after-deploy", Image: "nginx:1.0"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployment := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name, Image: "nginx:2.0"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	runtimeService := mock.Services[swarm.ServiceName(created.Name)]
+	deployedTemplate := runtimeService.Spec.TaskTemplateHash
+	updatesBeforeScale := mock.UpdateCalls
+	current := mustGetApp(t, st, ctx, created.Name)
+	if _, err := service.ScaleAppIntent(ctx, created.Name, 2, current.DesiredGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeService = mock.Services[swarm.ServiceName(created.Name)]
+	if runtimeService.Spec.TaskTemplateHash != deployedTemplate {
+		t.Fatalf("scale changed rollout marker: before=%q after=%q", deployedTemplate, runtimeService.Spec.TaskTemplateHash)
+	}
+	if mock.UpdateCalls != updatesBeforeScale+1 {
+		t.Fatalf("scale update calls = %d, want %d", mock.UpdateCalls, updatesBeforeScale+1)
+	}
+	persisted := mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.Status != store.DeploymentStatusSucceeded {
+		t.Fatalf("completed deployment was rewritten by scale: %#v", persisted)
+	}
+}
+
 func TestDeploymentWaitsForCurrentTaskTemplate(t *testing.T) {
 	initialReconciler, st, mock := setup(t)
 	ctx := context.Background()
@@ -681,6 +812,9 @@ func TestRejectedTaskFailsDeploymentWithoutAdvancingObservedImage(t *testing.T) 
 	if application.ObservedImage != "nginx:1.0" {
 		t.Fatalf("observed image advanced to %q", application.ObservedImage)
 	}
+	if application.Status != store.AppStatusFailed || application.ObservedState != store.ObservedStateFailed {
+		t.Fatalf("terminal failure status = %#v", application)
+	}
 
 	service.TaskErrors = nil
 	service.Running = service.Replicas
@@ -695,6 +829,70 @@ func TestRejectedTaskFailsDeploymentWithoutAdvancingObservedImage(t *testing.T) 
 	application = mustGetApp(t, st, ctx, created.Name)
 	if application.ObservedImage != "missing.invalid/image:nope" {
 		t.Fatalf("recovered runtime image was not observed: %q", application.ObservedImage)
+	}
+	if application.Status != store.AppStatusRunning || application.ObservedState != store.ObservedStateRunning {
+		t.Fatalf("recovered application status = %#v", application)
+	}
+}
+
+func TestTerminalDeploymentDeadlineDoesNotDisableDriftRecovery(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := t.Context()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "terminal-deadline", Image: "nginx:1.0"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployment := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name, Image: "nginx:2.0"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted := mustGetDeployment(t, st, ctx, deployment.ID)
+	past := time.Now().UTC().Add(-time.Minute)
+	persisted.ConvergenceDeadline = &past
+	if err := st.UpdateDeployment(ctx, persisted); err != nil {
+		t.Fatal(err)
+	}
+	mock.Services[swarm.ServiceName(created.Name)].Running = 0
+
+	err := rec.ReconcileApplication(ctx, created.Name)
+	if err == nil {
+		t.Fatal("runtime drift unexpectedly converged")
+	}
+	persisted = mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.Status != store.DeploymentStatusSucceeded || persisted.ErrorCode != "" {
+		t.Fatalf("terminal deployment was rewritten by runtime drift: %#v", persisted)
+	}
+	application := mustGetApp(t, st, ctx, created.Name)
+	if application.ReconcileErrorCode != "tasks_not_converged" || !application.ReconcileRetryable {
+		t.Fatalf("runtime drift diagnostic = %#v", application)
+	}
+}
+
+func TestReconcileWaitsForTerminatingCurrentTemplateTask(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := t.Context()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "terminating-task", Image: "nginx:1.27"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	runtimeService := mock.Services[swarm.ServiceName(created.Name)]
+	runtimeService.Terminating = 1
+
+	err := rec.ReconcileApplication(ctx, created.Name)
+	if err == nil {
+		t.Fatal("service converged while a current-template task was terminating")
+	}
+	application := mustGetApp(t, st, ctx, created.Name)
+	if application.ReconcileErrorCode != "tasks_not_converged" || !application.ReconcileRetryable {
+		t.Fatalf("terminating task diagnostic = %#v", application)
+	}
+
+	runtimeService.Terminating = 0
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatalf("service did not converge after termination: %v", err)
 	}
 }
 

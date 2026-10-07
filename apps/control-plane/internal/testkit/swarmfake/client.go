@@ -86,14 +86,16 @@ func (m *Client) CreateService(_ context.Context, spec swarm.ServiceSpec) error 
 		return m.CreateError
 	}
 	name := swarm.ServiceName(spec.Name)
+	runtimeSpec := runtimeServiceSpec(spec)
 	m.Services[name] = &swarm.ServiceInfo{
-		ID:       "mock-id-" + spec.Name,
-		Name:     name,
-		Image:    spec.Image,
-		Replicas: spec.Replicas,
-		Running:  spec.Replicas,
-		Labels:   spec.Labels,
-		Spec:     spec,
+		ID:                 "mock-id-" + spec.Name,
+		Name:               name,
+		Image:              spec.Image,
+		Replicas:           spec.Replicas,
+		Running:            spec.Replicas,
+		TaskSetFingerprint: fmt.Sprintf("created-%d", m.CreateCalls),
+		Labels:             spec.Labels,
+		Spec:               runtimeSpec,
 	}
 	return nil
 }
@@ -124,9 +126,21 @@ func (m *Client) UpdateService(_ context.Context, serviceID string, spec swarm.S
 	svc.Image = spec.Image
 	svc.Replicas = spec.Replicas
 	svc.Running = spec.Replicas
+	svc.TaskSetFingerprint = fmt.Sprintf("updated-%d", m.UpdateCalls)
 	svc.Labels = spec.Labels
-	svc.Spec = spec
+	svc.Spec = runtimeServiceSpec(spec)
 	return nil
+}
+
+func runtimeServiceSpec(spec swarm.ServiceSpec) swarm.ServiceSpec {
+	var ports []swarm.PortConfig
+	for _, port := range spec.Ports {
+		if port.PublishedPort != 0 {
+			ports = append(ports, port)
+		}
+	}
+	spec.Ports = ports
+	return spec
 }
 
 func (m *Client) RemoveService(_ context.Context, serviceID string) error {
@@ -170,6 +184,10 @@ func (m *Client) GetService(_ context.Context, serviceID string) (*swarm.Service
 	}
 	copy := *svc
 	return &copy, nil
+}
+
+func (m *Client) InspectService(ctx context.Context, serviceID string) (*swarm.ServiceInfo, error) {
+	return m.GetService(ctx, serviceID)
 }
 
 func (m *Client) ListServices(_ context.Context) ([]swarm.ServiceInfo, error) {

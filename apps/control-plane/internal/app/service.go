@@ -510,7 +510,7 @@ func (s *Service) GetLogs(ctx context.Context, serviceID string, tail string, fo
 }
 
 func (s *Service) GetApplicationLogs(ctx context.Context, application *store.Application, tail string, follow bool) (io.ReadCloser, error) {
-	info, err := s.swarm.GetService(ctx, swarm.ServiceName(application.Name))
+	info, err := s.swarm.InspectService(ctx, swarm.ServiceName(application.Name))
 	if err != nil {
 		return nil, fmt.Errorf("inspect service for logs: %w", err)
 	}

@@ -71,6 +71,24 @@ func TestServiceSpecFromDockerFiltersAndNormalizesRuntimeData(t *testing.T) {
 	}
 }
 
+func TestServiceSpecFromDockerPreservesInvalidObservedMountForDriftDetection(t *testing.T) {
+	desired := canonicalServiceSpec()
+	desired.Volumes = nil
+	runtimeSpec := buildSwarmSpec(desired)
+	runtimeSpec.TaskTemplate.ContainerSpec.Mounts = append(
+		runtimeSpec.TaskTemplate.ContainerSpec.Mounts,
+		mount.Mount{Type: mount.TypeBind, Source: "/etc", Target: "/host-etc"},
+	)
+
+	observed := serviceSpecFromDocker(runtimeSpec)
+	if len(observed.Volumes) != 1 || observed.Volumes[0].Source != "/etc" {
+		t.Fatalf("invalid observed mount was discarded: %#v", observed.Volumes)
+	}
+	if got := DiffServiceSpec(desired, observed); !reflect.DeepEqual(got, []string{"mounts"}) {
+		t.Fatalf("invalid observed mount did not produce drift: %v", got)
+	}
+}
+
 func TestToServiceInfoProjectsDockerStatus(t *testing.T) {
 	replicas := uint64(2)
 	spec := buildSwarmSpec(canonicalServiceSpec())
