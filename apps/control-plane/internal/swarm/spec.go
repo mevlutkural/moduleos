@@ -48,6 +48,7 @@ type DesiredServiceInput struct {
 	IngressPort     uint32
 	IngressNetwork  string
 	BaseDomain      string
+	RolloutIdentity string
 	PreservedLabels map[string]string
 }
 
@@ -126,27 +127,33 @@ func BuildDesiredServiceSpec(input DesiredServiceInput) (ServiceSpec, error) {
 		},
 		Restart: RestartPolicy{Delay: 5 * time.Second},
 	}
-	templateHash, err := taskTemplateHash(result)
+	return WithRolloutIdentity(result, input.RolloutIdentity)
+}
+
+func WithRolloutIdentity(spec ServiceSpec, identity string) (ServiceSpec, error) {
+	templateHash, err := taskTemplateHash(spec, identity)
 	if err != nil {
 		return ServiceSpec{}, fmt.Errorf("%w: hash task template: %v", ErrInvalidSpec, err)
 	}
-	result.TaskTemplateHash = templateHash
-	return result, nil
+	spec.TaskTemplateHash = templateHash
+	return spec, nil
 }
 
-func taskTemplateHash(spec ServiceSpec) (string, error) {
+func taskTemplateHash(spec ServiceSpec, rolloutIdentity string) (string, error) {
 	payload, err := json.Marshal(struct {
-		Image    string
-		EnvVars  []string
-		Volumes  []VolumeConfig
-		Networks []NetworkAttachment
-		Restart  RestartPolicy
+		Image           string
+		EnvVars         []string
+		Volumes         []VolumeConfig
+		Networks        []NetworkAttachment
+		Restart         RestartPolicy
+		RolloutIdentity string
 	}{
-		Image:    spec.Image,
-		EnvVars:  spec.EnvVars,
-		Volumes:  spec.Volumes,
-		Networks: spec.Networks,
-		Restart:  spec.Restart,
+		Image:           spec.Image,
+		EnvVars:         spec.EnvVars,
+		Volumes:         spec.Volumes,
+		Networks:        spec.Networks,
+		Restart:         spec.Restart,
+		RolloutIdentity: rolloutIdentity,
 	})
 	if err != nil {
 		return "", err

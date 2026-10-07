@@ -305,6 +305,24 @@ func TestStoreFailuresPreventRuntimeMutation(t *testing.T) {
 	}
 }
 
+func TestDiagnosticPersistenceFailureRemainsRetryable(t *testing.T) {
+	_, service, st, mock := newInternalReconciler(t)
+	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "diagnostic-retry", Image: "nginx:1.27"})
+	persistFailure := errors.New("diagnostic store unavailable")
+	cause := errors.New("tasks have not converged")
+	wrapper := &faultStore{Store: st, diagnosticsErr: persistFailure}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	wrapperService := app.NewService(wrapper, mock, "moduleos.local", logger)
+	reconciler := New(mock, wrapperService, logger)
+
+	for _, originalRetryable := range []bool{false, true} {
+		err := reconciler.persistFailure(t.Context(), created, "tasks_not_converged", cause, originalRetryable)
+		if !isRetryable(err) || !errors.Is(err, cause) || !errors.Is(err, persistFailure) {
+			t.Fatalf("retryable=%t diagnostic failure = %v", originalRetryable, err)
+		}
+	}
+}
+
 func TestDeletionBypassesInvalidRuntimeSpecAndMissingIngress(t *testing.T) {
 	reconciler, service, st, _ := newInternalReconciler(t)
 	created := mustCreateInternalApp(t, service, app.CreateAppRequest{

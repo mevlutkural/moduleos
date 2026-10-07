@@ -394,6 +394,12 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 	if err != nil {
 		return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", err, false)
 	}
+	if deployment != nil {
+		desired, err = swarm.WithRolloutIdentity(desired, deployment.ID)
+		if err != nil {
+			return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", err, false)
+		}
+	}
 	if application.Expose {
 		if _, err := r.swarm.GetNetwork(ctx, r.appSvc.IngressNetwork()); err != nil {
 			return r.persistFailureWithDeployment(ctx, application, deployment, "ingress_network_missing", err, true)
@@ -477,6 +483,12 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 	currentDesired, err := r.appSvc.BuildDesiredServiceSpec(ctx, current)
 	if err != nil {
 		return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", err, false)
+	}
+	if deployment != nil {
+		currentDesired, err = swarm.WithRolloutIdentity(currentDesired, deployment.ID)
+		if err != nil {
+			return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", err, false)
+		}
 	}
 	if fields := swarm.DiffServiceSpec(currentDesired, observed.Spec); len(fields) > 0 {
 		r.Enqueue(name)
@@ -686,10 +698,11 @@ func (r *Reconciler) persistFailure(ctx context.Context, application *store.Appl
 	r.attemptMu.Lock()
 	attempt := r.attempts[application.Name] + 1
 	r.attemptMu.Unlock()
+	failure := &classifiedError{code: code, retryable: retryable, err: err}
 	if persistErr := r.store.PersistReconcileDiagnostics(ctx, application.ID, application.DesiredGeneration, code, safeDiagnostic(err.Error()), retryable, attempt); persistErr != nil && !errors.Is(persistErr, store.ErrStaleObservation) {
-		return errors.Join(err, persistErr)
+		return retryableError("diagnostic_write", errors.Join(failure, persistErr))
 	}
-	return &classifiedError{code: code, retryable: retryable, err: err}
+	return failure
 }
 
 func safeDiagnostic(message string) string {

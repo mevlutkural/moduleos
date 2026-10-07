@@ -568,6 +568,28 @@ func TestDeploymentSucceedsOnlyAfterReconcileConvergence(t *testing.T) {
 	}
 }
 
+func TestRedeployOfMutableTagForcesNewTaskTemplate(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := context.Background()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "mutable-tag", Image: "registry.example/api:latest"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	before := mock.UpdateCalls
+	deployment := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if mock.UpdateCalls != before+1 {
+		t.Fatalf("same-tag redeploy update calls = %d, want %d", mock.UpdateCalls, before+1)
+	}
+	persisted := mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.Status != store.DeploymentStatusSucceeded || persisted.FinishedAt == nil {
+		t.Fatalf("same-tag redeploy = %#v", persisted)
+	}
+}
+
 func TestDeploymentWaitsForCurrentTaskTemplate(t *testing.T) {
 	initialReconciler, st, mock := setup(t)
 	ctx := context.Background()

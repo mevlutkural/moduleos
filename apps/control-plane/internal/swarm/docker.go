@@ -310,6 +310,9 @@ func (c *DockerClient) GetService(ctx context.Context, serviceID string) (*Servi
 	info := toServiceInfo(result.Service)
 	for i := range info.Spec.Networks {
 		networkResult, inspectErr := c.docker.NetworkInspect(ctx, info.Spec.Networks[i].Network, client.NetworkInspectOptions{})
+		if inspectErr != nil && !errdefs.IsNotFound(inspectErr) {
+			return nil, fmt.Errorf("failed to inspect network %q for service %q: %w", info.Spec.Networks[i].Network, serviceID, inspectErr)
+		}
 		if inspectErr == nil && networkResult.Network.Name != "" {
 			info.Spec.Networks[i].Network = networkResult.Network.Name
 		}

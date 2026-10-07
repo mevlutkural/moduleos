@@ -152,6 +152,18 @@ func TestTaskTemplateHashTracksOnlyTaskRuntime(t *testing.T) {
 	if changedSpec.TaskTemplateHash == original.TaskTemplateHash {
 		t.Fatal("task image change did not alter task hash")
 	}
+
+	firstRollout, err := WithRolloutIdentity(original, "deployment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRollout, err := WithRolloutIdentity(original, "deployment-two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstRollout.TaskTemplateHash == original.TaskTemplateHash || firstRollout.TaskTemplateHash == secondRollout.TaskTemplateHash {
+		t.Fatal("deployment identity did not produce a distinct task template hash")
+	}
 }
 
 func TestBuildDesiredServiceSpecStopped(t *testing.T) {

@@ -267,6 +267,65 @@ func TestDockerClientServiceObservationFailsWhenTasksAreUnknown(t *testing.T) {
 	}
 }
 
+func TestDockerClientServiceObservationHandlesNetworkInspectionFailures(t *testing.T) {
+	service := dockerswarm.Service{
+		ID: "service-id",
+		Spec: dockerswarm.ServiceSpec{
+			TaskTemplate: dockerswarm.TaskSpec{
+				ContainerSpec: &dockerswarm.ContainerSpec{Image: "nginx:1.27"},
+				Networks:      []dockerswarm.NetworkAttachmentConfig{{Target: "network-id"}},
+			},
+		},
+	}
+
+	t.Run("transient failure rejects incomplete observation", func(t *testing.T) {
+		taskListCalls := 0
+		client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+			switch dockerAPIPath(request) {
+			case "/services/service-id":
+				writeDockerJSON(t, response, service)
+			case "/networks/network-id":
+				http.Error(response, "network inventory unavailable", http.StatusInternalServerError)
+			case "/tasks":
+				taskListCalls++
+				writeDockerJSON(t, response, []dockerswarm.Task{})
+			default:
+				http.NotFound(response, request)
+			}
+		})
+
+		if _, err := client.GetService(t.Context(), "service-id"); err == nil || !strings.Contains(err.Error(), "failed to inspect network") {
+			t.Fatalf("GetService network inventory error = %v", err)
+		}
+		if taskListCalls != 0 {
+			t.Fatal("task state was read after network observation became incomplete")
+		}
+	})
+
+	t.Run("missing attachment remains repairable drift", func(t *testing.T) {
+		client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+			switch dockerAPIPath(request) {
+			case "/services/service-id":
+				writeDockerJSON(t, response, service)
+			case "/networks/network-id":
+				http.NotFound(response, request)
+			case "/tasks":
+				writeDockerJSON(t, response, []dockerswarm.Task{})
+			default:
+				http.NotFound(response, request)
+			}
+		})
+
+		observed, err := client.GetService(t.Context(), "service-id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(observed.Spec.Networks) != 1 || observed.Spec.Networks[0].Network != "network-id" {
+			t.Fatalf("missing attachment was not preserved as drift: %#v", observed.Spec.Networks)
+		}
+	})
+}
+
 func TestDockerClientNetworkAndLogOperations(t *testing.T) {
 	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
 		switch {
