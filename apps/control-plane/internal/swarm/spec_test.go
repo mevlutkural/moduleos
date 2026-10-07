@@ -96,8 +96,14 @@ func TestBuildDesiredServiceSpecAllFields(t *testing.T) {
 	if len(spec.Networks) != 3 {
 		t.Fatalf("network count = %d, want project+link+ingress", len(spec.Networks))
 	}
+	if len(spec.TaskTemplateHash) != 64 {
+		t.Fatalf("task template hash = %q, want SHA-256", spec.TaskTemplateHash)
+	}
 
 	dockerSpec := buildSwarmSpec(spec)
+	if got := dockerSpec.TaskTemplate.ContainerSpec.Labels[LabelTaskTemplate]; got != spec.TaskTemplateHash {
+		t.Fatalf("Docker task template marker = %q, want %q", got, spec.TaskTemplateHash)
+	}
 	if len(dockerSpec.EndpointSpec.Ports) != 2 {
 		t.Fatalf("published Docker ports = %#v", dockerSpec.EndpointSpec.Ports)
 	}
@@ -115,6 +121,36 @@ func TestBuildDesiredServiceSpecAllFields(t *testing.T) {
 	}
 	if dockerSpec.UpdateConfig == nil || dockerSpec.TaskTemplate.RestartPolicy == nil || dockerSpec.RollbackConfig == nil {
 		t.Fatal("deployment/restart policies must be explicit")
+	}
+}
+
+func TestTaskTemplateHashTracksOnlyTaskRuntime(t *testing.T) {
+	base := validDesiredInput()
+	original, err := BuildDesiredServiceSpec(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scaled := base
+	scaled.Generation++
+	scaled.Replicas++
+	scaled.Ports = []PortConfig{{ContainerPort: 8080, PublishedPort: 30080}}
+	scaledSpec, err := BuildDesiredServiceSpec(scaled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scaledSpec.TaskTemplateHash != original.TaskTemplateHash {
+		t.Fatalf("service-only change altered task hash: original=%q scaled=%q", original.TaskTemplateHash, scaledSpec.TaskTemplateHash)
+	}
+
+	changed := base
+	changed.Image = "registry.example/api:next"
+	changedSpec, err := BuildDesiredServiceSpec(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedSpec.TaskTemplateHash == original.TaskTemplateHash {
+		t.Fatal("task image change did not alter task hash")
 	}
 }
 

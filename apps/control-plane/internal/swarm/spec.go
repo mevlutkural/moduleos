@@ -1,6 +1,8 @@
 package swarm
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -21,6 +23,7 @@ const (
 	LabelProjectID    = "moduleos.project.id"
 	LabelProject      = "moduleos.project.slug"
 	LabelGeneration   = "moduleos.generation"
+	LabelTaskTemplate = "moduleos.task-template"
 	LabelSchema       = "moduleos.schema"
 	LabelResourceKind = "moduleos.resource.kind"
 	OwnedLabelPrefix  = "moduleos."
@@ -107,7 +110,7 @@ func BuildDesiredServiceSpec(input DesiredServiceInput) (ServiceSpec, error) {
 	if !input.DesiredRunning {
 		replicas = 0
 	}
-	return ServiceSpec{
+	result := ServiceSpec{
 		Name:     input.Name,
 		Image:    input.Image,
 		Replicas: replicas,
@@ -122,7 +125,34 @@ func BuildDesiredServiceSpec(input DesiredServiceInput) (ServiceSpec, error) {
 			Monitor:     10 * time.Second,
 		},
 		Restart: RestartPolicy{Delay: 5 * time.Second},
-	}, nil
+	}
+	templateHash, err := taskTemplateHash(result)
+	if err != nil {
+		return ServiceSpec{}, fmt.Errorf("%w: hash task template: %v", ErrInvalidSpec, err)
+	}
+	result.TaskTemplateHash = templateHash
+	return result, nil
+}
+
+func taskTemplateHash(spec ServiceSpec) (string, error) {
+	payload, err := json.Marshal(struct {
+		Image    string
+		EnvVars  []string
+		Volumes  []VolumeConfig
+		Networks []NetworkAttachment
+		Restart  RestartPolicy
+	}{
+		Image:    spec.Image,
+		EnvVars:  spec.EnvVars,
+		Volumes:  spec.Volumes,
+		Networks: spec.Networks,
+		Restart:  spec.Restart,
+	})
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", hash), nil
 }
 
 func ownershipLabels(input DesiredServiceInput) map[string]string {

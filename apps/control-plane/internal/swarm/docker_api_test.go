@@ -206,6 +206,10 @@ func TestDockerClientServiceLifecycle(t *testing.T) {
 
 func TestDockerClientServiceObservation(t *testing.T) {
 	spec := buildSwarmSpec(canonicalServiceSpec())
+	oldTaskSpec := spec.TaskTemplate
+	oldContainerSpec := *oldTaskSpec.ContainerSpec
+	oldContainerSpec.Labels = map[string]string{LabelTaskTemplate: "previous-template"}
+	oldTaskSpec.ContainerSpec = &oldContainerSpec
 	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
 		switch dockerAPIPath(request) {
 		case "/services/service-id":
@@ -214,8 +218,9 @@ func TestDockerClientServiceObservation(t *testing.T) {
 			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
 		case "/tasks":
 			writeDockerJSON(t, response, []dockerswarm.Task{
-				{Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning}},
-				{Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateFailed, Err: "exit 1"}},
+				{Spec: oldTaskSpec, Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning}},
+				{Spec: spec.TaskTemplate, Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning}},
+				{Spec: spec.TaskTemplate, Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateFailed, Err: "exit 1"}},
 			})
 		case "/services":
 			writeDockerJSON(t, response, []dockerswarm.Service{{ID: "service-id", Spec: spec}})
@@ -237,6 +242,28 @@ func TestDockerClientServiceObservation(t *testing.T) {
 	}
 	if len(services) != 1 || services[0].ID != "service-id" {
 		t.Fatalf("ListServices() = %#v", services)
+	}
+}
+
+func TestDockerClientServiceObservationFailsWhenTasksAreUnknown(t *testing.T) {
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id",
+				Spec: dockerswarm.ServiceSpec{TaskTemplate: dockerswarm.TaskSpec{
+					ContainerSpec: &dockerswarm.ContainerSpec{Image: "nginx:1.27"},
+				}},
+			})
+		case "/tasks":
+			http.Error(response, "task inventory unavailable", http.StatusInternalServerError)
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	if _, err := client.GetService(t.Context(), "service-id"); err == nil || !strings.Contains(err.Error(), "failed to list tasks") {
+		t.Fatalf("GetService task inventory error = %v", err)
 	}
 }
 

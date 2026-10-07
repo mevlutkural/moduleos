@@ -42,6 +42,25 @@ type firstUpdateBarrierClient struct {
 	once    sync.Once
 }
 
+type currentTaskLagClient struct{ *swarmfake.Client }
+
+func (c *currentTaskLagClient) UpdateService(ctx context.Context, serviceID string, spec swarm.ServiceSpec) error {
+	if err := c.Client.UpdateService(ctx, serviceID, spec); err != nil {
+		return err
+	}
+	c.Services[swarm.ServiceName(spec.Name)].Running = 0
+	return nil
+}
+
+type serviceObservationFailureClient struct {
+	swarm.Client
+	err error
+}
+
+func (c *serviceObservationFailureClient) GetService(context.Context, string) (*swarm.ServiceInfo, error) {
+	return nil, c.err
+}
+
 func (c *firstUpdateBarrierClient) UpdateService(ctx context.Context, serviceID string, spec swarm.ServiceSpec) error {
 	shouldWait := false
 	c.once.Do(func() {
@@ -546,6 +565,72 @@ func TestDeploymentSucceedsOnlyAfterReconcileConvergence(t *testing.T) {
 	}
 	if observed.Status != store.DeploymentStatusSucceeded || observed.FinishedAt == nil {
 		t.Fatalf("deployment=%#v", observed)
+	}
+}
+
+func TestDeploymentWaitsForCurrentTaskTemplate(t *testing.T) {
+	initialReconciler, st, mock := setup(t)
+	ctx := context.Background()
+	initialService := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, initialService, ctx, app.CreateAppRequest{Name: "rollout-generation", Image: "nginx:1.0"})
+	if err := initialReconciler.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployment := mustDeployApp(t, initialService, ctx, app.DeployAppRequest{AppName: created.Name, Image: "nginx:2.0"})
+
+	client := &currentTaskLagClient{Client: mock}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := app.NewService(st, client, "moduleos.local", logger)
+	rec := reconciler.New(client, service, logger)
+	if err := rec.ReconcileApplication(ctx, created.Name); err == nil {
+		t.Fatal("deployment succeeded before a current-template task was running")
+	}
+	inProgress := mustGetDeployment(t, st, ctx, deployment.ID)
+	if inProgress.Status != store.DeploymentStatusApplying || inProgress.FinishedAt != nil {
+		t.Fatalf("deployment completed before current tasks converged: %#v", inProgress)
+	}
+
+	runtimeService := mock.Services[swarm.ServiceName(created.Name)]
+	runtimeService.Running = runtimeService.Replicas
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatalf("current-template task convergence: %v", err)
+	}
+	succeeded := mustGetDeployment(t, st, ctx, deployment.ID)
+	if succeeded.Status != store.DeploymentStatusSucceeded || succeeded.FinishedAt == nil {
+		t.Fatalf("converged deployment = %#v", succeeded)
+	}
+}
+
+func TestUnknownTaskInventoryCannotExpireDeployment(t *testing.T) {
+	initialReconciler, st, mock := setup(t)
+	ctx := context.Background()
+	initialService := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, initialService, ctx, app.CreateAppRequest{Name: "unknown-tasks", Image: "nginx:1.0"})
+	if err := initialReconciler.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployment := mustDeployApp(t, initialService, ctx, app.DeployAppRequest{AppName: created.Name, Image: "nginx:2.0"})
+	past := time.Now().UTC().Add(-time.Minute)
+	deployment.ConvergenceDeadline = &past
+	if err := st.UpdateDeployment(ctx, deployment); err != nil {
+		t.Fatal(err)
+	}
+
+	failure := errors.New("task inventory unavailable")
+	client := &serviceObservationFailureClient{Client: mock, err: failure}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := app.NewService(st, client, "moduleos.local", logger)
+	rec := reconciler.New(client, service, logger)
+	if err := rec.ReconcileApplication(ctx, created.Name); !errors.Is(err, failure) {
+		t.Fatalf("task inventory error = %v, want wrapped failure", err)
+	}
+	persisted := mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.Status != store.DeploymentStatusPending || persisted.FinishedAt != nil {
+		t.Fatalf("unknown task inventory expired deployment: %#v", persisted)
+	}
+	application := mustGetApp(t, st, ctx, created.Name)
+	if application.ReconcileErrorCode != "docker_unavailable" || !application.ReconcileRetryable {
+		t.Fatalf("task inventory diagnostic = %#v", application)
 	}
 }
 

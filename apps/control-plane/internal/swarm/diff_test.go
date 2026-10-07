@@ -25,9 +25,10 @@ func canonicalServiceSpec() ServiceSpec {
 			"traefik.enable": "true",
 			"external.owner": "platform",
 		},
-		Networks: []NetworkAttachment{{Network: "moduleos-root-net", Aliases: []string{"root.api", "api"}}},
-		Update:   UpdatePolicy{Parallelism: 1, Delay: 2 * time.Second, Monitor: 10 * time.Second},
-		Restart:  RestartPolicy{Delay: 5 * time.Second},
+		Networks:         []NetworkAttachment{{Network: "moduleos-root-net", Aliases: []string{"root.api", "api"}}},
+		TaskTemplateHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Update:           UpdatePolicy{Parallelism: 1, Delay: 2 * time.Second, Monitor: 10 * time.Second},
+		Restart:          RestartPolicy{Delay: 5 * time.Second},
 	}
 }
 
@@ -57,7 +58,8 @@ func TestDiffServiceSpecReportsManagedFieldsInStableOrder(t *testing.T) {
 	delete(observed.Labels, LabelGeneration)
 	observed.Update.Delay = time.Second
 
-	want := []string{"image", "replicas", "environment", "ports", "mounts", "networks", "labels", "policy"}
+	observed.TaskTemplateHash = "different"
+	want := []string{"image", "replicas", "environment", "ports", "mounts", "networks", "task_template", "labels", "policy"}
 	if got := DiffServiceSpec(desired, observed); !reflect.DeepEqual(got, want) {
 		t.Fatalf("DiffServiceSpec() = %v, want %v", got, want)
 	}

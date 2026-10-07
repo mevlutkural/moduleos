@@ -318,18 +318,29 @@ func (c *DockerClient) GetService(ctx context.Context, serviceID string) (*Servi
 	filters.Add("service", result.Service.ID)
 	filters.Add("desired-state", "running")
 	tasks, taskErr := c.docker.TaskList(ctx, client.TaskListOptions{Filters: filters})
-	if taskErr == nil {
-		info.Running = 0
-		for _, task := range tasks.Items {
-			if task.Status.State == dockerswarm.TaskStateRunning {
-				info.Running++
-			}
-			if task.Status.Err != "" {
-				info.TaskErrors = append(info.TaskErrors, task.Status.Err)
-			}
+	if taskErr != nil {
+		return nil, fmt.Errorf("failed to list tasks for service %q: %w", serviceID, taskErr)
+	}
+	info.Running = 0
+	for _, task := range tasks.Items {
+		if info.Spec.TaskTemplateHash != "" && taskTemplateMarker(task.Spec) != info.Spec.TaskTemplateHash {
+			continue
+		}
+		if task.Status.State == dockerswarm.TaskStateRunning {
+			info.Running++
+		}
+		if task.Status.Err != "" {
+			info.TaskErrors = append(info.TaskErrors, task.Status.Err)
 		}
 	}
 	return info, nil
+}
+
+func taskTemplateMarker(spec dockerswarm.TaskSpec) string {
+	if spec.ContainerSpec == nil {
+		return ""
+	}
+	return spec.ContainerSpec.Labels[LabelTaskTemplate]
 }
 
 // ListServices lists all services managed by moduleos.
@@ -506,7 +517,10 @@ func buildSwarmSpec(spec ServiceSpec) dockerswarm.ServiceSpec {
 		},
 		TaskTemplate: dockerswarm.TaskSpec{
 			ContainerSpec: &dockerswarm.ContainerSpec{
-				Image:  spec.Image,
+				Image: spec.Image,
+				Labels: map[string]string{
+					LabelTaskTemplate: spec.TaskTemplateHash,
+				},
 				Env:    env,
 				Mounts: mounts,
 			},
@@ -589,6 +603,7 @@ func serviceSpecFromDocker(spec dockerswarm.ServiceSpec) ServiceSpec {
 	}
 	if containerSpec := spec.TaskTemplate.ContainerSpec; containerSpec != nil {
 		result.Image = containerSpec.Image
+		result.TaskTemplateHash = containerSpec.Labels[LabelTaskTemplate]
 		result.EnvVars = append([]string(nil), containerSpec.Env...)
 		for _, mounted := range containerSpec.Mounts {
 			if mounted.Type == mount.TypeBind {
