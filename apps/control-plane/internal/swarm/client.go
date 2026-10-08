@@ -2,8 +2,16 @@ package swarm
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
+)
+
+var (
+	ErrDockerUnavailable     = errors.New("docker unavailable")
+	ErrDockerInfoUnavailable = errors.New("docker info unavailable")
+	ErrSwarmInactive         = errors.New("swarm inactive")
+	ErrSwarmManagerRequired  = errors.New("swarm manager required")
 )
 
 // ServiceSpec holds the information needed to create or update a Swarm service.

@@ -48,17 +48,17 @@ func NewDockerClientWithEndpoint(endpoint string) (*DockerClient, error) {
 
 func (c *DockerClient) Health(ctx context.Context) error {
 	if _, err := c.docker.Ping(ctx, client.PingOptions{}); err != nil {
-		return fmt.Errorf("docker_unavailable: %w", err)
+		return fmt.Errorf("%w: %w", ErrDockerUnavailable, err)
 	}
 	result, err := c.docker.Info(ctx, client.InfoOptions{})
 	if err != nil {
-		return fmt.Errorf("docker_info_unavailable: %w", err)
+		return fmt.Errorf("%w: %w", ErrDockerInfoUnavailable, err)
 	}
 	if result.Info.Swarm.LocalNodeState != dockerswarm.LocalNodeStateActive {
-		return fmt.Errorf("swarm_inactive")
+		return ErrSwarmInactive
 	}
 	if !result.Info.Swarm.ControlAvailable {
-		return fmt.Errorf("swarm_manager_required")
+		return ErrSwarmManagerRequired
 	}
 	return nil
 }

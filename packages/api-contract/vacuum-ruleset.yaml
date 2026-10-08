@@ -1,0 +1,13 @@
+extends: [[vacuum:oas, recommended]]
+documentationUrl: https://github.com/mevlutkural/moduleos/tree/main/packages/api-contract
+rules:
+  camel-case-properties:
+    description: ModuleOS JSON property names use snake_case.
+    severity: warn
+    recommended: true
+    given: "$"
+    resolved: true
+    then:
+      function: oasCamelCaseProperties
+      functionOptions:
+        type: snake
