@@ -18,6 +18,8 @@ servers:
 tags:
   - name: System
     description: Process liveness, dependency readiness, and build metadata.
+  - name: Projects
+    description: Durable project boundaries and cross-project network-link intent.
 security:
   - bearerAuth: []
 paths:
@@ -145,6 +147,247 @@ paths:
                     build_date: "2026-10-08T00:00:00Z"
         "500":
           $ref: "#/components/responses/InternalError"
+  /projects:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    post:
+      operationId: createProject
+      tags: [Projects]
+      summary: Create a project
+      description: Persists project desired state. Network convergence is asynchronous.
+      requestBody:
+        description: Project identity to persist as desired state.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+            examples:
+              payments:
+                value: {name: Payments, slug: payments}
+      responses:
+        "201":
+          description: Project intent was created.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+            Location: {$ref: "#/components/headers/Location"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Project"}
+              example:
+                id: 10000000-0000-4000-8000-000000000001
+                name: Payments
+                slug: payments
+                observed_state: pending
+                created_at: "2026-10-08T10:00:00Z"
+                updated_at: "2026-10-08T10:00:00Z"
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "413": {$ref: "#/components/responses/PayloadTooLarge"}
+        "415": {$ref: "#/components/responses/UnsupportedMediaType"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+    get:
+      operationId: listProjects
+      tags: [Projects]
+      summary: List projects
+      responses:
+        "200":
+          description: Bounded project collection.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProjectCollection"}
+              example:
+                projects: []
+                total: 0
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /projects/{slug}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectSlug"
+    get:
+      operationId: getProject
+      tags: [Projects]
+      summary: Get a project
+      responses:
+        "200":
+          description: Project state.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Project"}
+              example:
+                id: 10000000-0000-4000-8000-000000000001
+                name: Payments
+                slug: payments
+                observed_state: ready
+                created_at: "2026-10-08T10:00:00Z"
+                updated_at: "2026-10-08T10:00:05Z"
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+    delete:
+      operationId: deleteProject
+      tags: [Projects]
+      summary: Request project deletion
+      description: Accepts durable deletion intent. Network finalization is asynchronous.
+      responses:
+        "202":
+          description: Project deletion intent was accepted.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AcceptedOperation"}
+              example:
+                operation: delete_project
+                resource_type: project
+                resource: payments
+                status: accepted
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /projects/{slug}/apps:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectSlug"
+    get:
+      operationId: listProjectApplications
+      tags: [Projects]
+      summary: List secret-free application summaries in a project
+      responses:
+        "200":
+          description: Bounded application-summary collection.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProjectApplicationCollection"}
+              example:
+                applications: []
+                total: 0
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /projects/{slug}/links:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectSlug"
+    post:
+      operationId: createProjectLink
+      tags: [Projects]
+      summary: Create a cross-project network link
+      description: >-
+        Persists network-attachment intent and queues reconciliation. Docker
+        overlay attachment permits mutual network reachability; this is not a
+        one-way security boundary.
+      requestBody:
+        description: Target application and optional DNS alias for the network attachment.
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateProjectLinkRequest"}
+            examples:
+              database:
+                value: {target_app_name: database, alias: data.internal}
+      responses:
+        "201":
+          description: Project-link intent was created.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+            Location: {$ref: "#/components/headers/Location"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProjectLink"}
+              example:
+                id: 30000000-0000-4000-8000-000000000001
+                source_project_slug: payments
+                target_project_slug: data
+                target_app_name: database
+                alias: data.internal
+                desired_generation: 1
+                observed_generation: 0
+                status: pending
+                created_at: "2026-10-08T10:00:00Z"
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "413": {$ref: "#/components/responses/PayloadTooLarge"}
+        "415": {$ref: "#/components/responses/UnsupportedMediaType"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+    get:
+      operationId: listProjectLinks
+      tags: [Projects]
+      summary: List project links
+      responses:
+        "200":
+          description: Bounded enriched project-link collection.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProjectLinkCollection"}
+              example:
+                links: []
+                total: 0
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /projects/{slug}/links/{link_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectSlug"
+      - $ref: "#/components/parameters/ProjectLinkID"
+    delete:
+      operationId: deleteProjectLink
+      tags: [Projects]
+      summary: Request project-link removal
+      description: Removes desired link state and queues asynchronous network detachment.
+      responses:
+        "202":
+          description: Project-link removal was accepted.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AcceptedOperation"}
+              example:
+                operation: delete_project_link
+                resource_type: project_link
+                resource: 30000000-0000-4000-8000-000000000001
+                status: accepted
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
 components:
   parameters:
     RequestID:
@@ -157,11 +400,34 @@ components:
       schema:
         type: string
         format: uuid
+    ProjectSlug:
+      name: slug
+      in: path
+      required: true
+      description: Canonical lowercase project slug.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 48
+        pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    ProjectLinkID:
+      name: link_id
+      in: path
+      required: true
+      description: Canonical project-link identifier.
+      schema:
+        type: string
+        format: uuid
+        pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-      description: ModuleOS administrator API key. System routes explicitly opt out.
+      description: >-
+        ModuleOS administrator API key. System routes explicitly opt out. A
+        daemon explicitly validated as development may run protected operations
+        without authentication only when no API key is configured; production
+        always requires a key of at least 32 bytes.
   headers:
     RequestID:
       description: Canonical UUID used to correlate the request with structured logs.
@@ -180,7 +446,83 @@ components:
       schema:
         type: string
         pattern: "^[1-9][0-9]*$"
+    Location:
+      description: Canonical relative API path for the created resource.
+      required: true
+      schema:
+        type: string
+        pattern: "^/api/v1/"
   responses:
+    BadRequest:
+      $ref: "#/components/responses/GenericBadRequest"
+    GenericBadRequest:
+      description: Request syntax, JSON, media parameters, or a path value is malformed.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: A required bearer credential is missing or invalid.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+        WWW-Authenticate:
+          description: Authentication scheme required for protected operations.
+          required: true
+          schema: {type: string, const: Bearer}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: The project, application, or project link does not exist in this ownership scope.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Conflict:
+      description: The request conflicts with current resource state or a resource limit.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    PayloadTooLarge:
+      description: The request body exceeds the configured server limit.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    UnsupportedMediaType:
+      description: The request body is not a supported application/json representation.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    ValidationError:
+      description: The request is syntactically valid but violates resource validation rules.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    ServiceUnavailable:
+      description: Work was cancelled, timed out, or a required dependency is temporarily unavailable.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
     InternalError:
       description: An unexpected internal failure occurred without exposing implementation details.
       headers:
@@ -201,6 +543,193 @@ components:
                   request_id: 550e8400-e29b-41d4-a716-446655440000
                   retryable: false
   schemas:
+    CreateProjectRequest:
+      description: Project identity accepted by the create operation.
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: Human-readable name; surrounding whitespace is trimmed.
+          example: Payments
+        slug:
+          type: string
+          maxLength: 48
+          pattern: "^$|^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          description: Optional canonical slug. Empty or omitted values are derived from name.
+          example: payments
+      example: {name: Payments, slug: payments}
+    CreateProjectLinkRequest:
+      description: Cross-project application target and its optional network alias.
+      type: object
+      additionalProperties: false
+      required: [target_app_name]
+      properties:
+        target_app_name:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+          description: Globally unique target application name.
+          example: database
+        alias:
+          type: string
+          maxLength: 253
+          pattern: '^$|^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$'
+          description: Optional DNS alias; empty or omitted values use the canonical target alias.
+          example: data.internal
+      example: {target_app_name: database, alias: data.internal}
+    ObservedState:
+      description: Last persisted reconciliation observation for a resource.
+      type: string
+      enum: [pending, ready, reconciling, running, stopped, degraded, failed, deleting]
+      example: ready
+    Project:
+      description: Public project state without Docker network or finalizer internals.
+      type: object
+      additionalProperties: false
+      required: [id, name, slug, observed_state, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid, example: 10000000-0000-4000-8000-000000000001}
+        name: {type: string, minLength: 1, maxLength: 120, example: Payments}
+        slug: {type: string, minLength: 1, maxLength: 48, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", example: payments}
+        observed_state: {$ref: "#/components/schemas/ObservedState"}
+        reconcile_error_code: {type: string, pattern: "^[a-z][a-z0-9_]{0,63}$"}
+        deletion_requested_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      example:
+        id: 10000000-0000-4000-8000-000000000001
+        name: Payments
+        slug: payments
+        observed_state: ready
+        created_at: "2026-10-08T10:00:00Z"
+        updated_at: "2026-10-08T10:00:05Z"
+    ProjectCollection:
+      description: Bounded project list with explicit empty-array semantics.
+      type: object
+      additionalProperties: false
+      required: [projects, total]
+      properties:
+        projects:
+          type: array
+          maxItems: 1000
+          items: {$ref: "#/components/schemas/Project"}
+          example: []
+        total: {type: integer, minimum: 0, maximum: 1000}
+      example: {projects: [], total: 0}
+    ApplicationStatus:
+      description: High-level application lifecycle status.
+      type: string
+      enum: [created, building, running, stopped, failed, updating]
+      example: running
+    DesiredRunState:
+      description: Requested running or stopped application state.
+      type: string
+      enum: [running, stopped]
+      example: running
+    ProjectApplicationSummary:
+      description: Secret-free application state suitable for a project listing.
+      type: object
+      additionalProperties: false
+      required: [id, name, status, desired_run_state, replicas, desired_generation, observed_generation, observed_state, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid, example: 20000000-0000-4000-8000-000000000001}
+        name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"}
+        status: {$ref: "#/components/schemas/ApplicationStatus"}
+        desired_run_state: {$ref: "#/components/schemas/DesiredRunState"}
+        replicas: {type: integer, minimum: 0}
+        desired_generation: {type: integer, format: int64, minimum: 1}
+        observed_generation: {type: integer, format: int64, minimum: 0}
+        observed_state: {$ref: "#/components/schemas/ObservedState"}
+        deletion_requested_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      example:
+        id: 20000000-0000-4000-8000-000000000001
+        name: api
+        status: running
+        desired_run_state: running
+        replicas: 2
+        desired_generation: 3
+        observed_generation: 3
+        observed_state: running
+        created_at: "2026-10-08T10:00:00Z"
+        updated_at: "2026-10-08T10:00:05Z"
+    ProjectApplicationCollection:
+      description: Bounded list of secret-free application summaries.
+      type: object
+      additionalProperties: false
+      required: [applications, total]
+      properties:
+        applications:
+          type: array
+          maxItems: 10000
+          items: {$ref: "#/components/schemas/ProjectApplicationSummary"}
+          example: []
+        total: {type: integer, minimum: 0, maximum: 10000}
+      example: {applications: [], total: 0}
+    ProjectLinkStatus:
+      description: Whether the target application has observed the link generation.
+      type: string
+      enum: [pending, ready]
+      example: pending
+    ProjectLink:
+      description: Enriched public cross-project network-link intent.
+      type: object
+      additionalProperties: false
+      required: [id, source_project_slug, target_project_slug, target_app_name, alias, desired_generation, observed_generation, status, created_at]
+      properties:
+        id: {type: string, format: uuid, example: 30000000-0000-4000-8000-000000000001}
+        source_project_slug: {type: string, minLength: 1, maxLength: 48, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"}
+        target_project_slug: {type: string, minLength: 1, maxLength: 48, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"}
+        target_app_name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"}
+        alias: {type: string, minLength: 1, maxLength: 253, pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$'}
+        desired_generation: {type: integer, format: int64, minimum: 1}
+        observed_generation: {type: integer, format: int64, minimum: 0}
+        status: {$ref: "#/components/schemas/ProjectLinkStatus"}
+        created_at: {type: string, format: date-time}
+      example:
+        id: 30000000-0000-4000-8000-000000000001
+        source_project_slug: payments
+        target_project_slug: data
+        target_app_name: database
+        alias: data.internal
+        desired_generation: 1
+        observed_generation: 0
+        status: pending
+        created_at: "2026-10-08T10:00:00Z"
+    ProjectLinkCollection:
+      description: Bounded list of enriched project links.
+      type: object
+      additionalProperties: false
+      required: [links, total]
+      properties:
+        links:
+          type: array
+          maxItems: 100
+          items: {$ref: "#/components/schemas/ProjectLink"}
+          example: []
+        total: {type: integer, minimum: 0, maximum: 100}
+      example: {links: [], total: 0}
+    AcceptedOperation:
+      description: Durable asynchronous operation intent accepted by the control plane.
+      type: object
+      additionalProperties: false
+      required: [operation, resource_type, resource, status]
+      properties:
+        operation: {type: string, enum: [delete_project, delete_project_link], example: delete_project}
+        resource_type: {type: string, enum: [project, project_link]}
+        resource: {type: string, minLength: 1}
+        status: {type: string, const: accepted}
+      example:
+        operation: delete_project
+        resource_type: project
+        resource: payments
+        status: accepted
     ComponentStatus:
       description: Readiness state for one bounded control-plane dependency.
       type: string
