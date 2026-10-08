@@ -1,0 +1,1319 @@
+package swarm
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	dockerswarm "github.com/moby/moby/api/types/swarm"
+	dockerclient "github.com/moby/moby/client"
+)
+
+const testDockerAPIVersion = "1.52"
+
+func newDockerAPITestClient(t *testing.T, handler http.HandlerFunc) *DockerClient {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	client, err := dockerclient.New(
+		dockerclient.WithHost(server.URL),
+		dockerclient.WithAPIVersion(testDockerAPIVersion),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return &DockerClient{docker: client}
+}
+
+func dockerAPIPath(request *http.Request) string {
+	return strings.TrimPrefix(request.URL.Path, "/v"+testDockerAPIVersion)
+}
+
+func writeDockerJSON(t *testing.T, response http.ResponseWriter, value any) {
+	t.Helper()
+	response.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(response).Encode(value); err != nil {
+		t.Errorf("encode Docker response: %v", err)
+	}
+}
+
+func TestDockerClientHealth(t *testing.T) {
+	tests := []struct {
+		name       string
+		pingStatus int
+		infoStatus int
+		state      string
+		manager    bool
+		wantError  string
+	}{
+		{name: "active manager", pingStatus: http.StatusOK, infoStatus: http.StatusOK, state: "active", manager: true},
+		{name: "ping failure", pingStatus: http.StatusNotFound, infoStatus: http.StatusOK, state: "active", manager: true, wantError: "docker_unavailable"},
+		{name: "info failure", pingStatus: http.StatusOK, infoStatus: http.StatusInternalServerError, state: "active", manager: true, wantError: "docker_info_unavailable"},
+		{name: "inactive swarm", pingStatus: http.StatusOK, infoStatus: http.StatusOK, state: "inactive", manager: true, wantError: "swarm_inactive"},
+		{name: "worker node", pingStatus: http.StatusOK, infoStatus: http.StatusOK, state: "active", manager: false, wantError: "swarm_manager_required"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+				switch dockerAPIPath(request) {
+				case "/_ping":
+					response.WriteHeader(test.pingStatus)
+				case "/info":
+					response.WriteHeader(test.infoStatus)
+					if test.infoStatus == http.StatusOK {
+						writeDockerJSON(t, response, map[string]any{"Swarm": map[string]any{
+							"LocalNodeState":   test.state,
+							"ControlAvailable": test.manager,
+						}})
+					}
+				default:
+					http.NotFound(response, request)
+				}
+			})
+
+			err := client.Health(t.Context())
+			if test.wantError == "" && err != nil {
+				t.Fatalf("Health() error = %v", err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("Health() error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestDockerClientEnsureNetwork(t *testing.T) {
+	t.Run("creates missing project network with ownership", func(t *testing.T) {
+		var createRequest struct {
+			Name       string            `json:"Name"`
+			Driver     string            `json:"Driver"`
+			Attachable bool              `json:"Attachable"`
+			Labels     map[string]string `json:"Labels"`
+		}
+		client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+			switch dockerAPIPath(request) {
+			case "/networks":
+				writeDockerJSON(t, response, []any{})
+			case "/networks/create":
+				if err := json.NewDecoder(request.Body).Decode(&createRequest); err != nil {
+					t.Errorf("decode network create request: %v", err)
+					return
+				}
+				writeDockerJSON(t, response, map[string]any{"Id": "network-id"})
+			default:
+				http.NotFound(response, request)
+			}
+		})
+		if err := client.EnsureProjectNetwork(t.Context(), "moduleos-payments-net", "project-id", "payments"); err != nil {
+			t.Fatal(err)
+		}
+		if createRequest.Name != "moduleos-payments-net" || createRequest.Driver != "overlay" || !createRequest.Attachable {
+			t.Fatalf("unexpected create request: %#v", createRequest)
+		}
+		if createRequest.Labels[LabelProjectID] != "project-id" || createRequest.Labels[LabelProject] != "payments" {
+			t.Fatalf("ownership labels missing: %#v", createRequest.Labels)
+		}
+	})
+
+	tests := []struct {
+		name       string
+		driver     string
+		attachable bool
+		labels     map[string]string
+		wantError  string
+	}{
+		{name: "existing compatible network", driver: "overlay", attachable: true, labels: map[string]string{LabelProjectID: "project-id"}},
+		{name: "incompatible driver", driver: "bridge", attachable: true, labels: map[string]string{LabelProjectID: "project-id"}, wantError: ErrInvalidSpec.Error()},
+		{name: "ownership conflict", driver: "overlay", attachable: true, labels: map[string]string{LabelProjectID: "other"}, wantError: ErrOwnershipConflict.Error()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+				writeDockerJSON(t, response, []map[string]any{{
+					"Id": "network-id", "Name": "moduleos-project-net", "Driver": test.driver,
+					"Attachable": test.attachable, "Labels": test.labels,
+				}})
+			})
+			err := client.ensureNetwork(t.Context(), "moduleos-project-net", map[string]string{LabelProjectID: "project-id"})
+			if test.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("ensureNetwork() error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestDockerClientServiceLifecycle(t *testing.T) {
+	imageDigest := "sha256:" + strings.Repeat("a", 64)
+	wantImage := canonicalServiceSpec().Image + "@" + imageDigest
+	currentSpec := buildSwarmSpec(canonicalServiceSpec())
+	currentSpec.TaskTemplate.ContainerSpec.Image = wantImage
+	currentSpec.Labels["external.owner"] = "platform"
+	currentSpec.Labels[LabelGeneration] = "1"
+	var created, updated, removed bool
+	var createdSpec dockerswarm.ServiceSpec
+	var updatedSpec dockerswarm.ServiceSpec
+	var resolutionCalls int
+
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasPrefix(dockerAPIPath(request), "/distribution/"):
+			resolutionCalls++
+			writeDockerJSON(t, response, map[string]any{
+				"Descriptor": map[string]any{"digest": imageDigest},
+				"Platforms":  []any{},
+			})
+		case request.Method == http.MethodPost && dockerAPIPath(request) == "/services/create":
+			created = true
+			if err := json.NewDecoder(request.Body).Decode(&createdSpec); err != nil {
+				t.Errorf("decode service create request: %v", err)
+				return
+			}
+			writeDockerJSON(t, response, map[string]any{"ID": "service-id"})
+		case request.Method == http.MethodGet && dockerAPIPath(request) == "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID:   "service-id",
+				Meta: dockerswarm.Meta{Version: dockerswarm.Version{Index: 4}},
+				Spec: currentSpec,
+			})
+		case request.Method == http.MethodPost && dockerAPIPath(request) == "/services/service-id/update":
+			updated = true
+			if err := json.NewDecoder(request.Body).Decode(&updatedSpec); err != nil {
+				t.Errorf("decode service update request: %v", err)
+				return
+			}
+			writeDockerJSON(t, response, map[string]any{"Warnings": []string{}})
+		case request.Method == http.MethodDelete && dockerAPIPath(request) == "/services/service-id":
+			removed = true
+			response.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	if err := client.CreateService(t.Context(), canonicalServiceSpec()); err != nil {
+		t.Fatal(err)
+	}
+	desired := canonicalServiceSpec()
+	desired.Labels = map[string]string{LabelGeneration: "2"}
+	if err := client.UpdateService(t.Context(), "service-id", desired); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RemoveService(t.Context(), "service-id"); err != nil {
+		t.Fatal(err)
+	}
+	if !created || !updated || !removed {
+		t.Fatalf("lifecycle requests missing: create=%v update=%v remove=%v", created, updated, removed)
+	}
+	if updatedSpec.Labels["external.owner"] != "platform" || updatedSpec.Labels[LabelGeneration] != "2" {
+		t.Fatalf("service update did not preserve external labels: %#v", updatedSpec.Labels)
+	}
+	if createdSpec.TaskTemplate.ContainerSpec.Image != wantImage || updatedSpec.TaskTemplate.ContainerSpec.Image != wantImage {
+		t.Fatalf("service images were not pinned: create=%q update=%q want=%q",
+			createdSpec.TaskTemplate.ContainerSpec.Image, updatedSpec.TaskTemplate.ContainerSpec.Image, wantImage)
+	}
+	if resolutionCalls != 1 {
+		t.Fatalf("registry resolution calls = %d, want create only", resolutionCalls)
+	}
+}
+
+func TestDockerClientRefreshesMutableImageOnlyForDeployment(t *testing.T) {
+	oldDigest := "sha256:" + strings.Repeat("a", 64)
+	newDigest := "sha256:" + strings.Repeat("b", 64)
+	currentSpec := buildSwarmSpec(canonicalServiceSpec())
+	currentSpec.TaskTemplate.ContainerSpec.Image = canonicalServiceSpec().Image + "@" + oldDigest
+	var resolutionCalls int
+	var updates []dockerswarm.ServiceSpec
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasPrefix(dockerAPIPath(request), "/distribution/"):
+			resolutionCalls++
+			writeDockerJSON(t, response, map[string]any{
+				"Descriptor": map[string]any{"digest": newDigest},
+				"Platforms":  []any{},
+			})
+		case request.Method == http.MethodGet && dockerAPIPath(request) == "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Meta: dockerswarm.Meta{Version: dockerswarm.Version{Index: uint64(len(updates) + 1)}}, Spec: currentSpec,
+			})
+		case request.Method == http.MethodPost && dockerAPIPath(request) == "/services/service-id/update":
+			var spec dockerswarm.ServiceSpec
+			if err := json.NewDecoder(request.Body).Decode(&spec); err != nil {
+				t.Errorf("decode service update request: %v", err)
+				return
+			}
+			updates = append(updates, spec)
+			currentSpec = spec
+			writeDockerJSON(t, response, map[string]any{"Warnings": []string{}})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	unrelated := canonicalServiceSpec()
+	unrelated.EnvVars = append(unrelated.EnvVars, "CONFIG=changed")
+	unrelated.TaskTemplateHash = strings.Repeat("c", 64)
+	if err := client.UpdateService(t.Context(), "service-id", unrelated); err != nil {
+		t.Fatal(err)
+	}
+	if got := updates[0].TaskTemplate.ContainerSpec.Image; got != canonicalServiceSpec().Image+"@"+oldDigest {
+		t.Fatalf("unrelated update image = %q, want existing digest", got)
+	}
+
+	redeploy := canonicalServiceSpec()
+	redeploy.RefreshImage = true
+	redeploy.TaskTemplateHash = strings.Repeat("d", 64)
+	if err := client.UpdateService(t.Context(), "service-id", redeploy); err != nil {
+		t.Fatal(err)
+	}
+	if got := updates[1].TaskTemplate.ContainerSpec.Image; got != canonicalServiceSpec().Image+"@"+newDigest {
+		t.Fatalf("redeploy image = %q, want refreshed digest", got)
+	}
+	if resolutionCalls != 1 {
+		t.Fatalf("registry resolution calls = %d, want redeploy only", resolutionCalls)
+	}
+}
+
+func TestDockerClientDoesNotMutateServiceWhenImageResolutionFails(t *testing.T) {
+	currentSpec := buildSwarmSpec(canonicalServiceSpec())
+	currentSpec.TaskTemplate.ContainerSpec.Image = canonicalServiceSpec().Image + "@sha256:" + strings.Repeat("a", 64)
+	mutated := false
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasPrefix(dockerAPIPath(request), "/distribution/"):
+			http.Error(response, "registry unavailable", http.StatusServiceUnavailable)
+		case request.Method == http.MethodGet && dockerAPIPath(request) == "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{ID: "service-id", Spec: currentSpec})
+		case request.Method == http.MethodPost && strings.HasPrefix(dockerAPIPath(request), "/services/"):
+			mutated = true
+			writeDockerJSON(t, response, map[string]any{})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	desired := canonicalServiceSpec()
+	desired.Image = "registry.example/api:2.0"
+	if err := client.UpdateService(t.Context(), "service-id", desired); err == nil {
+		t.Fatal("registry resolution failure was ignored")
+	}
+	if mutated {
+		t.Fatal("service was updated with an unresolved mutable image")
+	}
+}
+
+func TestDockerClientServiceObservation(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	spec.TaskTemplate.Runtime = dockerswarm.RuntimeContainer
+	oldTaskSpec := spec.TaskTemplate
+	oldContainerSpec := *oldTaskSpec.ContainerSpec
+	oldContainerSpec.Image = "redis:7"
+	oldTaskSpec.ContainerSpec = &oldContainerSpec
+	oldTaskSpec.Runtime = ""
+	currentTaskSpec := spec.TaskTemplate
+	currentTaskSpec.Runtime = ""
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{ID: "service-id", Spec: spec})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{ID: "old", Spec: oldTaskSpec, DesiredState: dockerswarm.TaskStateRunning, Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning}},
+				{ID: "current-running", Spec: currentTaskSpec, DesiredState: dockerswarm.TaskStateRunning, Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning}},
+				{ID: "current-failed", Spec: currentTaskSpec, DesiredState: dockerswarm.TaskStateRunning, Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateFailed, Err: "exit 1"}},
+			})
+		case "/services":
+			writeDockerJSON(t, response, []dockerswarm.Service{{ID: "service-id", Spec: spec}})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Running != 1 || len(observed.TaskErrors) != 1 || observed.TaskErrors[0] != "exit 1" {
+		t.Fatalf("task observation lost: %#v", observed)
+	}
+	wantFingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte("current-failed\x00current-running")))
+	if observed.TaskSetFingerprint != wantFingerprint {
+		t.Fatalf("task set fingerprint = %q, want %q", observed.TaskSetFingerprint, wantFingerprint)
+	}
+	services, err := client.ListServices(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(services) != 1 || services[0].ID != "service-id" {
+		t.Fatalf("ListServices() = %#v", services)
+	}
+}
+
+func TestDockerClientReportsOnlyLatestCurrentTemplateTaskErrorPerSlot(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	two := uint64(2)
+	spec.Mode.Replicated.Replicas = &two
+	oldTaskSpec := spec.TaskTemplate
+	oldContainerSpec := *oldTaskSpec.ContainerSpec
+	oldContainerSpec.Image = "nginx:old"
+	oldTaskSpec.ContainerSpec = &oldContainerSpec
+	older := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Second)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{ID: "service-id", Spec: spec})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{
+					ID: "slot-1-rejected", Meta: dockerswarm.Meta{CreatedAt: older}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "historical rejection"},
+				},
+				{
+					ID: "slot-1-running", Meta: dockerswarm.Meta{CreatedAt: newer}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRunning,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning},
+				},
+				{
+					ID: "slot-2-rejected", Meta: dockerswarm.Meta{CreatedAt: newer}, Slot: 2,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "image pull rejected"},
+				},
+				{
+					ID: "old-template-rejected", Meta: dockerswarm.Meta{CreatedAt: newer.Add(time.Second)}, Slot: 2,
+					Spec: oldTaskSpec, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "obsolete rejection"},
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Running != 1 {
+		t.Fatalf("running tasks = %d, want 1", observed.Running)
+	}
+	if len(observed.TaskErrors) != 1 || observed.TaskErrors[0] != "image pull rejected" {
+		t.Fatalf("task errors = %v, want current rejection only", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientDefersRejectionWhileReplacementIsActive(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	older := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Second)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{ID: "service-id", Spec: spec})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{
+					ID: "rejected", Meta: dockerswarm.Meta{CreatedAt: older}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "image pull rejected"},
+				},
+				{
+					ID: "replacement", Meta: dockerswarm.Meta{CreatedAt: newer}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRunning,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStatePending},
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 0 {
+		t.Fatalf("task errors = %v, want active replacement to keep the rejection retryable", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientDoesNotResurrectRejectionAfterNewerAttemptTerminates(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	rejectedAt := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	failedAt := rejectedAt.Add(time.Second)
+	pendingAt := failedAt.Add(time.Second)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{ID: "service-id", Spec: spec})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{
+					ID: "initial-rejection", Meta: dockerswarm.Meta{CreatedAt: rejectedAt}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "old image rejection"},
+				},
+				{
+					ID: "later-failed-attempt", Meta: dockerswarm.Meta{CreatedAt: failedAt}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateFailed, Err: "exit code 1"},
+				},
+				{
+					ID: "restart-pending", Meta: dockerswarm.Meta{CreatedAt: pendingAt}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRunning,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStatePending},
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 0 {
+		t.Fatalf("task errors = %v, want superseded rejection to remain retired", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientReportsRejectedTaskWhenScalingUpUnhealthyService(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	previousSpec := spec
+	one := uint64(1)
+	previousSpec.Mode.Replicated = &dockerswarm.ReplicatedService{Replicas: &one}
+	serviceUpdatedAt := time.Date(2026, time.January, 1, 12, 1, 0, 0, time.UTC)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Meta: dockerswarm.Meta{
+					Version: dockerswarm.Version{Index: 200}, UpdatedAt: serviceUpdatedAt,
+				}, Spec: spec, PreviousSpec: &previousSpec,
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{{
+				ID: "pre-scale-rejected", Meta: dockerswarm.Meta{
+					Version: dockerswarm.Version{Index: 201}, CreatedAt: serviceUpdatedAt.Add(-time.Minute),
+				}, Slot: 1,
+				Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+				Status: dockerswarm.TaskStatus{
+					Timestamp: serviceUpdatedAt.Add(time.Hour), State: dockerswarm.TaskStateRejected, Err: "historical rejection",
+				},
+			}})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 1 || observed.TaskErrors[0] != "historical rejection" {
+		t.Fatalf("task errors = %v, want existing-slot rejection", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientReportsFailureAfterServiceOnlyUpdate(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	previousSpec := spec
+	currentLabels := make(map[string]string, len(spec.Labels)+1)
+	for key, value := range spec.Labels {
+		currentLabels[key] = value
+	}
+	spec.Labels = currentLabels
+	spec.Labels["external.owner"] = "platform"
+	serviceUpdatedAt := time.Date(2026, time.January, 1, 12, 1, 0, 0, time.UTC)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Meta: dockerswarm.Meta{
+					Version: dockerswarm.Version{Index: 200}, UpdatedAt: serviceUpdatedAt,
+				}, Spec: spec, PreviousSpec: &previousSpec,
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{{
+				ID: "post-scale-rejected", Meta: dockerswarm.Meta{
+					Version: dockerswarm.Version{Index: 201}, CreatedAt: serviceUpdatedAt.Add(-time.Minute),
+				}, Slot: 1,
+				Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+				Status: dockerswarm.TaskStatus{
+					Timestamp: serviceUpdatedAt.Add(-time.Hour), State: dockerswarm.TaskStateRejected, Err: "current rejection",
+				},
+			}})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 1 || observed.TaskErrors[0] != "current rejection" {
+		t.Fatalf("task errors = %v, want post-update rejection", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientIgnoresRejectionFromSlotRemovedByScaleDown(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	one := uint64(1)
+	two := uint64(2)
+	spec.Mode.Replicated = &dockerswarm.ReplicatedService{Replicas: &one}
+	previousSpec := spec
+	previousSpec.Mode.Replicated = &dockerswarm.ReplicatedService{Replicas: &two}
+	serviceUpdatedAt := time.Date(2026, time.January, 1, 12, 1, 0, 0, time.UTC)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Meta: dockerswarm.Meta{
+					Version: dockerswarm.Version{Index: 200}, UpdatedAt: serviceUpdatedAt,
+				}, Spec: spec, PreviousSpec: &previousSpec,
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{
+					ID: "retained-slot", Meta: dockerswarm.Meta{CreatedAt: serviceUpdatedAt.Add(-time.Minute)}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRunning,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning},
+				},
+				{
+					ID: "removed-slot-rejected", Meta: dockerswarm.Meta{
+						Version: dockerswarm.Version{Index: 201}, CreatedAt: serviceUpdatedAt.Add(time.Second),
+					}, Slot: 2,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "removed slot rejection"},
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Running != 1 || len(observed.TaskErrors) != 0 {
+		t.Fatalf("scale-down observation = running %d, task errors %v", observed.Running, observed.TaskErrors)
+	}
+}
+
+func TestDockerClientUsesReadyReplacementToIdentifyRetainedScaleDownSlot(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	one := uint64(1)
+	two := uint64(2)
+	spec.Mode.Replicated = &dockerswarm.ReplicatedService{Replicas: &one}
+	previousSpec := spec
+	previousSpec.Mode.Replicated = &dockerswarm.ReplicatedService{Replicas: &two}
+	serviceUpdatedAt := time.Date(2026, time.January, 1, 12, 1, 0, 0, time.UTC)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Meta: dockerswarm.Meta{UpdatedAt: serviceUpdatedAt},
+				Spec: spec, PreviousSpec: &previousSpec,
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{
+					ID: "retained-restart", Meta: dockerswarm.Meta{CreatedAt: serviceUpdatedAt.Add(time.Second)}, Slot: 3,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateReady,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStatePending},
+				},
+				{
+					ID: "removed-slot-rejected", Meta: dockerswarm.Meta{CreatedAt: serviceUpdatedAt.Add(2 * time.Second)}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "removed slot rejection"},
+				},
+				{
+					ID: "removed-slot-marker", Meta: dockerswarm.Meta{CreatedAt: serviceUpdatedAt.Add(3 * time.Second)}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRemove,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateShutdown},
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 0 {
+		t.Fatalf("task errors = %v, want removal history excluded while retained slot restarts", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientPreservesRetainedSlotRejectionDuringPausedScaleDownRollout(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	one := uint64(1)
+	two := uint64(2)
+	spec.Mode.Replicated = &dockerswarm.ReplicatedService{Replicas: &one}
+	previousSpec := spec
+	previousSpec.Mode.Replicated = &dockerswarm.ReplicatedService{Replicas: &two}
+	rolloutStartedAt := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Spec: spec, PreviousSpec: &previousSpec,
+				UpdateStatus: &dockerswarm.UpdateStatus{
+					State: dockerswarm.UpdateStatePaused, StartedAt: &rolloutStartedAt,
+				},
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{
+					ID: "retained-slot-rejected", Meta: dockerswarm.Meta{CreatedAt: rolloutStartedAt.Add(time.Second)}, Slot: 3,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "retained rollout rejection"},
+				},
+				{
+					ID: "removed-slot", Meta: dockerswarm.Meta{CreatedAt: rolloutStartedAt.Add(2 * time.Second)}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRemove,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateShutdown},
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 1 || observed.TaskErrors[0] != "retained rollout rejection" {
+		t.Fatalf("task errors = %v, want retained rollout rejection", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientKeepsRemovedSlotRejectionRetiredAfterLaterServiceUpdate(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	previousSpec := spec
+	previousSpec.Labels = map[string]string{}
+	removedAt := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Spec: spec, PreviousSpec: &previousSpec,
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{
+					ID: "retained-slot", Meta: dockerswarm.Meta{CreatedAt: removedAt}, Slot: 3,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRunning,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning},
+				},
+				{
+					ID: "historical-rejection", Meta: dockerswarm.Meta{CreatedAt: removedAt}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "removed slot rejection"},
+				},
+				{
+					ID: "removed-slot-marker", Meta: dockerswarm.Meta{CreatedAt: removedAt.Add(time.Second)}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRemove,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "removed slot rejection"},
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Running != 1 || len(observed.TaskErrors) != 0 {
+		t.Fatalf("post-update observation = running %d, task errors %v", observed.Running, observed.TaskErrors)
+	}
+}
+
+func TestDockerClientReportsTaskErrorDuringActiveRollout(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	rolloutStartedAt := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	serviceUpdatedAt := rolloutStartedAt.Add(2 * time.Minute)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Meta: dockerswarm.Meta{
+					Version: dockerswarm.Version{Index: 300}, UpdatedAt: serviceUpdatedAt,
+				}, Spec: spec,
+				UpdateStatus: &dockerswarm.UpdateStatus{State: dockerswarm.UpdateStatePaused, StartedAt: &rolloutStartedAt},
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{{
+				ID: "rollout-rejected", Meta: dockerswarm.Meta{
+					Version: dockerswarm.Version{Index: 200}, CreatedAt: rolloutStartedAt.Add(time.Second),
+				}, Slot: 1,
+				Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+				Status: dockerswarm.TaskStatus{
+					Timestamp: rolloutStartedAt.Add(time.Minute), State: dockerswarm.TaskStateRejected, Err: "rollout rejection",
+				},
+			}})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 1 || observed.TaskErrors[0] != "rollout rejection" {
+		t.Fatalf("task errors = %v, want active-rollout rejection", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientReportsPausedRolloutWithoutTaskError(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID:   "service-id",
+				Spec: spec,
+				UpdateStatus: &dockerswarm.UpdateStatus{
+					State:   dockerswarm.UpdateStatePaused,
+					Message: "update paused after an early task failure",
+				},
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{{
+				ID: "healthy", Slot: 1, Spec: spec.TaskTemplate,
+				DesiredState: dockerswarm.TaskStateRunning,
+				Status:       dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning},
+			}})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed.RolloutPaused || observed.RolloutMessage != "update paused after an early task failure" || len(observed.TaskErrors) != 0 {
+		t.Fatalf("paused rollout observation = %#v", observed)
+	}
+}
+
+func TestDockerClientReportsRolloutInProgress(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID:   "service-id",
+				Spec: spec,
+				UpdateStatus: &dockerswarm.UpdateStatus{
+					State:   dockerswarm.UpdateStateUpdating,
+					Message: "monitoring updated tasks",
+				},
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{{
+				ID: "healthy", Slot: 1, Spec: spec.TaskTemplate,
+				DesiredState: dockerswarm.TaskStateRunning,
+				Status:       dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning},
+			}})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed.RolloutInProgress || observed.RolloutPaused || observed.RolloutMessage != "monitoring updated tasks" {
+		t.Fatalf("active rollout observation = %#v", observed)
+	}
+}
+
+func TestDockerClientDoesNotAssumeReplicaSlotsAreContiguous(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Meta: dockerswarm.Meta{Version: dockerswarm.Version{Index: 100}}, Spec: spec,
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{{
+				ID: "slot-3-rejected", Meta: dockerswarm.Meta{Version: dockerswarm.Version{Index: 101}}, Slot: 3,
+				Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+				Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "active slot rejected"},
+			}})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 1 || observed.TaskErrors[0] != "active slot rejected" {
+		t.Fatalf("task errors = %v, want rejection from retained slot 3", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientPreservesPausedRolloutErrorAfterHealthyReplacement(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	older := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Second)
+	rolloutStartedAt := older.Add(-time.Second)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Spec: spec,
+				UpdateStatus: &dockerswarm.UpdateStatus{
+					State: dockerswarm.UpdateStatePaused, StartedAt: &rolloutStartedAt,
+				},
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{
+					ID: "rejected", Meta: dockerswarm.Meta{CreatedAt: older}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "rollout paused"},
+				},
+				{
+					ID: "healthy-replacement", Meta: dockerswarm.Meta{CreatedAt: newer}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRunning,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning},
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 1 || observed.TaskErrors[0] != "rollout paused" {
+		t.Fatalf("task errors = %v, want paused rollout rejection", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientIgnoresErrorFromBeforeActiveRollout(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	oldTaskSpec := spec.TaskTemplate
+	oldContainerSpec := *oldTaskSpec.ContainerSpec
+	oldContainerSpec.Image = "nginx:old"
+	oldTaskSpec.ContainerSpec = &oldContainerSpec
+	rolloutStartedAt := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Spec: spec,
+				UpdateStatus: &dockerswarm.UpdateStatus{
+					State: dockerswarm.UpdateStateUpdating, StartedAt: &rolloutStartedAt,
+				},
+			})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{
+					ID: "historical-rejection", Meta: dockerswarm.Meta{CreatedAt: rolloutStartedAt.Add(-time.Minute)}, Slot: 1,
+					Spec: oldTaskSpec, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRejected, Err: "old rejection"},
+				},
+				{
+					ID: "current-pending", Meta: dockerswarm.Meta{CreatedAt: rolloutStartedAt.Add(time.Second)}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRunning,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStatePending},
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 0 {
+		t.Fatalf("task errors = %v, want no pre-rollout rejection", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientDoesNotPromoteRestartableFailureToTaskRejection(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	older := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Second)
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{ID: "service-id", Spec: spec})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{
+					ID: "failed-attempt", Meta: dockerswarm.Meta{CreatedAt: older}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateFailed, Err: "exit code 1"},
+				},
+				{
+					ID: "restart-pending", Meta: dockerswarm.Meta{CreatedAt: newer}, Slot: 1,
+					Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRunning,
+					Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStatePending},
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.TaskErrors) != 0 {
+		t.Fatalf("task errors = %v, want restartable failure to remain retryable", observed.TaskErrors)
+	}
+}
+
+func TestDockerClientSeparatesRunningTasksDuringShutdown(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	zero := uint64(0)
+	spec.Mode.Replicated.Replicas = &zero
+	oldTaskSpec := spec.TaskTemplate
+	oldContainerSpec := *oldTaskSpec.ContainerSpec
+	oldContainerSpec.Image = "nginx:old"
+	oldTaskSpec.ContainerSpec = &oldContainerSpec
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{ID: "service-id", Spec: spec})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			if strings.Contains(request.URL.RawQuery, "desired-state") {
+				t.Errorf("task query unexpectedly filtered desired state: %s", request.URL.RawQuery)
+			}
+			writeDockerJSON(t, response, []dockerswarm.Task{{
+				Spec: oldTaskSpec, DesiredState: dockerswarm.TaskStateShutdown,
+				Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning},
+			}})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Replicas != 0 || observed.Running != 0 || observed.Terminating != 1 {
+		t.Fatalf("shutdown observation = replicas %d, running %d, terminating %d", observed.Replicas, observed.Running, observed.Terminating)
+	}
+}
+
+func TestDockerClientDoesNotCountTerminatingTaskAsReadyAfterScaleUp(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	two := uint64(2)
+	spec.Mode.Replicated.Replicas = &two
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{ID: "service-id", Spec: spec})
+		case "/networks/moduleos-root-net":
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "moduleos-root-net"})
+		case "/tasks":
+			writeDockerJSON(t, response, []dockerswarm.Task{
+				{Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateRunning, Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning}},
+				{Spec: spec.TaskTemplate, DesiredState: dockerswarm.TaskStateShutdown, Status: dockerswarm.TaskStatus{State: dockerswarm.TaskStateRunning}},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.GetService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Running != 1 || observed.Terminating != 1 {
+		t.Fatalf("scale-up observation = running %d, terminating %d", observed.Running, observed.Terminating)
+	}
+}
+
+func TestDockerClientInspectServiceDoesNotReadTaskInventory(t *testing.T) {
+	spec := buildSwarmSpec(canonicalServiceSpec())
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{ID: "service-id", Spec: spec})
+		case "/tasks":
+			t.Fatal("InspectService read task inventory")
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	observed, err := client.InspectService(t.Context(), "service-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.ID != "service-id" || observed.Image != canonicalServiceSpec().Image {
+		t.Fatalf("InspectService() = %#v", observed)
+	}
+}
+
+func TestDockerClientServiceObservationFailsWhenTasksAreUnknown(t *testing.T) {
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch dockerAPIPath(request) {
+		case "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id",
+				Spec: dockerswarm.ServiceSpec{TaskTemplate: dockerswarm.TaskSpec{
+					ContainerSpec: &dockerswarm.ContainerSpec{Image: "nginx:1.27"},
+				}},
+			})
+		case "/tasks":
+			http.Error(response, "task inventory unavailable", http.StatusInternalServerError)
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	if _, err := client.GetService(t.Context(), "service-id"); err == nil || !strings.Contains(err.Error(), "failed to list tasks") {
+		t.Fatalf("GetService task inventory error = %v", err)
+	}
+}
+
+func TestDockerClientServiceObservationHandlesNetworkInspectionFailures(t *testing.T) {
+	service := dockerswarm.Service{
+		ID: "service-id",
+		Spec: dockerswarm.ServiceSpec{
+			TaskTemplate: dockerswarm.TaskSpec{
+				ContainerSpec: &dockerswarm.ContainerSpec{Image: "nginx:1.27"},
+				Networks:      []dockerswarm.NetworkAttachmentConfig{{Target: "network-id"}},
+			},
+		},
+	}
+
+	t.Run("transient failure rejects incomplete observation", func(t *testing.T) {
+		taskListCalls := 0
+		client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+			switch dockerAPIPath(request) {
+			case "/services/service-id":
+				writeDockerJSON(t, response, service)
+			case "/networks/network-id":
+				http.Error(response, "network inventory unavailable", http.StatusInternalServerError)
+			case "/tasks":
+				taskListCalls++
+				writeDockerJSON(t, response, []dockerswarm.Task{})
+			default:
+				http.NotFound(response, request)
+			}
+		})
+
+		if _, err := client.GetService(t.Context(), "service-id"); err == nil || !strings.Contains(err.Error(), "failed to inspect network") {
+			t.Fatalf("GetService network inventory error = %v", err)
+		}
+		if taskListCalls != 0 {
+			t.Fatal("task state was read after network observation became incomplete")
+		}
+	})
+
+	t.Run("missing attachment remains repairable drift", func(t *testing.T) {
+		client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+			switch dockerAPIPath(request) {
+			case "/services/service-id":
+				writeDockerJSON(t, response, service)
+			case "/networks/network-id":
+				http.NotFound(response, request)
+			case "/tasks":
+				writeDockerJSON(t, response, []dockerswarm.Task{})
+			default:
+				http.NotFound(response, request)
+			}
+		})
+
+		observed, err := client.GetService(t.Context(), "service-id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(observed.Spec.Networks) != 1 || observed.Spec.Networks[0].Network != "network-id" {
+			t.Fatalf("missing attachment was not preserved as drift: %#v", observed.Spec.Networks)
+		}
+	})
+}
+
+func TestDockerClientNetworkAndLogOperations(t *testing.T) {
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && dockerAPIPath(request) == "/networks/network-id":
+			writeDockerJSON(t, response, map[string]any{
+				"Id": "network-id", "Name": "moduleos-root-net", "Driver": "overlay", "Attachable": true,
+				"Labels": map[string]string{LabelManagedBy: "true"},
+			})
+		case request.Method == http.MethodGet && dockerAPIPath(request) == "/networks":
+			writeDockerJSON(t, response, []map[string]any{{
+				"Id": "network-id", "Name": "moduleos-root-net", "Driver": "overlay", "Attachable": true,
+			}})
+		case request.Method == http.MethodDelete && dockerAPIPath(request) == "/networks/network-id":
+			response.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodGet && dockerAPIPath(request) == "/services/service-id/logs":
+			_, _ = io.WriteString(response, "logs")
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	network, err := client.GetNetwork(t.Context(), "network-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if network.Name != "moduleos-root-net" || !network.Attachable {
+		t.Fatalf("GetNetwork() = %#v", network)
+	}
+	networks, err := client.ListNetworks(t.Context())
+	if err != nil || len(networks) != 1 {
+		t.Fatalf("ListNetworks() = %#v, %v", networks, err)
+	}
+	if err := client.RemoveNetwork(t.Context(), "network-id"); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := client.GetServiceLogs(t.Context(), "service-id", "25", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	data, err := io.ReadAll(logs)
+	if err != nil || string(data) != "logs" {
+		t.Fatalf("logs = %q, %v", data, err)
+	}
+}
+
+func TestDockerClientNetworkMutationResolvesNames(t *testing.T) {
+	current := buildSwarmSpec(canonicalServiceSpec())
+	current.TaskTemplate.Networks = nil
+	var updates []dockerswarm.ServiceSpec
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasPrefix(dockerAPIPath(request), "/networks/"):
+			writeDockerJSON(t, response, map[string]any{"Id": "network-id", "Name": "project-net"})
+		case request.Method == http.MethodGet && dockerAPIPath(request) == "/services/service-id":
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Meta: dockerswarm.Meta{Version: dockerswarm.Version{Index: uint64(len(updates) + 1)}}, Spec: current,
+			})
+		case request.Method == http.MethodPost && dockerAPIPath(request) == "/services/service-id/update":
+			var spec dockerswarm.ServiceSpec
+			if err := json.NewDecoder(request.Body).Decode(&spec); err != nil {
+				t.Errorf("decode network mutation request: %v", err)
+				return
+			}
+			updates = append(updates, spec)
+			current = spec
+			writeDockerJSON(t, response, map[string]any{"Warnings": []string{}})
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	if err := client.AttachServiceNetwork(t.Context(), "service-id", NetworkAttachment{Network: "project-net", Aliases: []string{"db"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DetachServiceNetwork(t.Context(), "service-id", "project-net"); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 2 || len(updates[0].TaskTemplate.Networks) != 1 || len(updates[1].TaskTemplate.Networks) != 0 {
+		t.Fatalf("unexpected network mutations: %#v", updates)
+	}
+}
+
+func TestDockerClientWatchEvents(t *testing.T) {
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		if dockerAPIPath(request) != "/events" {
+			http.NotFound(response, request)
+			return
+		}
+		filter := request.URL.Query().Get("filters")
+		if !strings.Contains(filter, `"container"`) || !strings.Contains(filter, `"service"`) || strings.Contains(filter, `"task"`) {
+			t.Errorf("unexpected event filters: %s", filter)
+		}
+		writeDockerJSON(t, response, map[string]any{
+			"Type": "container", "Action": "die",
+			"Actor": map[string]any{"Attributes": map[string]string{
+				"name":                          "moduleos_api.1.task-id",
+				"com.docker.swarm.service.name": "moduleos_api",
+			}},
+		})
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	events, errs := client.WatchEvents(ctx)
+	select {
+	case event := <-events:
+		if event.Type != "container" || event.Action != "die" || event.Target != "moduleos_api" {
+			t.Fatalf("unexpected event: %#v", event)
+		}
+	case err := <-errs:
+		t.Fatalf("event stream failed: %v", err)
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for Docker event")
+	}
+}

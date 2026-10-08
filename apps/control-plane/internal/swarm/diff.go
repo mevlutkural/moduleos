@@ -12,13 +12,19 @@ func DiffServiceSpec(desired, observed ServiceSpec) []string {
 	if !imageEquivalent(desired.Image, observed.Image) {
 		diff = append(diff, "image")
 	}
+	if desired.ServiceMode != observed.ServiceMode {
+		diff = append(diff, "service_mode")
+	}
+	if desired.EndpointMode != observed.EndpointMode {
+		diff = append(diff, "endpoint_mode")
+	}
 	if desired.Replicas != observed.Replicas {
 		diff = append(diff, "replicas")
 	}
 	if !reflect.DeepEqual(sortedStrings(desired.EnvVars), sortedStrings(observed.EnvVars)) {
 		diff = append(diff, "environment")
 	}
-	if !reflect.DeepEqual(desired.Ports, observed.Ports) {
+	if !reflect.DeepEqual(desiredRuntimePorts(desired.Ports), observed.Ports) {
 		diff = append(diff, "ports")
 	}
 	if !reflect.DeepEqual(desired.Volumes, observed.Volumes) {
@@ -27,17 +33,30 @@ func DiffServiceSpec(desired, observed ServiceSpec) []string {
 	if !networkSpecsEqual(desired.Networks, observed.Networks) {
 		diff = append(diff, "networks")
 	}
+	if desired.TaskTemplateHash != observed.TaskTemplateHash || observed.UnsupportedTaskTemplate {
+		diff = append(diff, "task_template")
+	}
 	if !ownedLabelsEqual(desired.Labels, observed.Labels) {
 		diff = append(diff, "labels")
 	}
-	if desired.Update != observed.Update || desired.Restart != observed.Restart {
+	if desired.Update != observed.Update || desired.Rollback != observed.Rollback || desired.Restart != observed.Restart {
 		diff = append(diff, "policy")
 	}
 	return diff
 }
 
+func desiredRuntimePorts(ports []PortConfig) []PortConfig {
+	var published []PortConfig
+	for _, port := range ports {
+		if port.PublishedPort != 0 {
+			published = append(published, port)
+		}
+	}
+	return published
+}
+
 func imageEquivalent(desired, observed string) bool {
-	return desired == observed || strings.HasPrefix(observed, desired+"@")
+	return ImageReferenceMatches(desired, observed)
 }
 
 func sortedStrings(values []string) []string {

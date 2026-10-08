@@ -93,8 +93,8 @@ func TestStoreHealthAndListPaths(t *testing.T) {
 	if err != nil || len(links) != 1 || links[0].ID != link.ID {
 		t.Fatalf("ListProjectLinksByProject = %#v, %v", links, err)
 	}
-	if err := st.MarkProjectLinksObserved(ctx, app.ID); err != nil {
-		t.Fatalf("MarkProjectLinksObserved: %v", err)
+	if err := st.MarkProjectLinkObserved(ctx, link.ID, link.DesiredGeneration); err != nil {
+		t.Fatalf("MarkProjectLinkObserved: %v", err)
 	}
 	observed, err := st.GetProjectLink(ctx, link.ID)
 	if err != nil {
@@ -103,8 +103,11 @@ func TestStoreHealthAndListPaths(t *testing.T) {
 	if observed.ObservedGeneration != observed.DesiredGeneration {
 		t.Fatalf("observed generation = %d, want %d", observed.ObservedGeneration, observed.DesiredGeneration)
 	}
-	if err := st.MarkProjectLinksObserved(ctx, "missing-app"); err != nil {
-		t.Fatalf("marking no matching links must be idempotent: %v", err)
+	if err := st.MarkProjectLinkObserved(ctx, link.ID, link.DesiredGeneration+1); !errors.Is(err, ErrStaleObservation) {
+		t.Fatalf("stale link observation error = %v", err)
+	}
+	if err := st.MarkProjectLinkObserved(ctx, "missing-link", 1); !errors.Is(err, ErrStaleObservation) {
+		t.Fatalf("missing link observation error = %v", err)
 	}
 }
 
@@ -261,6 +264,20 @@ func TestReconcileDiagnosticsStateAndCAS(t *testing.T) {
 		len(degraded.ReconcileErrorMessage) != 1024 || !degraded.ReconcileRetryable || degraded.ReconcileAttempt != 7 || degraded.LastReconciledAt == nil {
 		t.Fatalf("degraded diagnostics = %#v", degraded)
 	}
+	if degraded.Status != AppStatusCreated {
+		t.Fatalf("retryable diagnostics changed application status to %q", degraded.Status)
+	}
+
+	if err := st.PersistReconcileDiagnostics(ctx, app.ID, 1, "invalid_desired_spec", "terminal failure", false, 8); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := st.GetApplicationByID(ctx, app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.ObservedState != ObservedStateFailed || failed.Status != AppStatusFailed || failed.ReconcileRetryable {
+		t.Fatalf("terminal diagnostics = %#v", failed)
+	}
 
 	if err := st.PersistReconcileDiagnostics(ctx, app.ID, 1, "", "retry cleared", false, 0); err != nil {
 		t.Fatal(err)
@@ -321,30 +338,98 @@ func TestDeploymentStateTransitionsAndCAS(t *testing.T) {
 	if inProgress.StartedAt == nil || !inProgress.StartedAt.Equal(startedAt) {
 		t.Fatalf("replayed start changed timestamp: first=%v next=%v", startedAt, inProgress.StartedAt)
 	}
-	if err := st.MarkDeploymentState(ctx, deployment.ID, 1, DeploymentStatusSucceeded, "", ""); err != nil {
+	resolvedImage := "docker.io/library/nginx:1.27@sha256:" + strings.Repeat("a", 64)
+	if err := st.RecordDeploymentResolvedImage(ctx, deployment.ID, 1, resolvedImage); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordDeploymentResolvedImage(ctx, deployment.ID, 1, resolvedImage); err != nil {
+		t.Fatalf("resolved image replay: %v", err)
+	}
+	conflictingImage := "docker.io/library/nginx:1.27@sha256:" + strings.Repeat("b", 64)
+	if err := st.RecordDeploymentResolvedImage(ctx, deployment.ID, 1, conflictingImage); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("resolved image rewrite error = %v, want ErrInvalidTransition", err)
+	}
+	if err := st.RecordDeploymentResolvedImage(ctx, deployment.ID, 0, resolvedImage); !errors.Is(err, ErrStaleObservation) {
+		t.Fatalf("stale resolved image error = %v, want ErrStaleObservation", err)
+	}
+	if err := st.RecordDeploymentResolvedImage(ctx, "missing-deployment", 1, resolvedImage); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing resolved image error = %v, want ErrNotFound", err)
+	}
+	if err := st.RecordDeploymentResolvedImage(ctx, deployment.ID, 1, ""); !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("empty resolved image error = %v, want ErrInvalidData", err)
+	}
+	if err := st.MarkDeploymentSucceeded(ctx, deployment.ID, 1, resolvedImage); err != nil {
 		t.Fatal(err)
 	}
 	succeeded, err := st.GetDeployment(ctx, deployment.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if succeeded.Status != DeploymentStatusSucceeded || succeeded.FinishedAt == nil {
+	if succeeded.Status != DeploymentStatusSucceeded || succeeded.FinishedAt == nil || succeeded.ResolvedImage != resolvedImage {
 		t.Fatalf("succeeded deployment = %#v", succeeded)
 	}
 	finishedAt := *succeeded.FinishedAt
 	time.Sleep(2 * time.Millisecond)
-	if err := st.MarkDeploymentState(ctx, deployment.ID, 1, DeploymentStatusSucceeded, "", ""); err != nil {
+	if err := st.MarkDeploymentSucceeded(ctx, deployment.ID, 1, "docker.io/library/nginx:changed@sha256:"+strings.Repeat("b", 64)); err != nil {
 		t.Fatal(err)
 	}
 	replayed, err := st.GetDeployment(ctx, deployment.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replayed.FinishedAt == nil || !replayed.FinishedAt.Equal(finishedAt) {
+	if replayed.FinishedAt == nil || !replayed.FinishedAt.Equal(finishedAt) || replayed.ResolvedImage != resolvedImage {
 		t.Fatalf("replayed terminal transition changed finished_at: first=%v replayed=%v", finishedAt, replayed.FinishedAt)
+	}
+	lateResolution := &Deployment{
+		ID:               uuid.NewString(),
+		AppID:            app.ID,
+		SourceType:       SourceTypeImage,
+		Image:            "nginx:concurrent",
+		Status:           DeploymentStatusPending,
+		TriggeredBy:      TriggeredByAPI,
+		CreatedAt:        time.Now().UTC(),
+		TargetGeneration: 1,
+	}
+	if err := st.CreateDeployment(ctx, lateResolution); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := st.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := terminalizeOvertakenDeploymentsTx(ctx, tx, app.ID, 2, 1, time.Now().UTC()); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkDeploymentSucceeded(ctx, lateResolution.ID, 1, resolvedImage); err != nil {
+		t.Fatal(err)
+	}
+	resolvedAfterTerminalization, err := st.GetDeployment(ctx, lateResolution.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedAfterTerminalization.Status != DeploymentStatusSucceeded || resolvedAfterTerminalization.ResolvedImage != resolvedImage {
+		t.Fatalf("late resolved image was not recorded: %#v", resolvedAfterTerminalization)
+	}
+	if err := st.MarkDeploymentState(ctx, deployment.ID, 1, DeploymentStatusFailed, "late_failure", "must not replace success"); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("terminal rewrite error = %v, want ErrInvalidTransition", err)
+	}
+	stillSucceeded, err := st.GetDeployment(ctx, deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillSucceeded.Status != DeploymentStatusSucceeded || stillSucceeded.ErrorCode != "" ||
+		stillSucceeded.FinishedAt == nil || !stillSucceeded.FinishedAt.Equal(finishedAt) {
+		t.Fatalf("terminal rewrite mutated succeeded deployment: %#v", stillSucceeded)
 	}
 	if err := st.MarkDeploymentState(ctx, deployment.ID, 0, DeploymentStatusFailed, "stale", "stale"); !errors.Is(err, ErrStaleObservation) {
 		t.Fatalf("stale transition error = %v, want ErrStaleObservation", err)
+	}
+	if err := st.MarkDeploymentState(ctx, deployment.ID, 1, DeploymentStatus("unknown"), "", ""); !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("unknown status error = %v, want ErrInvalidData", err)
 	}
 
 	failed := &Deployment{
@@ -369,6 +454,21 @@ func TestDeploymentStateTransitionsAndCAS(t *testing.T) {
 	}
 	if failedState.FinishedAt == nil || failedState.ErrorCode != "runtime_error" || len(failedState.ErrorMessage) != 1024 {
 		t.Fatalf("failed deployment = %#v", failedState)
+	}
+	failedAt := *failedState.FinishedAt
+	if err := st.MarkDeploymentState(ctx, failed.ID, 1, DeploymentStatusSucceeded, "", ""); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("failed-to-succeeded error = %v, want ErrInvalidTransition", err)
+	}
+	if err := st.MarkDeploymentState(ctx, failed.ID, 1, DeploymentStatusFailed, "replacement", "replacement"); err != nil {
+		t.Fatalf("idempotent failed replay: %v", err)
+	}
+	failedReplay, err := st.GetDeployment(ctx, failed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedReplay.Status != DeploymentStatusFailed || failedReplay.ErrorCode != "runtime_error" ||
+		len(failedReplay.ErrorMessage) != 1024 || failedReplay.FinishedAt == nil || !failedReplay.FinishedAt.Equal(failedAt) {
+		t.Fatalf("terminal replay mutated failed deployment: %#v", failedReplay)
 	}
 	missing := &Deployment{ID: "missing-deployment"}
 	if err := st.UpdateDeployment(ctx, missing); !errors.Is(err, ErrNotFound) {
@@ -520,8 +620,8 @@ func TestDeploymentIntentDefaultsSupersedeAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if superseded.Status != DeploymentStatusSuperseded {
-		t.Fatalf("first deployment status = %s, want superseded", superseded.Status)
+	if superseded.Status != DeploymentStatusSuperseded || superseded.FinishedAt == nil {
+		t.Fatalf("first deployment was not terminally superseded: %#v", superseded)
 	}
 
 	duplicate := &Deployment{ID: second.ID, Image: "nginx:must-rollback", CreatedAt: time.Now().UTC()}
@@ -552,6 +652,131 @@ func TestDeploymentIntentDefaultsSupersedeAndRollback(t *testing.T) {
 	}
 	if _, err := st.CreateDeploymentIntent(ctx, deleting.Name, &Deployment{ID: uuid.NewString(), Image: "nginx:blocked", CreatedAt: time.Now().UTC()}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("deployment during deletion error = %v, want ErrConflict", err)
+	}
+}
+
+func TestOrdinaryApplicationIntentsSupersedeActiveDeployments(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(context.Context, *SQLiteStore, *Application) (*Application, error)
+	}{
+		{
+			name: "configuration update",
+			mutate: func(ctx context.Context, st *SQLiteStore, application *Application) (*Application, error) {
+				replicas := 2
+				return st.UpdateApplicationIntent(ctx, application.Name, application.DesiredGeneration, ApplicationMutation{Replicas: &replicas})
+			},
+		},
+		{
+			name: "deletion",
+			mutate: func(ctx context.Context, st *SQLiteStore, application *Application) (*Application, error) {
+				return st.CreateDeletionIntent(ctx, application.Name, application.DesiredGeneration)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st := newInternalTestStore(t)
+			ctx := t.Context()
+			application := createInternalTestApp(t, st, "supersede-"+strings.ReplaceAll(test.name, " ", "-"))
+			deployment := &Deployment{ID: uuid.NewString(), Image: "nginx:2.0", CreatedAt: time.Now().UTC()}
+			application, err := st.CreateDeploymentIntent(ctx, application.Name, deployment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.MarkDeploymentState(ctx, deployment.ID, deployment.TargetGeneration, DeploymentStatusApplying, "", ""); err != nil {
+				t.Fatal(err)
+			}
+
+			application, err = test.mutate(ctx, st, application)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if application.DesiredGeneration != deployment.TargetGeneration+1 {
+				t.Fatalf("new generation = %d, deployment target = %d", application.DesiredGeneration, deployment.TargetGeneration)
+			}
+			persisted, err := st.GetDeployment(ctx, deployment.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Status != DeploymentStatusSuperseded || persisted.FinishedAt == nil {
+				t.Fatalf("overtaken deployment remained active: %#v", persisted)
+			}
+		})
+	}
+}
+
+func TestObservedDeploymentIsSucceededWhenLaterIntentOvertakesIt(t *testing.T) {
+	st := newInternalTestStore(t)
+	ctx := t.Context()
+	application := createInternalTestApp(t, st, "observed-before-deployment-terminal")
+	deployment := &Deployment{ID: uuid.NewString(), Image: "nginx:2.0", CreatedAt: time.Now().UTC()}
+	application, err := st.CreateDeploymentIntent(ctx, application.Name, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkDeploymentState(ctx, deployment.ID, deployment.TargetGeneration, DeploymentStatusApplying, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkApplicationObserved(ctx, application.ID, ObservedApplicationUpdate{
+		Generation: deployment.TargetGeneration,
+		State:      ObservedStateRunning,
+		Image:      deployment.Image,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application, err = st.GetApplication(ctx, application.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replicas := 2
+	if _, err := st.UpdateApplicationIntent(ctx, application.Name, application.DesiredGeneration, ApplicationMutation{Replicas: &replicas}); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := st.GetDeployment(ctx, deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != DeploymentStatusSucceeded || persisted.FinishedAt == nil {
+		t.Fatalf("observed deployment was not preserved as successful: %#v", persisted)
+	}
+}
+
+func TestOlderUnobservedDeploymentIsSupersededByLaterObservedGeneration(t *testing.T) {
+	st := newInternalTestStore(t)
+	ctx := t.Context()
+	application := createInternalTestApp(t, st, "older-unobserved-deployment")
+	deployment := &Deployment{ID: uuid.NewString(), Image: "nginx:2.0", CreatedAt: time.Now().UTC()}
+	application, err := st.CreateDeploymentIntent(ctx, application.Name, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkDeploymentState(ctx, deployment.ID, deployment.TargetGeneration, DeploymentStatusApplying, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.db.ExecContext(ctx, `UPDATE applications SET
+		desired_generation = 3, observed_generation = 3, image = 'nginx:3.0', observed_image = 'nginx:3.0'
+		WHERE id = ?`, application.ID); err != nil {
+		t.Fatal(err)
+	}
+	application, err = st.GetApplication(ctx, application.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replicas := 2
+	if _, err := st.UpdateApplicationIntent(ctx, application.Name, application.DesiredGeneration, ApplicationMutation{Replicas: &replicas}); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := st.GetDeployment(ctx, deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != DeploymentStatusSuperseded || persisted.FinishedAt == nil {
+		t.Fatalf("unobserved deployment was not superseded: %#v", persisted)
 	}
 }
 

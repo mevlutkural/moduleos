@@ -1,6 +1,8 @@
 package swarm
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -15,12 +17,67 @@ import (
 
 var ErrInvalidSpec = errors.New("invalid desired service spec")
 var ErrOwnershipConflict = errors.New("resource ownership conflict")
+var ErrImageResolution = errors.New("image resolution failed")
+
+func IsImmutableImageReference(image string) bool {
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return false
+	}
+	_, immutable := named.(reference.Digested)
+	return immutable
+}
+
+func ImageReferencesEqual(left, right string) bool {
+	leftNamed, err := reference.ParseNormalizedNamed(left)
+	if err != nil {
+		return false
+	}
+	rightNamed, err := reference.ParseNormalizedNamed(right)
+	if err != nil {
+		return false
+	}
+	leftNormalized := reference.FamiliarString(reference.TagNameOnly(leftNamed))
+	rightNormalized := reference.FamiliarString(reference.TagNameOnly(rightNamed))
+	return leftNormalized == rightNormalized
+}
+
+func ImageReferenceMatches(source, runtime string) bool {
+	if ImageReferencesEqual(source, runtime) {
+		return true
+	}
+	sourceNamed, err := reference.ParseNormalizedNamed(source)
+	if err != nil {
+		return false
+	}
+	runtimeNamed, err := reference.ParseNormalizedNamed(runtime)
+	if err != nil {
+		return false
+	}
+	if _, sourceIsDigest := sourceNamed.(reference.Digested); sourceIsDigest {
+		return false
+	}
+	if _, runtimeIsDigest := runtimeNamed.(reference.Digested); !runtimeIsDigest {
+		return false
+	}
+	sourceTagged := reference.TagNameOnly(sourceNamed)
+	sourceTag, ok := sourceTagged.(reference.NamedTagged)
+	if !ok {
+		return false
+	}
+	if runtimeTag, ok := runtimeNamed.(reference.NamedTagged); ok {
+		runtimeTagged, err := reference.WithTag(reference.TrimNamed(runtimeNamed), runtimeTag.Tag())
+		return err == nil && ImageReferencesEqual(reference.FamiliarString(sourceTagged), reference.FamiliarString(runtimeTagged))
+	}
+	return sourceTag.Tag() == "latest" && reference.FamiliarName(sourceNamed) == reference.FamiliarName(runtimeNamed)
+}
 
 const (
 	LabelAppID        = "moduleos.app.id"
 	LabelProjectID    = "moduleos.project.id"
 	LabelProject      = "moduleos.project.slug"
 	LabelGeneration   = "moduleos.generation"
+	LabelTaskTemplate = "moduleos.task-template"
 	LabelSchema       = "moduleos.schema"
 	LabelResourceKind = "moduleos.resource.kind"
 	OwnedLabelPrefix  = "moduleos."
@@ -45,6 +102,7 @@ type DesiredServiceInput struct {
 	IngressPort     uint32
 	IngressNetwork  string
 	BaseDomain      string
+	RolloutIdentity string
 	PreservedLabels map[string]string
 }
 
@@ -58,9 +116,11 @@ func BuildDesiredServiceSpec(input DesiredServiceInput) (ServiceSpec, error) {
 	if input.Image == "" {
 		return ServiceSpec{}, fmt.Errorf("%w: image is required", ErrInvalidSpec)
 	}
-	if _, err := reference.ParseNormalizedNamed(input.Image); err != nil {
+	namedImage, err := reference.ParseNormalizedNamed(input.Image)
+	if err != nil {
 		return ServiceSpec{}, fmt.Errorf("%w: invalid image reference", ErrInvalidSpec)
 	}
+	input.Image = reference.FamiliarString(reference.TagNameOnly(namedImage))
 	if input.Replicas < 0 || input.Generation < 0 {
 		return ServiceSpec{}, fmt.Errorf("%w: replicas and generation cannot be negative", ErrInvalidSpec)
 	}
@@ -107,22 +167,66 @@ func BuildDesiredServiceSpec(input DesiredServiceInput) (ServiceSpec, error) {
 	if !input.DesiredRunning {
 		replicas = 0
 	}
-	return ServiceSpec{
-		Name:     input.Name,
-		Image:    input.Image,
-		Replicas: replicas,
-		EnvVars:  environment,
-		Ports:    ports,
-		Volumes:  volumes,
-		Labels:   labels,
-		Networks: networks,
+	result := ServiceSpec{
+		Name:         input.Name,
+		Image:        input.Image,
+		ServiceMode:  "replicated",
+		EndpointMode: "vip",
+		Replicas:     replicas,
+		EnvVars:      environment,
+		Ports:        ports,
+		Volumes:      volumes,
+		Labels:       labels,
+		Networks:     networks,
 		Update: UpdatePolicy{
-			Parallelism: 1,
-			Delay:       2 * time.Second,
-			Monitor:     10 * time.Second,
+			Parallelism:   1,
+			Delay:         2 * time.Second,
+			Monitor:       10 * time.Second,
+			FailureAction: "pause",
+			Order:         "stop-first",
 		},
-		Restart: RestartPolicy{Delay: 5 * time.Second},
-	}, nil
+		Rollback: UpdatePolicy{
+			Parallelism:   1,
+			Delay:         2 * time.Second,
+			Monitor:       10 * time.Second,
+			FailureAction: "pause",
+			Order:         "stop-first",
+		},
+		Restart: RestartPolicy{Condition: "any", Delay: 5 * time.Second},
+	}
+	return WithRolloutIdentity(result, input.RolloutIdentity)
+}
+
+func WithRolloutIdentity(spec ServiceSpec, identity string) (ServiceSpec, error) {
+	templateHash, err := taskTemplateHash(spec, identity)
+	if err != nil {
+		return ServiceSpec{}, fmt.Errorf("%w: hash task template: %v", ErrInvalidSpec, err)
+	}
+	spec.TaskTemplateHash = templateHash
+	return spec, nil
+}
+
+func taskTemplateHash(spec ServiceSpec, rolloutIdentity string) (string, error) {
+	payload, err := json.Marshal(struct {
+		Image           string
+		EnvVars         []string
+		Volumes         []VolumeConfig
+		Networks        []NetworkAttachment
+		Restart         RestartPolicy
+		RolloutIdentity string
+	}{
+		Image:           spec.Image,
+		EnvVars:         spec.EnvVars,
+		Volumes:         spec.Volumes,
+		Networks:        spec.Networks,
+		Restart:         spec.Restart,
+		RolloutIdentity: rolloutIdentity,
+	})
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", hash), nil
 }
 
 func ownershipLabels(input DesiredServiceInput) map[string]string {

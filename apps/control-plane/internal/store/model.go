@@ -142,6 +142,7 @@ type Deployment struct {
 	AppID                      string           `db:"app_id"        json:"app_id"`
 	SourceType                 SourceType       `db:"source_type"   json:"source_type"`
 	Image                      string           `db:"image"         json:"image"`
+	ResolvedImage              string           `db:"resolved_image" json:"resolved_image,omitempty"`
 	Status                     DeploymentStatus `db:"status"        json:"status"`
 	TriggeredBy                TriggeredBy      `db:"triggered_by"  json:"triggered_by"`
 	ErrorMessage               string           `db:"error_message" json:"error_message"`

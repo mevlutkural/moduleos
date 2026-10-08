@@ -420,13 +420,13 @@ func (s *Service) RollbackApp(ctx context.Context, appName string, deployID stri
 	if targetDeployment.Status != store.DeploymentStatusSucceeded && targetDeployment.Status != store.DeploymentStatusSuccess {
 		return nil, fmt.Errorf("%w: rollback target must be succeeded", store.ErrInvalidData)
 	}
-	if targetDeployment.Image == "" {
-		return nil, fmt.Errorf("%w: rollback target has no image", store.ErrInvalidData)
+	if !swarm.IsImmutableImageReference(targetDeployment.ResolvedImage) {
+		return nil, fmt.Errorf("%w: rollback target has no immutable resolved image", store.ErrInvalidData)
 	}
 
 	rollbackDeployment, err := s.createDeploymentIntent(ctx, DeployAppRequest{
 		AppName: appName,
-		Image:   targetDeployment.Image,
+		Image:   targetDeployment.ResolvedImage,
 	}, &deployID)
 	if err != nil {
 		return rollbackDeployment, err
@@ -510,7 +510,7 @@ func (s *Service) GetLogs(ctx context.Context, serviceID string, tail string, fo
 }
 
 func (s *Service) GetApplicationLogs(ctx context.Context, application *store.Application, tail string, follow bool) (io.ReadCloser, error) {
-	info, err := s.swarm.GetService(ctx, swarm.ServiceName(application.Name))
+	info, err := s.swarm.InspectService(ctx, swarm.ServiceName(application.Name))
 	if err != nil {
 		return nil, fmt.Errorf("inspect service for logs: %w", err)
 	}

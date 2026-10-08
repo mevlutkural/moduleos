@@ -4,12 +4,39 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/containerd/errdefs"
 	dockerswarm "github.com/moby/moby/api/types/swarm"
 )
+
+func TestIsTransientErrorRecognizesDockerTransportFailure(t *testing.T) {
+	endpoint := fmt.Sprintf("/tmp/moduleos-missing-%d.sock", time.Now().UnixNano())
+	client, err := NewDockerClientWithEndpoint(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	err = client.Health(t.Context())
+	if err == nil {
+		t.Fatal("missing Docker socket unexpectedly passed health check")
+	}
+	if !IsTransientError(err) {
+		t.Fatalf("Docker transport failure was classified as permanent: %v", err)
+	}
+	if IsTransientError(errors.New("invalid desired configuration")) {
+		t.Fatal("permanent validation error was classified as transient")
+	}
+	for _, interrupted := range []error{io.EOF, io.ErrUnexpectedEOF} {
+		if !IsTransientError(interrupted) {
+			t.Fatalf("interrupted Docker response %v was classified as permanent", interrupted)
+		}
+	}
+}
 
 func TestAttachNetworkMutator(t *testing.T) {
 	tests := []struct {

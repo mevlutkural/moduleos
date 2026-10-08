@@ -17,6 +17,8 @@ at the expense of clear boundaries.
 
 - Keep each pull request focused on one coherent change.
 - Add or update tests whenever behavior changes.
+- Keep every affected package above its architecture-specific floor in
+  `./scripts/check-coverage.sh`; package results are not averaged.
 - Update documentation and public contracts when applicable.
 - Preserve backwards compatibility unless a breaking change is explicitly
   approved and documented.

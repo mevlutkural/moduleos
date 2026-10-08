@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +107,63 @@ func TestApplicationIntentCASAndStaleObservation(t *testing.T) {
 		Image:      app.Image,
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestApplicationAndDeploymentConvergenceIsAtomic(t *testing.T) {
+	st, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	app := canonicalTestApp("atomic-convergence")
+	if err := st.CreateApplication(ctx, app); err != nil {
+		t.Fatal(err)
+	}
+	deployment := &Deployment{
+		ID:               uuid.NewString(),
+		AppID:            app.ID,
+		SourceType:       SourceTypeImage,
+		Image:            app.Image,
+		Status:           DeploymentStatusPending,
+		TriggeredBy:      TriggeredByAPI,
+		CreatedAt:        time.Now().UTC(),
+		TargetGeneration: app.DesiredGeneration,
+	}
+	if err := st.CreateDeployment(ctx, deployment); err != nil {
+		t.Fatal(err)
+	}
+	resolvedImage := "docker.io/library/nginx@sha256:" + strings.Repeat("a", 64)
+	observation := ObservedApplicationUpdate{
+		Generation: app.DesiredGeneration,
+		State:      ObservedStateRunning,
+		Image:      resolvedImage,
+	}
+	if err := st.MarkApplicationConverged(ctx, app.ID, observation, "missing-deployment", resolvedImage); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing deployment error = %v, want ErrNotFound", err)
+	}
+	afterRollback, err := st.GetApplicationByID(ctx, app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRollback.ObservedGeneration != 0 || afterRollback.ObservedImage != "" {
+		t.Fatalf("failed convergence partially committed application state: %#v", afterRollback)
+	}
+	if err := st.MarkApplicationConverged(ctx, app.ID, observation, deployment.ID, resolvedImage); err != nil {
+		t.Fatal(err)
+	}
+	converged, err := st.GetApplicationByID(ctx, app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistedDeployment, err := st.GetDeployment(ctx, deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged.ObservedGeneration != app.DesiredGeneration || converged.ObservedImage != resolvedImage ||
+		persistedDeployment.Status != DeploymentStatusSucceeded || persistedDeployment.ResolvedImage != resolvedImage {
+		t.Fatalf("atomic convergence was incomplete: app=%#v deployment=%#v", converged, persistedDeployment)
 	}
 }
 
@@ -233,8 +291,22 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deployments) != 2 || deployments[0].TargetGeneration != 0 || deployments[1].TargetGeneration != 0 {
+	if len(deployments) != 3 {
 		t.Fatalf("legacy deployment history changed: %#v", deployments)
+	}
+	deploymentsByID := make(map[string]*Deployment, len(deployments))
+	for _, deployment := range deployments {
+		deploymentsByID[deployment.ID] = deployment
+		if deployment.TargetGeneration != 0 {
+			t.Fatalf("legacy deployment target generation changed: %#v", deployment)
+		}
+	}
+	immutableImage := "docker.io/library/nginx@sha256:" + strings.Repeat("a", 64)
+	if deploymentsByID["30000000-0000-0000-0000-000000000003"].ResolvedImage != immutableImage {
+		t.Fatalf("immutable legacy deployment was not backfilled: %#v", deploymentsByID["30000000-0000-0000-0000-000000000003"])
+	}
+	if deploymentsByID["30000000-0000-0000-0000-000000000001"].ResolvedImage != "" {
+		t.Fatalf("mutable legacy deployment was backfilled: %#v", deploymentsByID["30000000-0000-0000-0000-000000000001"])
 	}
 	links, err := upgraded.ListProjectLinksByApp(ctx, app.ID)
 	if err != nil {
@@ -254,7 +326,7 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if err := upgraded.db.QueryRowContext(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&migrationVersion, &migrationDirty); err != nil {
 		t.Fatal(err)
 	}
-	if migrationVersion != "9" || migrationDirty {
+	if migrationVersion != "10" || migrationDirty {
 		t.Fatalf("migration state version=%s dirty=%v", migrationVersion, migrationDirty)
 	}
 	var integrity string

@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,6 +253,7 @@ func TestDeployment_GetAndUpdate(t *testing.T) {
 	// Update status to success and set FinishedAt.
 	finished := time.Now()
 	got.Status = store.DeploymentStatusSuccess
+	got.ResolvedImage = "nginx:1.0@sha256:" + strings.Repeat("a", 64)
 	got.FinishedAt = &finished
 	if err := s.UpdateDeployment(ctx, got); err != nil {
 		t.Fatalf("UpdateDeployment error: %v", err)
@@ -263,6 +265,9 @@ func TestDeployment_GetAndUpdate(t *testing.T) {
 	}
 	if updated.FinishedAt == nil {
 		t.Error("finished_at was not persisted")
+	}
+	if updated.ResolvedImage != got.ResolvedImage {
+		t.Errorf("resolved image: got %s, want %s", updated.ResolvedImage, got.ResolvedImage)
 	}
 }
 
