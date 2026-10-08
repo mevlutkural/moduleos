@@ -208,7 +208,7 @@ func (s *Service) CreateProjectLink(ctx context.Context, projectSlug, targetAppN
 
 	sourceApps, err := s.store.ListApplicationsByProject(ctx, p.ID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: list source applications: %v", ErrInternal, err)
+		return nil, projectInternalError("list source applications", err)
 	}
 	for _, app := range sourceApps {
 		if alias == app.Name || alias == fmt.Sprintf("%s.%s", p.Slug, app.Name) {
@@ -217,7 +217,7 @@ func (s *Service) CreateProjectLink(ctx context.Context, projectSlug, targetAppN
 	}
 	links, err := s.store.ListProjectLinksByProject(ctx, p.ID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: list project links for resource limit: %v", ErrInternal, err)
+		return nil, projectInternalError("list project links for resource limit", err)
 	}
 	if len(links) >= maxProjectLinks {
 		return nil, fmt.Errorf("%w: project link limit reached", store.ErrConflict)
@@ -235,7 +235,7 @@ func (s *Service) CreateProjectLink(ctx context.Context, projectSlug, targetAppN
 		if errors.Is(err, store.ErrConflict) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: create project link: %v", ErrInternal, err)
+		return nil, projectInternalError("create project link", err)
 	}
 
 	s.enqueue(targetApp.Name)
@@ -257,17 +257,17 @@ func (s *Service) ListProjectLinks(ctx context.Context, projectSlug string) ([]*
 	}
 	links, err := s.store.ListProjectLinksByProject(ctx, p.ID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: list project links: %v", ErrInternal, err)
+		return nil, projectInternalError("list project links", err)
 	}
 	details := make([]*ProjectLinkDetails, 0, len(links))
 	for _, link := range links {
 		targetApp, err := s.store.GetApplicationByID(ctx, link.TargetAppID)
 		if err != nil {
-			return nil, fmt.Errorf("%w: resolve target app for link %s: %v", ErrInternal, link.ID, err)
+			return nil, projectInternalError("resolve target app for project link", err)
 		}
 		targetProject, err := s.store.GetProjectByID(ctx, targetApp.ProjectID)
 		if err != nil {
-			return nil, fmt.Errorf("%w: resolve target project for link %s: %v", ErrInternal, link.ID, err)
+			return nil, projectInternalError("resolve target project for project link", err)
 		}
 		details = append(details, &ProjectLinkDetails{
 			ProjectLink:       link,
@@ -281,6 +281,9 @@ func (s *Service) ListProjectLinks(ctx context.Context, projectSlug string) ([]*
 
 // DeleteProjectLink removes a project link.
 func (s *Service) DeleteProjectLink(ctx context.Context, projectSlug, linkID string) error {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
+
 	p, err := s.store.GetProject(ctx, projectSlug)
 	if err != nil {
 		return fmt.Errorf("project not found: %w", err)
@@ -301,7 +304,10 @@ func (s *Service) DeleteProjectLink(ctx context.Context, projectSlug, linkID str
 	}
 
 	if err := s.store.DeleteProjectLink(ctx, linkID); err != nil {
-		return fmt.Errorf("%w: delete project link: %v", ErrInternal, err)
+		if errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		return projectInternalError("delete project link", err)
 	}
 
 	if targetApp != nil {
@@ -313,6 +319,13 @@ func (s *Service) DeleteProjectLink(ctx context.Context, projectSlug, linkID str
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+func projectInternalError(operation string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %s: %w", ErrInternal, operation, err)
+	}
+	return fmt.Errorf("%w: %s: %v", ErrInternal, operation, err)
+}
 
 // projectNetwork produces the Docker network name from a project slug.
 func projectNetwork(slug string) string {
