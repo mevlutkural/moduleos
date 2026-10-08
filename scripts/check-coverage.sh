@@ -40,6 +40,10 @@ while IFS='|' read -r layer package minimum; do
   fi
   printf '%-16s %-18s %9s%% %7s%% %s\n' "$layer" "$(basename "$package")" "$actual" "$minimum" "$result"
 done <<'POLICY'
+transport|./apps/control-plane/internal/api|90
+transport|./apps/control-plane/internal/api/apiresponse|95
+transport|./apps/control-plane/internal/api/handler|90
+transport|./apps/control-plane/internal/api/middleware|95
 domain|./apps/control-plane/internal/app|90
 control-loop|./apps/control-plane/internal/reconciler|85
 infrastructure|./apps/control-plane/internal/store|80

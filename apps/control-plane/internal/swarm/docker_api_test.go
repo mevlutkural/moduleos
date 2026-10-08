@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,13 +53,13 @@ func TestDockerClientHealth(t *testing.T) {
 		infoStatus int
 		state      string
 		manager    bool
-		wantError  string
+		wantError  error
 	}{
 		{name: "active manager", pingStatus: http.StatusOK, infoStatus: http.StatusOK, state: "active", manager: true},
-		{name: "ping failure", pingStatus: http.StatusNotFound, infoStatus: http.StatusOK, state: "active", manager: true, wantError: "docker_unavailable"},
-		{name: "info failure", pingStatus: http.StatusOK, infoStatus: http.StatusInternalServerError, state: "active", manager: true, wantError: "docker_info_unavailable"},
-		{name: "inactive swarm", pingStatus: http.StatusOK, infoStatus: http.StatusOK, state: "inactive", manager: true, wantError: "swarm_inactive"},
-		{name: "worker node", pingStatus: http.StatusOK, infoStatus: http.StatusOK, state: "active", manager: false, wantError: "swarm_manager_required"},
+		{name: "ping failure", pingStatus: http.StatusNotFound, infoStatus: http.StatusOK, state: "active", manager: true, wantError: ErrDockerUnavailable},
+		{name: "info failure", pingStatus: http.StatusOK, infoStatus: http.StatusInternalServerError, state: "active", manager: true, wantError: ErrDockerInfoUnavailable},
+		{name: "inactive swarm", pingStatus: http.StatusOK, infoStatus: http.StatusOK, state: "inactive", manager: true, wantError: ErrSwarmInactive},
+		{name: "worker node", pingStatus: http.StatusOK, infoStatus: http.StatusOK, state: "active", manager: false, wantError: ErrSwarmManagerRequired},
 	}
 
 	for _, test := range tests {
@@ -81,11 +82,11 @@ func TestDockerClientHealth(t *testing.T) {
 			})
 
 			err := client.Health(t.Context())
-			if test.wantError == "" && err != nil {
+			if test.wantError == nil && err != nil {
 				t.Fatalf("Health() error = %v", err)
 			}
-			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
-				t.Fatalf("Health() error = %v, want %q", err, test.wantError)
+			if test.wantError != nil && !errors.Is(err, test.wantError) {
+				t.Fatalf("Health() error = %v, want %v", err, test.wantError)
 			}
 		})
 	}

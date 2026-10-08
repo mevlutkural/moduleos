@@ -1,0 +1,299 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: ModuleOS API
+  version: 0.1.0
+  description: >-
+    The versioned HTTP contract for the ModuleOS Genesis control plane. Runtime
+    state converges asynchronously; readiness reports dependency availability.
+  contact:
+    name: ModuleOS project
+    url: https://github.com/mevlutkural/moduleos
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /api/v1
+    description: ModuleOS control-plane API
+tags:
+  - name: System
+    description: Process liveness, dependency readiness, and build metadata.
+security:
+  - bearerAuth: []
+paths:
+  /live:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      operationId: getLiveness
+      tags: [System]
+      summary: Check process liveness
+      description: >-
+        Returns success while the process can serve HTTP, including while it is
+        draining. It does not probe external dependencies.
+      security: []
+      responses:
+        "200":
+          description: The process is live.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Liveness"
+              examples:
+                live:
+                  value: {status: live}
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /ready:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      operationId: getReadiness
+      tags: [System]
+      summary: Check control-plane readiness
+      description: >-
+        Checks the database, Docker Swarm manager, and the ingress network when
+        at least one exposed application requires it. Draining instances are
+        not ready.
+      security: []
+      responses:
+        "200":
+          description: All required dependencies are ready.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessReady"
+              examples:
+                ready:
+                  value:
+                    status: ready
+                    components:
+                      database: ready
+                      docker: ready
+                      swarm: ready
+                      ingress: not_required
+        "503":
+          description: The instance is draining, overloaded, or a required dependency is unavailable.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            Retry-After:
+              $ref: "#/components/headers/RetryAfter"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ReadinessNotReady"
+                  - $ref: "#/components/schemas/Error"
+              examples:
+                unavailable:
+                  value:
+                    status: not_ready
+                    code: docker_unavailable
+                    components:
+                      database: ready
+                      docker: unavailable
+                      swarm: not_checked
+                      ingress: not_checked
+                busy:
+                  value:
+                    error:
+                      code: server_busy
+                      message: server is at its request concurrency limit
+                      request_id: 550e8400-e29b-41d4-a716-446655440000
+                      retryable: true
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /version:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      operationId: getVersion
+      tags: [System]
+      summary: Get build metadata
+      description: Returns immutable build identity injected during release builds.
+      security: []
+      responses:
+        "200":
+          description: Build metadata for the running control-plane process.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Version"
+              examples:
+                genesis:
+                  value:
+                    version: v0.1.0
+                    commit: 0123456789abcdef
+                    build_date: "2026-10-08T00:00:00Z"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  parameters:
+    RequestID:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: >-
+        Optional canonical UUID supplied by the caller for end-to-end request
+        correlation. Invalid values are replaced by the control plane.
+      schema:
+        type: string
+        format: uuid
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: ModuleOS administrator API key. System routes explicitly opt out.
+  headers:
+    RequestID:
+      description: Canonical UUID used to correlate the request with structured logs.
+      required: true
+      schema:
+        type: string
+        format: uuid
+    NoStore:
+      description: Prevents caching of process and dependency status.
+      required: true
+      schema:
+        type: string
+        const: no-store
+    RetryAfter:
+      description: Number of seconds the caller should wait before retrying an overloaded request.
+      schema:
+        type: string
+        pattern: "^[1-9][0-9]*$"
+  responses:
+    InternalError:
+      description: An unexpected internal failure occurred without exposing implementation details.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            internal:
+              value:
+                error:
+                  code: internal_error
+                  message: internal server error
+                  request_id: 550e8400-e29b-41d4-a716-446655440000
+                  retryable: false
+  schemas:
+    ComponentStatus:
+      description: Readiness state for one bounded control-plane dependency.
+      type: string
+      enum: [not_checked, not_required, ready, unavailable]
+      example: ready
+    ReadinessComponents:
+      description: Readiness states for the dependencies required by Genesis.
+      type: object
+      additionalProperties: false
+      required: [database, docker, swarm, ingress]
+      properties:
+        database: {$ref: "#/components/schemas/ComponentStatus"}
+        docker: {$ref: "#/components/schemas/ComponentStatus"}
+        swarm: {$ref: "#/components/schemas/ComponentStatus"}
+        ingress: {$ref: "#/components/schemas/ComponentStatus"}
+      example:
+        database: ready
+        docker: ready
+        swarm: ready
+        ingress: not_required
+    Liveness:
+      description: Process-level liveness without external dependency checks.
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: live
+    ReadinessReady:
+      description: Successful readiness result and the bounded state of each dependency.
+      type: object
+      additionalProperties: false
+      required: [status, components]
+      properties:
+        status:
+          type: string
+          const: ready
+        components:
+          $ref: "#/components/schemas/ReadinessComponents"
+    ReadinessNotReady:
+      description: Unsuccessful readiness result and its safe machine-readable reason.
+      type: object
+      additionalProperties: false
+      required: [status, code, components]
+      properties:
+        status:
+          type: string
+          const: not_ready
+        code:
+          type: string
+          example: docker_unavailable
+          enum:
+            - shutting_down
+            - database_unavailable
+            - docker_unavailable
+            - swarm_unavailable
+            - ingress_network_unavailable
+        components:
+          $ref: "#/components/schemas/ReadinessComponents"
+    Version:
+      description: Immutable identity of the running ModuleOS build.
+      type: object
+      additionalProperties: false
+      required: [version, commit, build_date]
+      properties:
+        version: {type: string, minLength: 1, example: v0.1.0}
+        commit: {type: string, minLength: 1, example: 0123456789abcdef}
+        build_date: {type: string, minLength: 1, example: "2026-10-08T00:00:00Z"}
+    ErrorBody:
+      description: Stable machine-readable details for one failed HTTP request.
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id, retryable]
+      properties:
+        code: {type: string, minLength: 1}
+        message: {type: string, minLength: 1}
+        request_id: {type: string, format: uuid}
+        retryable: {type: boolean}
+        fields:
+          type: object
+          additionalProperties: {type: string}
+          example: {name: is required}
+    Error:
+      description: Stable envelope used by every non-stream API error.
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: {$ref: "#/components/schemas/ErrorBody"}
+      example:
+        error:
+          code: internal_error
+          message: internal server error
+          request_id: 550e8400-e29b-41d4-a716-446655440000
+          retryable: false
