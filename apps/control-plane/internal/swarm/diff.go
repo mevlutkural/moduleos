@@ -33,7 +33,7 @@ func DiffServiceSpec(desired, observed ServiceSpec) []string {
 	if !networkSpecsEqual(desired.Networks, observed.Networks) {
 		diff = append(diff, "networks")
 	}
-	if desired.TaskTemplateHash != observed.TaskTemplateHash {
+	if desired.TaskTemplateHash != observed.TaskTemplateHash || observed.UnsupportedTaskTemplate {
 		diff = append(diff, "task_template")
 	}
 	if !ownedLabelsEqual(desired.Labels, observed.Labels) {
@@ -56,7 +56,7 @@ func desiredRuntimePorts(ports []PortConfig) []PortConfig {
 }
 
 func imageEquivalent(desired, observed string) bool {
-	return desired == observed || strings.HasPrefix(observed, desired+"@")
+	return ImageReferenceMatches(desired, observed)
 }
 
 func sortedStrings(values []string) []string {

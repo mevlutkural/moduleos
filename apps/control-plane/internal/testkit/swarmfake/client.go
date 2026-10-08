@@ -3,6 +3,7 @@ package swarmfake
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -25,15 +26,16 @@ type Client struct {
 	RemoveCalls      int
 	EnsureCalls      int
 	// Set these to simulate errors in test scenarios
-	CreateError        error
-	UpdateError        error
-	RemoveError        error
-	EnsureNetworkError error
-	AttachError        error
-	DetachError        error
-	AttachHook         func()
-	DetachHook         func()
-	HealthError        error
+	CreateError          error
+	UpdateError          error
+	RemoveError          error
+	EnsureNetworkError   error
+	AttachError          error
+	DetachError          error
+	AttachHook           func()
+	DetachHook           func()
+	HealthError          error
+	ResolveMutableImages bool
 }
 
 func (m *Client) Health(_ context.Context) error { return m.HealthError }
@@ -85,6 +87,9 @@ func (m *Client) CreateService(_ context.Context, spec swarm.ServiceSpec) error 
 	if m.CreateError != nil {
 		return m.CreateError
 	}
+	if m.ResolveMutableImages {
+		spec.Image = resolvedTestImage(spec.Image)
+	}
 	name := swarm.ServiceName(spec.Name)
 	runtimeSpec := runtimeServiceSpec(spec)
 	m.Services[name] = &swarm.ServiceInfo{
@@ -123,6 +128,10 @@ func (m *Client) UpdateService(_ context.Context, serviceID string, spec swarm.S
 			return fmt.Errorf("%w: service %s", errdefs.ErrNotFound, serviceID)
 		}
 	}
+	if m.ResolveMutableImages && !swarm.IsImmutableImageReference(spec.Image) &&
+		(spec.RefreshImage || !swarm.ImageReferenceMatches(spec.Image, svc.Image)) {
+		spec.Image = resolvedTestImage(spec.Image)
+	}
 	svc.Image = spec.Image
 	svc.Replicas = spec.Replicas
 	svc.Running = spec.Replicas
@@ -130,6 +139,13 @@ func (m *Client) UpdateService(_ context.Context, serviceID string, spec swarm.S
 	svc.Labels = spec.Labels
 	svc.Spec = runtimeServiceSpec(spec)
 	return nil
+}
+
+func resolvedTestImage(image string) string {
+	if swarm.IsImmutableImageReference(image) {
+		return image
+	}
+	return fmt.Sprintf("%s@sha256:%x", image, sha256.Sum256([]byte(image)))
 }
 
 func runtimeServiceSpec(spec swarm.ServiceSpec) swarm.ServiceSpec {

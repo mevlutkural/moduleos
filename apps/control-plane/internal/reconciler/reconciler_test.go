@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ func setup(t testing.TB) (*reconciler.Reconciler, *store.SQLiteStore, *swarmfake
 	t.Cleanup(func() { _ = st.Close() })
 
 	mock := swarmfake.New()
+	mock.ResolveMutableImages = true
 	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 	appSvc := app.NewService(st, mock, "moduleos.local", log)
 	rec := reconciler.New(mock, appSvc, log)
@@ -43,6 +45,52 @@ type firstUpdateBarrierClient struct {
 }
 
 type currentTaskLagClient struct{ *swarmfake.Client }
+
+type digestAfterUpdateClient struct {
+	*swarmfake.Client
+	resolvedImage string
+}
+
+type imageCaptureClient struct {
+	*swarmfake.Client
+	updatedImages []string
+}
+
+func (c *imageCaptureClient) UpdateService(ctx context.Context, serviceID string, spec swarm.ServiceSpec) error {
+	c.updatedImages = append(c.updatedImages, spec.Image)
+	return c.Client.UpdateService(ctx, serviceID, spec)
+}
+
+type rotatingDigestClient struct {
+	*swarmfake.Client
+	resolvedImages  []string
+	requestedImages []string
+}
+
+func (c *rotatingDigestClient) UpdateService(ctx context.Context, serviceID string, spec swarm.ServiceSpec) error {
+	c.requestedImages = append(c.requestedImages, spec.Image)
+	if err := c.Client.UpdateService(ctx, serviceID, spec); err != nil {
+		return err
+	}
+	runtime := c.Services[swarm.ServiceName(spec.Name)]
+	if !swarm.IsImmutableImageReference(spec.Image) {
+		index := min(len(c.requestedImages)-1, len(c.resolvedImages)-1)
+		runtime.Image = c.resolvedImages[index]
+		runtime.Spec.Image = c.resolvedImages[index]
+	}
+	runtime.Running = 0
+	return nil
+}
+
+func (c *digestAfterUpdateClient) UpdateService(ctx context.Context, serviceID string, spec swarm.ServiceSpec) error {
+	if err := c.Client.UpdateService(ctx, serviceID, spec); err != nil {
+		return err
+	}
+	runtime := c.Services[swarm.ServiceName(spec.Name)]
+	runtime.Image = c.resolvedImage
+	runtime.Spec.Image = c.resolvedImage
+	return nil
+}
 
 func (c *currentTaskLagClient) UpdateService(ctx context.Context, serviceID string, spec swarm.ServiceSpec) error {
 	if err := c.Client.UpdateService(ctx, serviceID, spec); err != nil {
@@ -667,12 +715,17 @@ func TestRedeployOfMutableTagForcesNewTaskTemplate(t *testing.T) {
 	rec, st, mock := setup(t)
 	ctx := context.Background()
 	service := appSvcFromStore(t, st, mock)
-	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "mutable-tag", Image: "registry.example/api:latest"})
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "mutable-tag", Image: "registry.example/api"})
 	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
 		t.Fatal(err)
 	}
 	before := mock.UpdateCalls
 	deployment := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name})
+	resolvedImage := "registry.example/api:latest@sha256:" + strings.Repeat("a", 64)
+	digestClient := &digestAfterUpdateClient{Client: mock, resolvedImage: resolvedImage}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	digestService := app.NewService(st, digestClient, "moduleos.local", logger)
+	rec = reconciler.New(digestClient, digestService, logger)
 	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
 		t.Fatal(err)
 	}
@@ -680,8 +733,337 @@ func TestRedeployOfMutableTagForcesNewTaskTemplate(t *testing.T) {
 		t.Fatalf("same-tag redeploy update calls = %d, want %d", mock.UpdateCalls, before+1)
 	}
 	persisted := mustGetDeployment(t, st, ctx, deployment.ID)
-	if persisted.Status != store.DeploymentStatusSucceeded || persisted.FinishedAt == nil {
+	if persisted.Status != store.DeploymentStatusSucceeded || persisted.FinishedAt == nil ||
+		persisted.Image != "registry.example/api" || persisted.ResolvedImage != resolvedImage {
 		t.Fatalf("same-tag redeploy = %#v", persisted)
+	}
+	driftedImage := "registry.example/api:latest@sha256:" + strings.Repeat("b", 64)
+	runtime := mock.Services[swarm.ServiceName(created.Name)]
+	runtime.Image = driftedImage
+	runtime.Spec.Image = driftedImage
+	beforeDriftRepair := mock.UpdateCalls
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if mock.UpdateCalls != beforeDriftRepair+1 || runtime.Image != resolvedImage || runtime.Spec.Image != resolvedImage {
+		t.Fatalf("digest drift was not repaired: updates=%d image=%q spec_image=%q", mock.UpdateCalls, runtime.Image, runtime.Spec.Image)
+	}
+	persisted = mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.ResolvedImage != resolvedImage {
+		t.Fatalf("digest drift changed deployment artifact to %q", persisted.ResolvedImage)
+	}
+	if _, err := service.UpdateApp(ctx, app.UpdateAppRequest{
+		AppName: created.Name,
+		EnvVars: map[string]string{"MODE": "safe"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Image != resolvedImage || runtime.Spec.Image != resolvedImage {
+		t.Fatalf("configuration update lost resolved image: image=%q spec_image=%q", runtime.Image, runtime.Spec.Image)
+	}
+	delete(mock.Services, swarm.ServiceName(created.Name))
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	recreated := mock.Services[swarm.ServiceName(created.Name)]
+	if recreated.Image != resolvedImage || recreated.Spec.Image != resolvedImage {
+		t.Fatalf("service recreation lost resolved image: image=%q spec_image=%q", recreated.Image, recreated.Spec.Image)
+	}
+	rollback, err := service.RollbackApp(ctx, created.Name, deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rollback.Image != resolvedImage {
+		t.Fatalf("rollback image = %q, want immutable artifact %q", rollback.Image, resolvedImage)
+	}
+}
+
+func TestNewerUnresolvedDeploymentPreventsOlderArtifactFallback(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := t.Context()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "newer-unresolved", Image: "registry.example/api"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	first := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name})
+	firstResolved := "registry.example/api:latest@sha256:" + strings.Repeat("a", 64)
+	firstClient := &digestAfterUpdateClient{Client: mock, resolvedImage: firstResolved}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	rec = reconciler.New(firstClient, app.NewService(st, firstClient, "moduleos.local", logger), logger)
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if persisted := mustGetDeployment(t, st, ctx, first.ID); persisted.ResolvedImage != firstResolved {
+		t.Fatalf("first resolved image = %q", persisted.ResolvedImage)
+	}
+
+	newer := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name})
+	application := mustGetApp(t, st, ctx, created.Name)
+	newerSpec := mustBuildDesiredSpec(t, service, ctx, application)
+	newerSpec, err := swarm.WithRolloutIdentity(newerSpec, newer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerResolved := "registry.example/api:latest@sha256:" + strings.Repeat("b", 64)
+	runtime := mock.Services[swarm.ServiceName(created.Name)]
+	runtime.Image = newerResolved
+	runtime.Spec = newerSpec
+	runtime.Spec.Image = newerResolved
+	runtime.Running = newerSpec.Replicas
+	if err := st.MarkDeploymentState(ctx, newer.ID, newer.TargetGeneration, store.DeploymentStatusFailed, "task_rejected", "synthetic failure"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.UpdateApp(ctx, app.UpdateAppRequest{
+		AppName: created.Name,
+		EnvVars: map[string]string{"MODE": "safe"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	capture := &imageCaptureClient{Client: mock}
+	rec = reconciler.New(capture, app.NewService(st, capture, "moduleos.local", logger), logger)
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.updatedImages) != 1 || capture.updatedImages[0] != "registry.example/api:latest" {
+		t.Fatalf("configuration update images = %v, want mutable latest source instead of older artifact %q", capture.updatedImages, firstResolved)
+	}
+}
+
+func TestInterveningImageUpdatePreventsStaleArtifactFallback(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := t.Context()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "intervening-image", Image: "registry.example/api"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	deployment := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name})
+	resolvedImage := "registry.example/api:latest@sha256:" + strings.Repeat("a", 64)
+	resolvedClient := &digestAfterUpdateClient{Client: mock, resolvedImage: resolvedImage}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	rec = reconciler.New(resolvedClient, app.NewService(st, resolvedClient, "moduleos.local", logger), logger)
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if persisted := mustGetDeployment(t, st, ctx, deployment.ID); persisted.ResolvedImage != resolvedImage {
+		t.Fatalf("resolved image = %q", persisted.ResolvedImage)
+	}
+
+	otherImage := "redis:7"
+	if _, err := service.UpdateApp(ctx, app.UpdateAppRequest{AppName: created.Name, Image: &otherImage}); err != nil {
+		t.Fatal(err)
+	}
+	rec = reconciler.New(mock, app.NewService(st, mock, "moduleos.local", logger), logger)
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	application := mustGetApp(t, st, ctx, created.Name)
+	if !swarm.ImageReferenceMatches("redis:7", application.ObservedImage) {
+		t.Fatalf("intervening image was not observed: %q", application.ObservedImage)
+	}
+
+	originalSource := "registry.example/api"
+	if _, err := service.UpdateApp(ctx, app.UpdateAppRequest{AppName: created.Name, Image: &originalSource}); err != nil {
+		t.Fatal(err)
+	}
+	capture := &imageCaptureClient{Client: mock}
+	rec = reconciler.New(capture, app.NewService(st, capture, "moduleos.local", logger), logger)
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.updatedImages) != 1 || capture.updatedImages[0] != "registry.example/api:latest" {
+		t.Fatalf("return-to-source update images = %v, want mutable source instead of stale artifact %q", capture.updatedImages, resolvedImage)
+	}
+}
+
+func TestActiveDeploymentPinsFirstResolvedArtifactAcrossReconciles(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := t.Context()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "active-artifact", Image: "registry.example/api:latest"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployment := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name})
+	firstResolved := "registry.example/api:latest@sha256:" + strings.Repeat("a", 64)
+	secondResolved := "registry.example/api:latest@sha256:" + strings.Repeat("b", 64)
+	client := &rotatingDigestClient{
+		Client:         mock,
+		resolvedImages: []string{firstResolved, secondResolved},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	rec = reconciler.New(client, app.NewService(st, client, "moduleos.local", logger), logger)
+	if err := rec.ReconcileApplication(ctx, created.Name); err == nil {
+		t.Fatal("unready first rollout was reported as converged")
+	}
+	persisted := mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.ResolvedImage != firstResolved || persisted.Status != store.DeploymentStatusApplying {
+		t.Fatalf("active deployment artifact = %#v", persisted)
+	}
+
+	runtime := mock.Services[swarm.ServiceName(created.Name)]
+	runtime.Spec.Update.FailureAction = "continue"
+	if err := rec.ReconcileApplication(ctx, created.Name); err == nil {
+		t.Fatal("unready drift repair was reported as converged")
+	}
+	if len(client.requestedImages) != 2 || client.requestedImages[1] != firstResolved {
+		t.Fatalf("deployment update images = %v, want second update pinned to %q", client.requestedImages, firstResolved)
+	}
+	if runtime.Image != firstResolved || runtime.Spec.Image != firstResolved {
+		t.Fatalf("active deployment changed artifact: image=%q spec_image=%q", runtime.Image, runtime.Spec.Image)
+	}
+	persisted = mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.ResolvedImage != firstResolved {
+		t.Fatalf("active deployment artifact was rewritten to %q", persisted.ResolvedImage)
+	}
+}
+
+func TestPermanentDockerMutationFailuresTerminalizeDeployment(t *testing.T) {
+	tests := []struct {
+		name     string
+		failure  error
+		wantCode string
+	}{
+		{
+			name:     "missing image manifest",
+			failure:  fmt.Errorf("%w: %w", swarm.ErrImageResolution, errdefs.ErrNotFound),
+			wantCode: "image_not_found",
+		},
+		{
+			name:     "published port occupied",
+			failure:  fmt.Errorf("port is already allocated: %w", errdefs.ErrConflict),
+			wantCode: "published_port_conflict",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rec, st, mock := setup(t)
+			ctx := t.Context()
+			service := appSvcFromStore(t, st, mock)
+			created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "permanent-mutation-" + strings.ReplaceAll(test.name, " ", "-"), Image: "nginx:1.0"})
+			if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+				t.Fatal(err)
+			}
+			deployment := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name, Image: "registry.invalid/missing:latest"})
+			mock.UpdateError = test.failure
+
+			if err := rec.ReconcileApplication(ctx, created.Name); err == nil {
+				t.Fatal("permanent mutation failure was reported as successful")
+			}
+			persisted := mustGetDeployment(t, st, ctx, deployment.ID)
+			if persisted.Status != store.DeploymentStatusFailed || persisted.ErrorCode != test.wantCode || persisted.FinishedAt == nil {
+				t.Fatalf("terminal deployment = %#v", persisted)
+			}
+			application := mustGetApp(t, st, ctx, created.Name)
+			if application.ReconcileErrorCode != test.wantCode || application.ReconcileRetryable {
+				t.Fatalf("application diagnostics = %#v", application)
+			}
+		})
+	}
+}
+
+func TestInFlightMutableDeploymentIsResolvedBeforeSuccess(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := t.Context()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "upgrade-resolution", Image: "registry.example/api:latest"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployment := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name})
+	application := mustGetApp(t, st, ctx, created.Name)
+	desired := mustBuildDesiredSpec(t, service, ctx, application)
+	desired, err := swarm.WithRolloutIdentity(desired, deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := mock.Services[swarm.ServiceName(created.Name)]
+	runtime.Image = desired.Image
+	runtime.Spec = desired
+	runtime.Running = desired.Replicas
+
+	resolvedImage := "registry.example/api:latest@sha256:" + strings.Repeat("c", 64)
+	client := &digestAfterUpdateClient{Client: mock, resolvedImage: resolvedImage}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	resolvedService := app.NewService(st, client, "moduleos.local", logger)
+	rec = reconciler.New(client, resolvedService, logger)
+	updatesBefore := mock.UpdateCalls
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	if mock.UpdateCalls != updatesBefore+1 {
+		t.Fatalf("image resolution updates = %d, want %d", mock.UpdateCalls, updatesBefore+1)
+	}
+	persisted := mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.Status != store.DeploymentStatusSucceeded || persisted.ResolvedImage != resolvedImage {
+		t.Fatalf("resolved deployment = %#v", persisted)
+	}
+}
+
+func TestPausedRolloutFailsDeploymentWithoutTaskError(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := t.Context()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "paused-rollout", Image: "nginx:1.0"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployment := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name, Image: "nginx:2.0"})
+	runtime := mock.Services[swarm.ServiceName(created.Name)]
+	runtime.RolloutPaused = true
+	runtime.RolloutMessage = "update paused after an early task failure"
+	if err := rec.ReconcileApplication(ctx, created.Name); err == nil {
+		t.Fatal("paused rollout was reported as successful")
+	}
+	persisted := mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.Status != store.DeploymentStatusFailed || persisted.ErrorCode != "rollout_paused" || persisted.FinishedAt == nil {
+		t.Fatalf("paused deployment = %#v", persisted)
+	}
+	application := mustGetApp(t, st, ctx, created.Name)
+	if application.Status != store.AppStatusFailed || application.ReconcileErrorCode != "rollout_paused" || application.ReconcileRetryable {
+		t.Fatalf("paused application = %#v", application)
+	}
+}
+
+func TestActiveRolloutDoesNotSucceedDeployment(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := t.Context()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "active-rollout", Image: "nginx:1.0"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployment := mustDeployApp(t, service, ctx, app.DeployAppRequest{AppName: created.Name, Image: "nginx:2.0"})
+	runtime := mock.Services[swarm.ServiceName(created.Name)]
+	runtime.RolloutInProgress = true
+	runtime.RolloutMessage = "monitoring updated tasks"
+	if err := rec.ReconcileApplication(ctx, created.Name); err == nil {
+		t.Fatal("active rollout was reported as successful")
+	}
+	persisted := mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.Status == store.DeploymentStatusSucceeded || persisted.FinishedAt != nil {
+		t.Fatalf("active rollout succeeded deployment: %#v", persisted)
+	}
+	application := mustGetApp(t, st, ctx, created.Name)
+	if application.ObservedGeneration == application.DesiredGeneration || application.ReconcileErrorCode != "rollout_in_progress" || !application.ReconcileRetryable {
+		t.Fatalf("active rollout application = %#v", application)
+	}
+	runtime.RolloutInProgress = false
+	runtime.RolloutMessage = ""
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+	persisted = mustGetDeployment(t, st, ctx, deployment.ID)
+	if persisted.Status != store.DeploymentStatusSucceeded || persisted.FinishedAt == nil {
+		t.Fatalf("completed rollout did not succeed deployment: %#v", persisted)
 	}
 }
 
@@ -809,7 +1191,7 @@ func TestRejectedTaskFailsDeploymentWithoutAdvancingObservedImage(t *testing.T) 
 	}
 	failedAt := *failed.FinishedAt
 	application := mustGetApp(t, st, ctx, created.Name)
-	if application.ObservedImage != "nginx:1.0" {
+	if !strings.HasPrefix(application.ObservedImage, "nginx:1.0@sha256:") {
 		t.Fatalf("observed image advanced to %q", application.ObservedImage)
 	}
 	if application.Status != store.AppStatusFailed || application.ObservedState != store.ObservedStateFailed {
@@ -827,11 +1209,56 @@ func TestRejectedTaskFailsDeploymentWithoutAdvancingObservedImage(t *testing.T) 
 		t.Fatalf("runtime recovery rewrote terminal deployment: %#v", recovered)
 	}
 	application = mustGetApp(t, st, ctx, created.Name)
-	if application.ObservedImage != "missing.invalid/image:nope" {
+	if !strings.HasPrefix(application.ObservedImage, "missing.invalid/image:nope@sha256:") {
 		t.Fatalf("recovered runtime image was not observed: %q", application.ObservedImage)
 	}
 	if application.Status != store.AppStatusRunning || application.ObservedState != store.ObservedStateRunning {
 		t.Fatalf("recovered application status = %#v", application)
+	}
+}
+
+func TestRejectedTaskFailsOrdinaryUpdateWithoutDeploymentDeadline(t *testing.T) {
+	rec, st, mock := setup(t)
+	ctx := t.Context()
+	service := appSvcFromStore(t, st, mock)
+	created := mustCreateApp(t, service, ctx, app.CreateAppRequest{Name: "reject-update", Image: "nginx:1.0"})
+	if err := rec.ReconcileApplication(ctx, created.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	image := "missing.invalid/image:nope"
+	updated, err := service.UpdateApp(ctx, app.UpdateAppRequest{
+		AppName:            created.Name,
+		Image:              &image,
+		ExpectedGeneration: created.DesiredGeneration,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := mustBuildDesiredSpec(t, service, ctx, updated)
+	if err := mock.UpdateService(ctx, swarm.ServiceName(created.Name), desired); err != nil {
+		t.Fatal(err)
+	}
+	runtimeService := mock.Services[swarm.ServiceName(created.Name)]
+	runtimeService.Running = 0
+	runtimeService.TaskErrors = []string{"image pull rejected"}
+
+	if err := rec.ReconcileApplication(ctx, created.Name); err == nil {
+		t.Fatal("expected terminal convergence error")
+	}
+	application := mustGetApp(t, st, ctx, created.Name)
+	if application.ReconcileErrorCode != "task_rejected" || application.ReconcileRetryable {
+		t.Fatalf("reconcile diagnostic = %#v", application)
+	}
+	if application.Status != store.AppStatusFailed || application.ObservedState != store.ObservedStateFailed {
+		t.Fatalf("terminal update status = %#v", application)
+	}
+	deployments, err := st.ListDeployments(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deployments) != 0 {
+		t.Fatalf("ordinary update created deployments: %#v", deployments)
 	}
 }
 

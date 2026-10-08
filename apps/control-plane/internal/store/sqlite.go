@@ -350,6 +350,11 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+type statementExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 func scanApplication(scanner rowScanner) (*Application, error) {
 	app := &Application{}
 	var expose, retryable int
@@ -714,11 +719,11 @@ func (s *SQLiteStore) CreateDeploymentIntent(ctx context.Context, name string, d
 		return nil, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO deployments
-		(id, app_id, source_type, image, status, triggered_by, error_message,
+		(id, app_id, source_type, image, resolved_image, status, triggered_by, error_message,
 		created_at, finished_at, target_generation, previous_observed_image,
 		error_code, started_at, convergence_deadline, rollback_source_deployment_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.ID, d.AppID, d.SourceType, d.Image, d.Status, d.TriggeredBy,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.ID, d.AppID, d.SourceType, d.Image, d.ResolvedImage, d.Status, d.TriggeredBy,
 		d.ErrorMessage, d.CreatedAt, d.FinishedAt, d.TargetGeneration,
 		d.PreviousObservedImage, d.ErrorCode, d.StartedAt, d.ConvergenceDeadline,
 		d.RollbackSourceDeploymentID)
@@ -732,6 +737,28 @@ func (s *SQLiteStore) CreateDeploymentIntent(ctx context.Context, name string, d
 }
 
 func (s *SQLiteStore) MarkApplicationObserved(ctx context.Context, appID string, update ObservedApplicationUpdate) error {
+	return markApplicationObserved(ctx, s.db, appID, update)
+}
+
+func (s *SQLiteStore) MarkApplicationConverged(ctx context.Context, appID string, update ObservedApplicationUpdate, deploymentID, resolvedImage string) error {
+	if deploymentID == "" {
+		return fmt.Errorf("%w: deployment ID is required", ErrInvalidData)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := markApplicationObserved(ctx, tx, appID, update); err != nil {
+		return err
+	}
+	if err := markDeploymentState(ctx, tx, deploymentID, update.Generation, DeploymentStatusSucceeded, "", "", &resolvedImage); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func markApplicationObserved(ctx context.Context, executor statementExecutor, appID string, update ObservedApplicationUpdate) error {
 	if update.Generation < 0 {
 		return fmt.Errorf("%w: negative generation", ErrInvalidData)
 	}
@@ -740,7 +767,7 @@ func (s *SQLiteStore) MarkApplicationObserved(ctx context.Context, appID string,
 	if transitionAt.IsZero() {
 		transitionAt = now
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE applications SET
+	result, err := executor.ExecContext(ctx, `UPDATE applications SET
 		observed_generation = ?, observed_state = ?, observed_image = ?,
 		reconcile_error_code = ?, reconcile_error_message = ?, reconcile_retryable = ?,
 		reconcile_attempt = ?, last_transition_at = ?, last_reconciled_at = ?,
@@ -761,7 +788,7 @@ func (s *SQLiteStore) MarkApplicationObserved(ctx context.Context, appID string,
 		return nil
 	}
 	var exists int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM applications WHERE id = ?`, appID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+	if err := executor.QueryRowContext(ctx, `SELECT 1 FROM applications WHERE id = ?`, appID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
@@ -856,14 +883,14 @@ func truncateSafeMessage(message string) string {
 
 // ── Deployment ────────────────────────────────────────────────────────────────
 
-const deploymentColumns = `id, app_id, source_type, image, status, triggered_by,
+const deploymentColumns = `id, app_id, source_type, image, resolved_image, status, triggered_by,
 	error_message, created_at, finished_at, target_generation,
 	previous_observed_image, error_code, started_at, convergence_deadline,
 	rollback_source_deployment_id`
 
 func scanDeployment(scanner rowScanner) (*Deployment, error) {
 	d := &Deployment{}
-	err := scanner.Scan(&d.ID, &d.AppID, &d.SourceType, &d.Image, &d.Status,
+	err := scanner.Scan(&d.ID, &d.AppID, &d.SourceType, &d.Image, &d.ResolvedImage, &d.Status,
 		&d.TriggeredBy, &d.ErrorMessage, &d.CreatedAt, &d.FinishedAt,
 		&d.TargetGeneration, &d.PreviousObservedImage, &d.ErrorCode, &d.StartedAt,
 		&d.ConvergenceDeadline, &d.RollbackSourceDeploymentID)
@@ -873,12 +900,12 @@ func scanDeployment(scanner rowScanner) (*Deployment, error) {
 func (s *SQLiteStore) CreateDeployment(ctx context.Context, d *Deployment) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO deployments
-			(id, app_id, source_type, image, status, triggered_by, error_message,
+			(id, app_id, source_type, image, resolved_image, status, triggered_by, error_message,
 			created_at, finished_at, target_generation, previous_observed_image,
 			error_code, started_at, convergence_deadline, rollback_source_deployment_id)
 		VALUES
-			(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.ID, d.AppID, d.SourceType, d.Image, d.Status,
+			(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.ID, d.AppID, d.SourceType, d.Image, d.ResolvedImage, d.Status,
 		d.TriggeredBy, d.ErrorMessage, d.CreatedAt, d.FinishedAt,
 		d.TargetGeneration, d.PreviousObservedImage, d.ErrorCode, d.StartedAt,
 		d.ConvergenceDeadline, d.RollbackSourceDeploymentID,
@@ -924,10 +951,10 @@ func (s *SQLiteStore) ListDeployments(ctx context.Context, appID string) ([]*Dep
 func (s *SQLiteStore) UpdateDeployment(ctx context.Context, d *Deployment) error {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE deployments SET
-			image = ?, status = ?, error_code = ?, error_message = ?, started_at = ?,
+			image = ?, resolved_image = ?, status = ?, error_code = ?, error_message = ?, started_at = ?,
 			finished_at = ?, convergence_deadline = ?, rollback_source_deployment_id = ?
 		WHERE id = ?`,
-		d.Image, d.Status, d.ErrorCode, truncateSafeMessage(d.ErrorMessage), d.StartedAt,
+		d.Image, d.ResolvedImage, d.Status, d.ErrorCode, truncateSafeMessage(d.ErrorMessage), d.StartedAt,
 		d.FinishedAt, d.ConvergenceDeadline, d.RollbackSourceDeploymentID, d.ID,
 	)
 	if err != nil {
@@ -946,6 +973,54 @@ func (s *SQLiteStore) UpdateDeployment(ctx context.Context, d *Deployment) error
 }
 
 func (s *SQLiteStore) MarkDeploymentState(ctx context.Context, id string, generation int64, status DeploymentStatus, code, message string) error {
+	return markDeploymentState(ctx, s.db, id, generation, status, code, message, nil)
+}
+
+func (s *SQLiteStore) RecordDeploymentResolvedImage(ctx context.Context, id string, generation int64, resolvedImage string) error {
+	if strings.TrimSpace(resolvedImage) == "" {
+		return fmt.Errorf("%w: resolved deployment image is required", ErrInvalidData)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE deployments SET resolved_image = ?
+		WHERE id = ? AND target_generation = ?
+			AND status IN (?, ?, ?, ?)
+			AND (resolved_image = '' OR resolved_image = ?)`,
+		resolvedImage, id, generation,
+		DeploymentStatusPending, DeploymentStatusBuilding, DeploymentStatusApplying, DeploymentStatusInProgress,
+		resolvedImage,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows > 0 {
+		return nil
+	}
+	var currentGeneration int64
+	var currentStatus DeploymentStatus
+	var currentImage string
+	if err := s.db.QueryRowContext(ctx, `SELECT target_generation, status, resolved_image FROM deployments WHERE id = ?`, id).
+		Scan(&currentGeneration, &currentStatus, &currentImage); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if currentGeneration != generation {
+		return ErrStaleObservation
+	}
+	if currentImage == resolvedImage {
+		return nil
+	}
+	return fmt.Errorf("%w: deployment artifact is already resolved or deployment is %q", ErrInvalidTransition, currentStatus)
+}
+
+func (s *SQLiteStore) MarkDeploymentSucceeded(ctx context.Context, id string, generation int64, resolvedImage string) error {
+	return markDeploymentState(ctx, s.db, id, generation, DeploymentStatusSucceeded, "", "", &resolvedImage)
+}
+
+func markDeploymentState(ctx context.Context, executor statementExecutor, id string, generation int64, status DeploymentStatus, code, message string, resolvedImage *string) error {
 	allowedSources, valid := deploymentTransitionSources(status)
 	if !valid {
 		return fmt.Errorf("%w: unknown deployment status %q", ErrInvalidData, status)
@@ -960,12 +1035,16 @@ func (s *SQLiteStore) MarkDeploymentState(ctx context.Context, id string, genera
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(allowedSources)), ",")
 	query := `UPDATE deployments SET status = ?,
+		resolved_image = CASE
+			WHEN resolved_image <> '' OR ? IS NULL THEN resolved_image
+			ELSE ? END,
 		error_code = CASE WHEN status IN (?, ?, ?, ?) THEN error_code ELSE ? END,
 		error_message = CASE WHEN status IN (?, ?, ?, ?) THEN error_message ELSE ? END,
 		started_at = COALESCE(started_at, ?), finished_at = COALESCE(finished_at, ?)
 		WHERE id = ? AND target_generation = ? AND status IN (` + placeholders + `)`
 	args := []any{
 		status,
+		resolvedImage, resolvedImage,
 		DeploymentStatusSuccess, DeploymentStatusSucceeded, DeploymentStatusFailed, DeploymentStatusSuperseded, code,
 		DeploymentStatusSuccess, DeploymentStatusSucceeded, DeploymentStatusFailed, DeploymentStatusSuperseded, truncateSafeMessage(message),
 		startedAt, finishedAt, id, generation,
@@ -973,7 +1052,7 @@ func (s *SQLiteStore) MarkDeploymentState(ctx context.Context, id string, genera
 	for _, source := range allowedSources {
 		args = append(args, source)
 	}
-	result, err := s.db.ExecContext(ctx, query, args...)
+	result, err := executor.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -984,7 +1063,7 @@ func (s *SQLiteStore) MarkDeploymentState(ctx context.Context, id string, genera
 	if rows == 0 {
 		var currentGeneration int64
 		var currentStatus DeploymentStatus
-		if err := s.db.QueryRowContext(ctx, `SELECT target_generation, status FROM deployments WHERE id = ?`, id).Scan(&currentGeneration, &currentStatus); errors.Is(err, sql.ErrNoRows) {
+		if err := executor.QueryRowContext(ctx, `SELECT target_generation, status FROM deployments WHERE id = ?`, id).Scan(&currentGeneration, &currentStatus); errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		} else if err != nil {
 			return err

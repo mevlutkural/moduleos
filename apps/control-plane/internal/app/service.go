@@ -420,13 +420,13 @@ func (s *Service) RollbackApp(ctx context.Context, appName string, deployID stri
 	if targetDeployment.Status != store.DeploymentStatusSucceeded && targetDeployment.Status != store.DeploymentStatusSuccess {
 		return nil, fmt.Errorf("%w: rollback target must be succeeded", store.ErrInvalidData)
 	}
-	if targetDeployment.Image == "" {
-		return nil, fmt.Errorf("%w: rollback target has no image", store.ErrInvalidData)
+	if !swarm.IsImmutableImageReference(targetDeployment.ResolvedImage) {
+		return nil, fmt.Errorf("%w: rollback target has no immutable resolved image", store.ErrInvalidData)
 	}
 
 	rollbackDeployment, err := s.createDeploymentIntent(ctx, DeployAppRequest{
 		AppName: appName,
-		Image:   targetDeployment.Image,
+		Image:   targetDeployment.ResolvedImage,
 	}, &deployID)
 	if err != nil {
 		return rollbackDeployment, err

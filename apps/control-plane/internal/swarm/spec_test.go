@@ -29,6 +29,56 @@ func validDesiredInput() DesiredServiceInput {
 	}
 }
 
+func TestIsImmutableImageReference(t *testing.T) {
+	immutable := "registry.example/api:latest@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if !IsImmutableImageReference(immutable) {
+		t.Fatalf("digest reference %q was not immutable", immutable)
+	}
+	for _, image := range []string{"registry.example/api:latest", "registry.example/api", "not an image"} {
+		if IsImmutableImageReference(image) {
+			t.Fatalf("mutable or invalid reference %q was treated as immutable", image)
+		}
+	}
+}
+
+func TestImageReferencesEqualNormalizesEquivalentSpellings(t *testing.T) {
+	tests := []struct {
+		left  string
+		right string
+		want  bool
+	}{
+		{left: "nginx", right: "nginx:latest", want: true},
+		{left: "docker.io/library/nginx:1.27", right: "nginx:1.27", want: true},
+		{left: "registry.example/api:latest", right: "registry.example/api:stable", want: false},
+		{left: "not an image", right: "not an image", want: false},
+	}
+	for _, test := range tests {
+		if got := ImageReferencesEqual(test.left, test.right); got != test.want {
+			t.Errorf("ImageReferencesEqual(%q, %q) = %t, want %t", test.left, test.right, got, test.want)
+		}
+	}
+}
+
+func TestImageReferenceMatchesResolvedArtifact(t *testing.T) {
+	digest := "@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	tests := []struct {
+		source  string
+		runtime string
+		want    bool
+	}{
+		{source: "nginx", runtime: "docker.io/library/nginx:latest" + digest, want: true},
+		{source: "docker.io/library/nginx:1.27", runtime: "nginx:1.27" + digest, want: true},
+		{source: "nginx", runtime: "nginx" + digest, want: true},
+		{source: "nginx:1.27", runtime: "nginx:1.28" + digest, want: false},
+		{source: "nginx:1.27" + digest, runtime: "nginx:1.27@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", want: false},
+	}
+	for _, test := range tests {
+		if got := ImageReferenceMatches(test.source, test.runtime); got != test.want {
+			t.Errorf("ImageReferenceMatches(%q, %q) = %t, want %t", test.source, test.runtime, got, test.want)
+		}
+	}
+}
+
 func TestBuildDesiredServiceSpecDeterministic(t *testing.T) {
 	first := validDesiredInput()
 	first.LinkedNetworks = []NetworkAttachment{

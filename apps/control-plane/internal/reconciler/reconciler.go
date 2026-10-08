@@ -123,6 +123,10 @@ func (r *Reconciler) WithStabilizationWindow(duration time.Duration) *Reconciler
 }
 
 func (r *Reconciler) Enqueue(name string) {
+	r.enqueue(context.Background(), name, false)
+}
+
+func (r *Reconciler) enqueue(ctx context.Context, name string, wait bool) {
 	if name == "" || r.stopping.Load() {
 		return
 	}
@@ -133,6 +137,17 @@ func (r *Reconciler) Enqueue(name string) {
 	}
 	r.pending[name] = struct{}{}
 	r.queueMu.Unlock()
+	if wait {
+		select {
+		case r.queue <- name:
+			return
+		case <-ctx.Done():
+			r.queueMu.Lock()
+			delete(r.pending, name)
+			r.queueMu.Unlock()
+			return
+		}
+	}
 	select {
 	case r.queue <- name:
 	default:
@@ -294,7 +309,7 @@ func (r *Reconciler) enqueueFullScan(ctx context.Context) {
 		r.log.Error("failed to list applications", "error", appErr)
 	} else {
 		for _, application := range applications {
-			r.Enqueue(application.Name)
+			r.enqueue(ctx, application.Name, true)
 		}
 	}
 	if err == nil && appErr == nil {
@@ -379,7 +394,7 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 	if inspectErr != nil && !missing {
 		return r.persistFailure(ctx, application, "docker_unavailable", inspectErr, true)
 	}
-	deployment, rolloutIdentity, err := r.deploymentStateForGeneration(ctx, application.ID, generation)
+	deployment, rolloutIdentity, resolvedDeployment, err := r.deploymentStateForGeneration(ctx, application.ID, generation)
 	if err != nil {
 		return r.persistFailure(ctx, application, "deployment_read", err, true)
 	}
@@ -390,7 +405,7 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 				return nil
 			}
 			if errors.Is(err, store.ErrInvalidTransition) {
-				deployment, rolloutIdentity, err = r.deploymentStateForGeneration(ctx, application.ID, generation)
+				deployment, rolloutIdentity, resolvedDeployment, err = r.deploymentStateForGeneration(ctx, application.ID, generation)
 				if err != nil {
 					return r.persistFailure(ctx, application, "deployment_read", err, true)
 				}
@@ -410,6 +425,9 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 			return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", err, false)
 		}
 	}
+	desired = withResolvedDeploymentImage(desired, deployment, resolvedDeployment, application.ObservedImage)
+	requiresImageResolution := deploymentCanConverge(deployment) && observed != nil && !swarm.IsImmutableImageReference(observed.Image)
+	desired.RefreshImage = deploymentHasActiveDeadline(deployment) || requiresImageResolution
 	if application.Expose {
 		if _, err := r.swarm.GetNetwork(ctx, r.appSvc.IngressNetwork()); err != nil {
 			return r.persistFailureWithDeployment(ctx, application, deployment, "ingress_network_missing", err, true)
@@ -433,7 +451,10 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 			return r.persistFailureWithDeployment(ctx, application, deployment, "ownership_conflict", err, false)
 		}
 		fields := swarm.DiffServiceSpec(desired, observed.Spec)
-		if len(fields) > 0 {
+		if len(fields) > 0 || requiresImageResolution {
+			if requiresImageResolution && len(fields) == 0 {
+				fields = []string{"image_resolution"}
+			}
 			r.log.Info("service drift detected", "app", name, "fields", fields)
 			r.clearStabilization(application.ID)
 			if err := r.swarm.UpdateService(ctx, observed.ID, desired); err != nil {
@@ -448,6 +469,33 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 
 	if fields := swarm.DiffServiceSpec(desired, observed.Spec); len(fields) > 0 {
 		return r.persistFailureWithDeployment(ctx, application, deployment, "service_drift", errors.New(swarm.FormatDiff(fields)), true)
+	}
+	if deploymentIsActive(deployment) && deployment.ResolvedImage == "" && swarm.IsImmutableImageReference(observed.Image) {
+		if err := r.store.RecordDeploymentResolvedImage(ctx, deployment.ID, generation, observed.Image); err != nil {
+			if errors.Is(err, store.ErrStaleObservation) || errors.Is(err, store.ErrInvalidTransition) {
+				r.Enqueue(name)
+				return nil
+			}
+			return retryableError("deployment_artifact_write", err)
+		}
+		deployment.ResolvedImage = observed.Image
+	}
+	if observed.RolloutPaused {
+		message := observed.RolloutMessage
+		if message == "" {
+			message = "Swarm rollout is paused"
+		}
+		return r.persistFailureWithDeployment(ctx, application, deployment, "rollout_paused", errors.New(message), false)
+	}
+	if observed.RolloutInProgress {
+		message := observed.RolloutMessage
+		if message == "" {
+			message = "Swarm rollout is in progress"
+		}
+		if deploymentHasActiveDeadline(deployment) && time.Now().UTC().After(*deployment.ConvergenceDeadline) {
+			return r.persistFailureWithDeployment(ctx, application, deployment, "convergence_timeout", errors.New(message), false)
+		}
+		return r.persistFailureWithDeployment(ctx, application, deployment, "rollout_in_progress", errors.New(message), true)
 	}
 	if len(observed.TaskErrors) > 0 {
 		message := fmt.Sprintf("running tasks %d/%d: %s", observed.Running, desired.Replicas, strings.Join(observed.TaskErrors, "; "))
@@ -506,6 +554,7 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 			return r.persistFailureWithDeployment(ctx, application, deployment, "invalid_desired_spec", err, false)
 		}
 	}
+	currentDesired = withResolvedDeploymentImage(currentDesired, deployment, resolvedDeployment, current.ObservedImage)
 	if fields := swarm.DiffServiceSpec(currentDesired, observed.Spec); len(fields) > 0 {
 		r.Enqueue(name)
 		return nil
@@ -514,22 +563,28 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 	if desired.Replicas == 0 {
 		state = store.ObservedStateStopped
 	}
-	if err := r.store.MarkApplicationObserved(ctx, application.ID, store.ObservedApplicationUpdate{
+	observation := store.ObservedApplicationUpdate{
 		Generation:   generation,
 		State:        state,
 		Image:        observed.Image,
 		TransitionAt: time.Now().UTC(),
-	}); err != nil {
+	}
+	var observationErr error
+	if deploymentCanConverge(deployment) {
+		resolvedImage := ""
+		if swarm.IsImmutableImageReference(observed.Image) {
+			resolvedImage = observed.Image
+		}
+		observationErr = r.store.MarkApplicationConverged(ctx, application.ID, observation, deployment.ID, resolvedImage)
+	} else {
+		observationErr = r.store.MarkApplicationObserved(ctx, application.ID, observation)
+	}
+	if observationErr != nil {
+		err := observationErr
 		if errors.Is(err, store.ErrStaleObservation) {
 			return nil
 		}
-		return retryableError("application_observation_write", err)
-	}
-	if deployment != nil {
-		if err := r.store.MarkDeploymentState(ctx, deployment.ID, generation, store.DeploymentStatusSucceeded, "", ""); err != nil &&
-			!errors.Is(err, store.ErrStaleObservation) && !errors.Is(err, store.ErrInvalidTransition) {
-			return retryableError("deployment_state_write", err)
-		}
+		return retryableError("convergence_state_write", err)
 	}
 	for _, link := range links {
 		if err := r.store.MarkProjectLinkObserved(ctx, link.ID, link.DesiredGeneration); err != nil && !errors.Is(err, store.ErrStaleObservation) {
@@ -537,6 +592,31 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, name string) erro
 		}
 	}
 	return nil
+}
+
+func deploymentCanConverge(deployment *store.Deployment) bool {
+	if deployment == nil {
+		return false
+	}
+	switch deployment.Status {
+	case store.DeploymentStatusPending, store.DeploymentStatusBuilding, store.DeploymentStatusApplying,
+		store.DeploymentStatusInProgress, store.DeploymentStatusSucceeded:
+		return true
+	default:
+		return false
+	}
+}
+
+func deploymentIsActive(deployment *store.Deployment) bool {
+	if deployment == nil {
+		return false
+	}
+	switch deployment.Status {
+	case store.DeploymentStatusPending, store.DeploymentStatusBuilding, store.DeploymentStatusApplying, store.DeploymentStatusInProgress:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Reconciler) applicationLock(name string) *sync.Mutex {
@@ -633,10 +713,10 @@ func (r *Reconciler) markProjectObserved(ctx context.Context, project *store.Pro
 	}
 }
 
-func (r *Reconciler) deploymentStateForGeneration(ctx context.Context, appID string, generation int64) (*store.Deployment, string, error) {
+func (r *Reconciler) deploymentStateForGeneration(ctx context.Context, appID string, generation int64) (*store.Deployment, string, *store.Deployment, error) {
 	deployments, err := r.store.ListDeployments(ctx, appID)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	var current *store.Deployment
 	var latest *store.Deployment
@@ -650,9 +730,13 @@ func (r *Reconciler) deploymentStateForGeneration(ctx context.Context, appID str
 		}
 	}
 	if latest == nil {
-		return current, "", nil
+		return current, "", nil, nil
 	}
-	return current, latest.ID, nil
+	var latestResolved *store.Deployment
+	if (latest.Status == store.DeploymentStatusSucceeded || latest.Status == store.DeploymentStatusSuccess) && latest.ResolvedImage != "" {
+		latestResolved = latest
+	}
+	return current, latest.ID, latestResolved, nil
 }
 
 func deploymentHasActiveDeadline(deployment *store.Deployment) bool {
@@ -665,6 +749,21 @@ func deploymentHasActiveDeadline(deployment *store.Deployment) bool {
 	default:
 		return false
 	}
+}
+
+func withResolvedDeploymentImage(spec swarm.ServiceSpec, deployment, latestResolved *store.Deployment, observedImage string) swarm.ServiceSpec {
+	if deployment != nil {
+		if deployment.ResolvedImage != "" && (deploymentIsActive(deployment) ||
+			deployment.Status == store.DeploymentStatusSucceeded || deployment.Status == store.DeploymentStatusSuccess) {
+			spec.Image = deployment.ResolvedImage
+		}
+		return spec
+	}
+	if latestResolved != nil && swarm.ImageReferencesEqual(latestResolved.Image, spec.Image) &&
+		swarm.ImageReferencesEqual(latestResolved.ResolvedImage, observedImage) {
+		spec.Image = latestResolved.ResolvedImage
+	}
+	return spec
 }
 
 func (r *Reconciler) persistFailureWithDeployment(ctx context.Context, application *store.Application, deployment *store.Deployment, code string, cause error, retryable bool) error {
@@ -718,25 +817,35 @@ func isRetryable(err error) bool {
 }
 
 func isRetryableMutation(err error) bool {
+	if isPublishedPortConflict(err) || (errors.Is(err, swarm.ErrImageResolution) && errdefs.IsNotFound(err)) {
+		return false
+	}
 	return isRetryable(err) || errdefs.IsNotFound(err)
 }
 
 func classifyDockerError(err error) string {
 	lower := strings.ToLower(err.Error())
 	switch {
+	case isPublishedPortConflict(err):
+		return "published_port_conflict"
+	case errors.Is(err, swarm.ErrImageResolution) && errdefs.IsNotFound(err):
+		return "image_not_found"
 	case errdefs.IsNotFound(err):
 		return "docker_dependency_missing"
 	case errdefs.IsConflict(err):
 		return "docker_conflict"
 	case swarm.IsTransientError(err):
 		return "docker_unavailable"
-	case strings.Contains(lower, "port is already allocated"), strings.Contains(lower, "port is already in use"):
-		return "published_port_conflict"
 	case strings.Contains(lower, "invalid reference format"):
 		return "invalid_image"
 	default:
 		return "docker_mutation_failed"
 	}
+}
+
+func isPublishedPortConflict(err error) bool {
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "port is already allocated") || strings.Contains(lower, "port is already in use")
 }
 
 func (r *Reconciler) persistFailure(ctx context.Context, application *store.Application, code string, err error, retryable bool) error {

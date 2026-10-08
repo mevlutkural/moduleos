@@ -43,6 +43,13 @@ INSERT INTO deployments (
         '20000000-0000-0000-0000-000000000001',
         'image', 'nginx:1.27-alpine', 'failed', 'api', 'legacy failure',
         '2025-01-03 03:05:05', '2025-01-03 03:06:05'
+    ),
+    (
+        '30000000-0000-0000-0000-000000000003',
+        '20000000-0000-0000-0000-000000000001',
+        'image', 'docker.io/library/nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'success', 'api', '',
+        '2025-01-04 03:05:05', '2025-01-04 03:06:05'
     );
 
 INSERT INTO domains (id, app_id, domain, verified, is_primary, created_at) VALUES

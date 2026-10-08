@@ -33,6 +33,7 @@ type Store interface {
 	UpdateApplicationIntent(ctx context.Context, name string, expectedGeneration int64, mutation ApplicationMutation) (*Application, error)
 	CreateDeploymentIntent(ctx context.Context, name string, d *Deployment) (*Application, error)
 	MarkApplicationObserved(ctx context.Context, appID string, update ObservedApplicationUpdate) error
+	MarkApplicationConverged(ctx context.Context, appID string, update ObservedApplicationUpdate, deploymentID, resolvedImage string) error
 	CreateDeletionIntent(ctx context.Context, name string, expectedGeneration int64) (*Application, error)
 	FinalizeApplicationDeletion(ctx context.Context, appID string, generation int64) error
 	PersistReconcileDiagnostics(ctx context.Context, appID string, generation int64, code, message string, retryable bool, attempt int) error
@@ -43,4 +44,6 @@ type Store interface {
 	ListDeployments(ctx context.Context, appID string) ([]*Deployment, error)
 	UpdateDeployment(ctx context.Context, d *Deployment) error
 	MarkDeploymentState(ctx context.Context, id string, generation int64, status DeploymentStatus, code, message string) error
+	RecordDeploymentResolvedImage(ctx context.Context, id string, generation int64, resolvedImage string) error
+	MarkDeploymentSucceeded(ctx context.Context, id string, generation int64, resolvedImage string) error
 }

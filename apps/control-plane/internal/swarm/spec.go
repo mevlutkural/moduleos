@@ -17,6 +17,60 @@ import (
 
 var ErrInvalidSpec = errors.New("invalid desired service spec")
 var ErrOwnershipConflict = errors.New("resource ownership conflict")
+var ErrImageResolution = errors.New("image resolution failed")
+
+func IsImmutableImageReference(image string) bool {
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return false
+	}
+	_, immutable := named.(reference.Digested)
+	return immutable
+}
+
+func ImageReferencesEqual(left, right string) bool {
+	leftNamed, err := reference.ParseNormalizedNamed(left)
+	if err != nil {
+		return false
+	}
+	rightNamed, err := reference.ParseNormalizedNamed(right)
+	if err != nil {
+		return false
+	}
+	leftNormalized := reference.FamiliarString(reference.TagNameOnly(leftNamed))
+	rightNormalized := reference.FamiliarString(reference.TagNameOnly(rightNamed))
+	return leftNormalized == rightNormalized
+}
+
+func ImageReferenceMatches(source, runtime string) bool {
+	if ImageReferencesEqual(source, runtime) {
+		return true
+	}
+	sourceNamed, err := reference.ParseNormalizedNamed(source)
+	if err != nil {
+		return false
+	}
+	runtimeNamed, err := reference.ParseNormalizedNamed(runtime)
+	if err != nil {
+		return false
+	}
+	if _, sourceIsDigest := sourceNamed.(reference.Digested); sourceIsDigest {
+		return false
+	}
+	if _, runtimeIsDigest := runtimeNamed.(reference.Digested); !runtimeIsDigest {
+		return false
+	}
+	sourceTagged := reference.TagNameOnly(sourceNamed)
+	sourceTag, ok := sourceTagged.(reference.NamedTagged)
+	if !ok {
+		return false
+	}
+	if runtimeTag, ok := runtimeNamed.(reference.NamedTagged); ok {
+		runtimeTagged, err := reference.WithTag(reference.TrimNamed(runtimeNamed), runtimeTag.Tag())
+		return err == nil && ImageReferencesEqual(reference.FamiliarString(sourceTagged), reference.FamiliarString(runtimeTagged))
+	}
+	return sourceTag.Tag() == "latest" && reference.FamiliarName(sourceNamed) == reference.FamiliarName(runtimeNamed)
+}
 
 const (
 	LabelAppID        = "moduleos.app.id"

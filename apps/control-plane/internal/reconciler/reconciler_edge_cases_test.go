@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -29,6 +30,7 @@ func newInternalReconciler(t *testing.T) (*Reconciler, *app.Service, *store.SQLi
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	mock := swarmfake.New()
+	mock.ResolveMutableImages = true
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	service := app.NewService(st, mock, "moduleos.local", logger)
 	reconciler := New(mock, service, logger).WithStabilizationWindow(0)
@@ -62,6 +64,15 @@ type faultStore struct {
 	diagnosticsErr           error
 	deploymentStateErr       error
 	finalizeAppErr           error
+}
+
+type applicationListStore struct {
+	store.Store
+	applications []*store.Application
+}
+
+func (s *applicationListStore) ListApplications(context.Context) ([]*store.Application, error) {
+	return s.applications, nil
 }
 
 func (s *faultStore) FinalizeApplicationDeletion(ctx context.Context, appID string, generation int64) error {
@@ -111,6 +122,27 @@ func (s *faultStore) MarkDeploymentState(ctx context.Context, id string, generat
 		return s.deploymentStateErr
 	}
 	return s.Store.MarkDeploymentState(ctx, id, generation, status, code, message)
+}
+
+func (s *faultStore) MarkDeploymentSucceeded(ctx context.Context, id string, generation int64, resolvedImage string) error {
+	if s.deploymentStateErr != nil {
+		return s.deploymentStateErr
+	}
+	return s.Store.MarkDeploymentSucceeded(ctx, id, generation, resolvedImage)
+}
+
+func (s *faultStore) RecordDeploymentResolvedImage(ctx context.Context, id string, generation int64, resolvedImage string) error {
+	if s.deploymentStateErr != nil {
+		return s.deploymentStateErr
+	}
+	return s.Store.RecordDeploymentResolvedImage(ctx, id, generation, resolvedImage)
+}
+
+func (s *faultStore) MarkApplicationConverged(ctx context.Context, appID string, update store.ObservedApplicationUpdate, deploymentID, resolvedImage string) error {
+	if s.deploymentStateErr != nil {
+		return s.deploymentStateErr
+	}
+	return s.Store.MarkApplicationConverged(ctx, appID, update, deploymentID, resolvedImage)
 }
 
 type panicCreateClient struct{ *swarmfake.Client }
@@ -284,6 +316,41 @@ func TestConfigurationQueueAndLockBoundaries(t *testing.T) {
 	}
 	if _, exists := bounded.pending["overflow"]; exists {
 		t.Fatal("dropped queue item remained marked pending")
+	}
+}
+
+func TestFullScanEnqueueIsLosslessBeyondQueueCapacity(t *testing.T) {
+	reconciler, _, st, mock := newInternalReconciler(t)
+	applications := make([]*store.Application, cap(reconciler.queue)+257)
+	for index := range applications {
+		applications[index] = &store.Application{Name: "scan-" + strconv.Itoa(index)}
+	}
+	listed := &applicationListStore{Store: st, applications: applications}
+	service := app.NewService(listed, mock, "moduleos.local", reconciler.log)
+	reconciler = New(mock, service, reconciler.log)
+
+	done := make(chan struct{})
+	go func() {
+		reconciler.enqueueFullScan(t.Context())
+		close(done)
+	}()
+
+	seen := make(map[string]struct{}, len(applications))
+	for len(seen) < len(applications) {
+		select {
+		case name := <-reconciler.queue:
+			reconciler.queueMu.Lock()
+			delete(reconciler.pending, name)
+			reconciler.queueMu.Unlock()
+			seen[name] = struct{}{}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("full scan delivered %d/%d applications", len(seen), len(applications))
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("full scan did not finish after its queue was drained")
 	}
 }
 
@@ -1241,6 +1308,12 @@ func TestErrorClassificationAndDiagnosticRedaction(t *testing.T) {
 	if !isRetryableMutation(fmtError(errdefs.ErrNotFound)) {
 		t.Fatal("a Docker mutation dependency race was not retryable")
 	}
+	if isRetryableMutation(fmt.Errorf("%w: %w", swarm.ErrImageResolution, errdefs.ErrNotFound)) {
+		t.Fatal("a missing image manifest was retryable")
+	}
+	if isRetryableMutation(fmt.Errorf("port is already in use: %w", errdefs.ErrConflict)) {
+		t.Fatal("an occupied published port was retryable")
+	}
 	cases := map[string]string{
 		"https://user:password@example.test/path": "https://[redacted]@example.test/path",
 		"authorization=top-secret":                "authorization=[redacted]",
@@ -1253,6 +1326,12 @@ func TestErrorClassificationAndDiagnosticRedaction(t *testing.T) {
 	}
 	if code := classifyDockerError(errors.New("port is already allocated")); code != "published_port_conflict" {
 		t.Fatalf("port conflict code = %q", code)
+	}
+	if code := classifyDockerError(fmt.Errorf("port is already allocated: %w", errdefs.ErrConflict)); code != "published_port_conflict" {
+		t.Fatalf("typed port conflict code = %q", code)
+	}
+	if code := classifyDockerError(fmt.Errorf("%w: %w", swarm.ErrImageResolution, errdefs.ErrNotFound)); code != "image_not_found" {
+		t.Fatalf("missing image code = %q", code)
 	}
 	if code := classifyDockerError(errors.New("invalid reference format")); code != "invalid_image" {
 		t.Fatalf("invalid image code = %q", code)

@@ -10,8 +10,11 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/distribution/reference"
+	dockercontainer "github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
 	dockerswarm "github.com/moby/moby/api/types/swarm"
@@ -122,9 +125,14 @@ func (c *DockerClient) ensureNetwork(ctx context.Context, networkName string, la
 
 // CreateService creates a new Swarm service.
 func (c *DockerClient) CreateService(ctx context.Context, spec ServiceSpec) error {
+	resolvedImage, err := c.resolveImage(ctx, spec.Image)
+	if err != nil {
+		return err
+	}
+	spec.Image = resolvedImage
 	swarmSpec := buildSwarmSpec(spec)
 
-	_, err := c.docker.ServiceCreate(ctx, client.ServiceCreateOptions{Spec: swarmSpec})
+	_, err = c.docker.ServiceCreate(ctx, client.ServiceCreateOptions{Spec: swarmSpec})
 	if err != nil {
 		return fmt.Errorf("failed to create service: %w", err)
 	}
@@ -140,6 +148,21 @@ func (c *DockerClient) UpdateService(ctx context.Context, serviceID string, spec
 	}
 	current := inspection.Service
 
+	currentImage := ""
+	if containerSpec := current.Spec.TaskTemplate.ContainerSpec; containerSpec != nil {
+		currentImage = containerSpec.Image
+	}
+	refreshImage := !IsImmutableImageReference(spec.Image) &&
+		(!imageEquivalent(spec.Image, currentImage) || spec.RefreshImage)
+	if refreshImage {
+		resolvedImage, err := c.resolveImage(ctx, spec.Image)
+		if err != nil {
+			return err
+		}
+		spec.Image = resolvedImage
+	} else if imageEquivalent(spec.Image, currentImage) {
+		spec.Image = currentImage
+	}
 	swarmSpec := buildSwarmSpec(spec)
 	swarmSpec.Labels = mergeServiceLabels(current.Spec.Labels, swarmSpec.Labels)
 
@@ -152,6 +175,25 @@ func (c *DockerClient) UpdateService(ctx context.Context, serviceID string, spec
 	}
 
 	return nil
+}
+
+func (c *DockerClient) resolveImage(ctx context.Context, image string) (string, error) {
+	if IsImmutableImageReference(image) {
+		return image, nil
+	}
+	inspection, err := c.docker.DistributionInspect(ctx, image, client.DistributionInspectOptions{})
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrImageResolution, err)
+	}
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrImageResolution, err)
+	}
+	resolved, err := reference.WithDigest(named, inspection.Descriptor.Digest)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrImageResolution, err)
+	}
+	return reference.FamiliarString(resolved), nil
 }
 
 // RemoveService removes a service.
@@ -311,6 +353,16 @@ func isServiceUpdateConflict(err error) bool {
 	return errdefs.IsConflict(err) || strings.Contains(strings.ToLower(err.Error()), "update out of sequence")
 }
 
+type slotObservation struct {
+	latestErrorTask      dockerswarm.Task
+	hasError             bool
+	latestResolutionTask dockerswarm.Task
+	hasResolution        bool
+	latestRemovalTask    dockerswarm.Task
+	hasRemoval           bool
+	active               bool
+}
+
 // GetService returns service info. serviceID may be a name or an ID.
 func (c *DockerClient) GetService(ctx context.Context, serviceID string) (*ServiceInfo, error) {
 	result, err := c.docker.ServiceInspect(ctx, serviceID, client.ServiceInspectOptions{})
@@ -337,9 +389,24 @@ func (c *DockerClient) GetService(ctx context.Context, serviceID string) (*Servi
 	info.Running = 0
 	info.Terminating = 0
 	currentTaskIDs := make([]string, 0, len(tasks.Items))
+	tasksBySlot := make(map[int]slotObservation)
+	unassignedTaskErrors := make([]string, 0)
 	for _, task := range tasks.Items {
 		if task.Status.State == dockerswarm.TaskStateRunning && task.DesiredState != dockerswarm.TaskStateRunning {
 			info.Terminating++
+		}
+		if task.Slot > 0 && taskDesiredStateIsActive(task.DesiredState) {
+			observation := tasksBySlot[task.Slot]
+			observation.active = true
+			tasksBySlot[task.Slot] = observation
+		}
+		if task.Slot > 0 && task.DesiredState == dockerswarm.TaskStateRemove {
+			observation := tasksBySlot[task.Slot]
+			if !observation.hasRemoval || taskAttemptIsNewer(task, observation.latestRemovalTask) {
+				observation.latestRemovalTask = task
+				observation.hasRemoval = true
+			}
+			tasksBySlot[task.Slot] = observation
 		}
 		if !taskMatchesTemplate(task.Spec, result.Service.Spec.TaskTemplate) {
 			continue
@@ -350,13 +417,117 @@ func (c *DockerClient) GetService(ctx context.Context, serviceID string) (*Servi
 		if task.Status.State == dockerswarm.TaskStateRunning && task.DesiredState == dockerswarm.TaskStateRunning {
 			info.Running++
 		}
-		if task.DesiredState == dockerswarm.TaskStateRunning && task.Status.Err != "" {
-			info.TaskErrors = append(info.TaskErrors, task.Status.Err)
+		if task.Slot > 0 && info.Replicas > 0 {
+			observation := tasksBySlot[task.Slot]
+			if task.Status.Err != "" && taskErrorBelongsToCurrentServiceState(task) &&
+				(!observation.hasError || taskAttemptIsNewer(task, observation.latestErrorTask)) {
+				observation.latestErrorTask = task
+				observation.hasError = true
+			}
+			if taskResolvesPriorRejection(task) &&
+				(!observation.hasResolution || taskAttemptIsNewer(task, observation.latestResolutionTask)) {
+				observation.latestResolutionTask = task
+				observation.hasResolution = true
+			}
+			tasksBySlot[task.Slot] = observation
+		} else if task.Slot == 0 && task.DesiredState == dockerswarm.TaskStateRunning && task.Status.Err != "" {
+			unassignedTaskErrors = append(unassignedTaskErrors, task.Status.Err)
 		}
+	}
+	sort.Strings(unassignedTaskErrors)
+	info.TaskErrors = append(info.TaskErrors, unassignedTaskErrors...)
+	slots := make([]int, 0, len(tasksBySlot))
+	activeSlots := 0
+	for slot := range tasksBySlot {
+		slots = append(slots, slot)
+		if tasksBySlot[slot].active {
+			activeSlots++
+		}
+	}
+	sort.Ints(slots)
+	for _, slot := range slots {
+		observation := tasksBySlot[slot]
+		if !observation.hasError {
+			continue
+		}
+		if observation.hasRemoval &&
+			!taskAttemptIsNewer(observation.latestErrorTask, observation.latestRemovalTask) {
+			continue
+		}
+		if !observation.active && uint64(activeSlots) >= info.Replicas {
+			continue
+		}
+		if !serviceUpdateIsPaused(result.Service) && observation.hasResolution &&
+			taskAttemptIsNewer(observation.latestResolutionTask, observation.latestErrorTask) {
+			continue
+		}
+		info.TaskErrors = append(info.TaskErrors, observation.latestErrorTask.Status.Err)
 	}
 	sort.Strings(currentTaskIDs)
 	info.TaskSetFingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(currentTaskIDs, "\x00"))))
 	return info, nil
+}
+
+func taskAttemptIsNewer(candidate, current dockerswarm.Task) bool {
+	if !candidate.CreatedAt.Equal(current.CreatedAt) {
+		return candidate.CreatedAt.After(current.CreatedAt)
+	}
+	if candidate.Version.Index != current.Version.Index {
+		return candidate.Version.Index > current.Version.Index
+	}
+	if !candidate.UpdatedAt.Equal(current.UpdatedAt) {
+		return candidate.UpdatedAt.After(current.UpdatedAt)
+	}
+	if !candidate.Status.Timestamp.Equal(current.Status.Timestamp) {
+		return candidate.Status.Timestamp.After(current.Status.Timestamp)
+	}
+	return candidate.ID > current.ID
+}
+
+func taskDesiredStateIsActive(state dockerswarm.TaskState) bool {
+	switch state {
+	case dockerswarm.TaskStateNew, dockerswarm.TaskStateAllocated, dockerswarm.TaskStatePending,
+		dockerswarm.TaskStateAssigned, dockerswarm.TaskStateAccepted, dockerswarm.TaskStatePreparing,
+		dockerswarm.TaskStateReady, dockerswarm.TaskStateStarting, dockerswarm.TaskStateRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+func taskResolvesPriorRejection(task dockerswarm.Task) bool {
+	if task.Status.State == dockerswarm.TaskStateRejected {
+		return false
+	}
+	if taskDesiredStateIsActive(task.DesiredState) {
+		return true
+	}
+	switch task.Status.State {
+	case dockerswarm.TaskStateComplete, dockerswarm.TaskStateShutdown, dockerswarm.TaskStateFailed,
+		dockerswarm.TaskStateRemove, dockerswarm.TaskStateOrphaned:
+		return true
+	default:
+		return false
+	}
+}
+
+func taskErrorBelongsToCurrentServiceState(task dockerswarm.Task) bool {
+	if task.DesiredState == dockerswarm.TaskStateRunning {
+		return true
+	}
+	return task.DesiredState == dockerswarm.TaskStateShutdown && task.Status.State == dockerswarm.TaskStateRejected
+}
+
+func serviceUpdateIsPaused(service dockerswarm.Service) bool {
+	return service.UpdateStatus != nil &&
+		(service.UpdateStatus.State == dockerswarm.UpdateStatePaused ||
+			service.UpdateStatus.State == dockerswarm.UpdateStateRollbackPaused)
+}
+
+func serviceUpdateIsInProgress(service dockerswarm.Service) bool {
+	return service.UpdateStatus != nil &&
+		(service.UpdateStatus.State == dockerswarm.UpdateStateUpdating ||
+			service.UpdateStatus.State == dockerswarm.UpdateStateRollbackStarted)
 }
 
 func taskMatchesTemplate(task, current dockerswarm.TaskSpec) bool {
@@ -583,18 +754,20 @@ func buildSwarmSpec(spec ServiceSpec) dockerswarm.ServiceSpec {
 			Ports: ports,
 		},
 		UpdateConfig: &dockerswarm.UpdateConfig{
-			Parallelism:   spec.Update.Parallelism,
-			Delay:         spec.Update.Delay,
-			Monitor:       spec.Update.Monitor,
-			FailureAction: dockerswarm.FailureAction(spec.Update.FailureAction),
-			Order:         dockerswarm.UpdateOrder(spec.Update.Order),
+			Parallelism:     spec.Update.Parallelism,
+			Delay:           spec.Update.Delay,
+			Monitor:         spec.Update.Monitor,
+			MaxFailureRatio: spec.Update.MaxFailureRatio,
+			FailureAction:   dockerswarm.FailureAction(spec.Update.FailureAction),
+			Order:           dockerswarm.UpdateOrder(spec.Update.Order),
 		},
 		RollbackConfig: &dockerswarm.UpdateConfig{
-			Parallelism:   spec.Rollback.Parallelism,
-			Delay:         spec.Rollback.Delay,
-			Monitor:       spec.Rollback.Monitor,
-			FailureAction: dockerswarm.FailureAction(spec.Rollback.FailureAction),
-			Order:         dockerswarm.UpdateOrder(spec.Rollback.Order),
+			Parallelism:     spec.Rollback.Parallelism,
+			Delay:           spec.Rollback.Delay,
+			Monitor:         spec.Rollback.Monitor,
+			MaxFailureRatio: spec.Rollback.MaxFailureRatio,
+			FailureAction:   dockerswarm.FailureAction(spec.Rollback.FailureAction),
+			Order:           dockerswarm.UpdateOrder(spec.Rollback.Order),
 		},
 	}
 }
@@ -633,13 +806,28 @@ func toServiceInfo(svc dockerswarm.Service) *ServiceInfo {
 		Labels:   svc.Spec.Labels,
 		Spec:     spec,
 	}
+	if serviceUpdateIsPaused(svc) {
+		info.RolloutPaused = true
+		info.RolloutMessage = "Swarm rollout is paused"
+		if svc.UpdateStatus.Message != "" {
+			info.RolloutMessage = svc.UpdateStatus.Message
+		}
+	}
+	if serviceUpdateIsInProgress(svc) {
+		info.RolloutInProgress = true
+		info.RolloutMessage = "Swarm rollout is in progress"
+		if svc.UpdateStatus.Message != "" {
+			info.RolloutMessage = svc.UpdateStatus.Message
+		}
+	}
 	return info
 }
 
 func serviceSpecFromDocker(spec dockerswarm.ServiceSpec) ServiceSpec {
 	result := ServiceSpec{
-		Name:   strings.TrimPrefix(spec.Name, servicePrefix),
-		Labels: spec.Labels,
+		Name:                    strings.TrimPrefix(spec.Name, servicePrefix),
+		Labels:                  spec.Labels,
+		UnsupportedTaskTemplate: taskTemplateHasUnsupportedFields(spec.TaskTemplate),
 	}
 	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas != nil {
 		result.ServiceMode = "replicated"
@@ -682,20 +870,22 @@ func serviceSpecFromDocker(spec dockerswarm.ServiceSpec) ServiceSpec {
 	}
 	if spec.UpdateConfig != nil {
 		result.Update = UpdatePolicy{
-			Parallelism:   spec.UpdateConfig.Parallelism,
-			Delay:         spec.UpdateConfig.Delay,
-			Monitor:       spec.UpdateConfig.Monitor,
-			FailureAction: string(spec.UpdateConfig.FailureAction),
-			Order:         string(spec.UpdateConfig.Order),
+			Parallelism:     spec.UpdateConfig.Parallelism,
+			Delay:           spec.UpdateConfig.Delay,
+			Monitor:         spec.UpdateConfig.Monitor,
+			MaxFailureRatio: spec.UpdateConfig.MaxFailureRatio,
+			FailureAction:   string(spec.UpdateConfig.FailureAction),
+			Order:           string(spec.UpdateConfig.Order),
 		}
 	}
 	if spec.RollbackConfig != nil {
 		result.Rollback = UpdatePolicy{
-			Parallelism:   spec.RollbackConfig.Parallelism,
-			Delay:         spec.RollbackConfig.Delay,
-			Monitor:       spec.RollbackConfig.Monitor,
-			FailureAction: string(spec.RollbackConfig.FailureAction),
-			Order:         string(spec.RollbackConfig.Order),
+			Parallelism:     spec.RollbackConfig.Parallelism,
+			Delay:           spec.RollbackConfig.Delay,
+			Monitor:         spec.RollbackConfig.Monitor,
+			MaxFailureRatio: spec.RollbackConfig.MaxFailureRatio,
+			FailureAction:   string(spec.RollbackConfig.FailureAction),
+			Order:           string(spec.RollbackConfig.Order),
 		}
 	}
 	if spec.TaskTemplate.RestartPolicy != nil && spec.TaskTemplate.RestartPolicy.Delay != nil {
@@ -715,4 +905,82 @@ func serviceSpecFromDocker(spec dockerswarm.ServiceSpec) ServiceSpec {
 	}
 	sort.Strings(result.EnvVars)
 	return result
+}
+
+func taskTemplateHasUnsupportedFields(spec dockerswarm.TaskSpec) bool {
+	remainder := spec
+	remainder.ContainerSpec = nil
+	remainder.RestartPolicy = nil
+	remainder.Networks = nil
+	remainder.ForceUpdate = 0
+	if remainder.Resources != nil && reflect.DeepEqual(*remainder.Resources, dockerswarm.ResourceRequirements{}) {
+		remainder.Resources = nil
+	}
+	if remainder.Placement != nil {
+		placement := *remainder.Placement
+		placement.Platforms = nil
+		if reflect.DeepEqual(placement, dockerswarm.Placement{}) {
+			remainder.Placement = nil
+		} else {
+			remainder.Placement = &placement
+		}
+	}
+	if remainder.Runtime == dockerswarm.RuntimeContainer {
+		remainder.Runtime = ""
+	}
+	if !reflect.DeepEqual(remainder, dockerswarm.TaskSpec{}) {
+		return true
+	}
+
+	if spec.RestartPolicy != nil {
+		restart := *spec.RestartPolicy
+		restart.Condition = ""
+		restart.Delay = nil
+		if restart.MaxAttempts != nil && *restart.MaxAttempts == 0 {
+			restart.MaxAttempts = nil
+		}
+		if restart.Window != nil && *restart.Window == 0 {
+			restart.Window = nil
+		}
+		if !reflect.DeepEqual(restart, dockerswarm.RestartPolicy{}) {
+			return true
+		}
+	}
+	for _, network := range spec.Networks {
+		if len(network.DriverOpts) > 0 {
+			return true
+		}
+	}
+	if spec.ContainerSpec == nil {
+		return false
+	}
+	for label := range spec.ContainerSpec.Labels {
+		if label != LabelTaskTemplate {
+			return true
+		}
+	}
+	for _, mounted := range spec.ContainerSpec.Mounts {
+		supported := mount.Mount{
+			Type: mounted.Type, Source: mounted.Source, Target: mounted.Target, ReadOnly: mounted.ReadOnly,
+		}
+		if mounted.Type != mount.TypeBind || !reflect.DeepEqual(mounted, supported) {
+			return true
+		}
+	}
+	container := *spec.ContainerSpec
+	container.Image = ""
+	container.Labels = nil
+	container.Env = nil
+	container.Mounts = nil
+	if container.Isolation == dockercontainer.IsolationDefault {
+		container.Isolation = dockercontainer.IsolationEmpty
+	}
+	if container.StopGracePeriod != nil && *container.StopGracePeriod == 10*time.Second {
+		container.StopGracePeriod = nil
+	}
+	if container.DNSConfig != nil && len(container.DNSConfig.Nameservers) == 0 &&
+		len(container.DNSConfig.Search) == 0 && len(container.DNSConfig.Options) == 0 {
+		container.DNSConfig = nil
+	}
+	return !reflect.DeepEqual(container, dockerswarm.ContainerSpec{})
 }

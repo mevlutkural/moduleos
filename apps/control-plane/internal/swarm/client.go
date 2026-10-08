@@ -8,28 +8,31 @@ import (
 
 // ServiceSpec holds the information needed to create or update a Swarm service.
 type ServiceSpec struct {
-	Name             string
-	Image            string
-	ServiceMode      string
-	EndpointMode     string
-	Replicas         uint64
-	EnvVars          []string // ["KEY=VALUE", ...]
-	Ports            []PortConfig
-	Volumes          []VolumeConfig
-	Labels           map[string]string
-	Networks         []NetworkAttachment
-	TaskTemplateHash string
-	Update           UpdatePolicy
-	Rollback         UpdatePolicy
-	Restart          RestartPolicy
+	Name                    string
+	Image                   string
+	ServiceMode             string
+	EndpointMode            string
+	Replicas                uint64
+	EnvVars                 []string // ["KEY=VALUE", ...]
+	Ports                   []PortConfig
+	Volumes                 []VolumeConfig
+	Labels                  map[string]string
+	Networks                []NetworkAttachment
+	TaskTemplateHash        string
+	UnsupportedTaskTemplate bool
+	RefreshImage            bool
+	Update                  UpdatePolicy
+	Rollback                UpdatePolicy
+	Restart                 RestartPolicy
 }
 
 type UpdatePolicy struct {
-	Parallelism   uint64
-	Delay         time.Duration
-	Monitor       time.Duration
-	FailureAction string
-	Order         string
+	Parallelism     uint64
+	Delay           time.Duration
+	Monitor         time.Duration
+	MaxFailureRatio float32
+	FailureAction   string
+	Order           string
 }
 
 type RestartPolicy struct {
@@ -65,6 +68,9 @@ type ServiceInfo struct {
 	Running            uint64 // desired-running tasks that are running on the current task template
 	Terminating        uint64 // shutdown-desired tasks still running for the service
 	TaskSetFingerprint string
+	RolloutPaused      bool
+	RolloutInProgress  bool
+	RolloutMessage     string
 	Labels             map[string]string
 	Spec               ServiceSpec
 	TaskErrors         []string

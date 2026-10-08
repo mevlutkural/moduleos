@@ -537,7 +537,8 @@ func TestRollbackValidationAndSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkDeploymentState(t.Context(), target.ID, target.TargetGeneration, store.DeploymentStatusSucceeded, "", ""); err != nil {
+	resolvedTarget := "docker.io/library/nginx:2.0@sha256:" + strings.Repeat("a", 64)
+	if err := st.MarkDeploymentSucceeded(t.Context(), target.ID, target.TargetGeneration, resolvedTarget); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.DeployApp(t.Context(), DeployAppRequest{AppName: application.Name, Image: "nginx:3.0"}); err != nil {
@@ -549,7 +550,7 @@ func TestRollbackValidationAndSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rollback.Image != target.Image || rollback.RollbackSourceDeploymentID == nil || *rollback.RollbackSourceDeploymentID != target.ID ||
+	if rollback.Image != resolvedTarget || rollback.RollbackSourceDeploymentID == nil || *rollback.RollbackSourceDeploymentID != target.ID ||
 		rollback.Status != store.DeploymentStatusPending || len(queue.snapshot()) != 1 {
 		t.Fatalf("rollback intent = %#v queue=%#v", rollback, queue.snapshot())
 	}
@@ -574,7 +575,7 @@ func TestRollbackValidationAndSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := service.RollbackApp(t.Context(), application.Name, emptyImage.ID); !errors.Is(err, store.ErrInvalidData) {
-		t.Fatalf("empty-image rollback error = %v", err)
+		t.Fatalf("unresolved-image rollback error = %v", err)
 	}
 
 	other := mustCreateApp(t, service, CreateAppRequest{Name: "other-app", Image: "redis:7"})

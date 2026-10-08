@@ -338,27 +338,81 @@ func TestDeploymentStateTransitionsAndCAS(t *testing.T) {
 	if inProgress.StartedAt == nil || !inProgress.StartedAt.Equal(startedAt) {
 		t.Fatalf("replayed start changed timestamp: first=%v next=%v", startedAt, inProgress.StartedAt)
 	}
-	if err := st.MarkDeploymentState(ctx, deployment.ID, 1, DeploymentStatusSucceeded, "", ""); err != nil {
+	resolvedImage := "docker.io/library/nginx:1.27@sha256:" + strings.Repeat("a", 64)
+	if err := st.RecordDeploymentResolvedImage(ctx, deployment.ID, 1, resolvedImage); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordDeploymentResolvedImage(ctx, deployment.ID, 1, resolvedImage); err != nil {
+		t.Fatalf("resolved image replay: %v", err)
+	}
+	conflictingImage := "docker.io/library/nginx:1.27@sha256:" + strings.Repeat("b", 64)
+	if err := st.RecordDeploymentResolvedImage(ctx, deployment.ID, 1, conflictingImage); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("resolved image rewrite error = %v, want ErrInvalidTransition", err)
+	}
+	if err := st.RecordDeploymentResolvedImage(ctx, deployment.ID, 0, resolvedImage); !errors.Is(err, ErrStaleObservation) {
+		t.Fatalf("stale resolved image error = %v, want ErrStaleObservation", err)
+	}
+	if err := st.RecordDeploymentResolvedImage(ctx, "missing-deployment", 1, resolvedImage); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing resolved image error = %v, want ErrNotFound", err)
+	}
+	if err := st.RecordDeploymentResolvedImage(ctx, deployment.ID, 1, ""); !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("empty resolved image error = %v, want ErrInvalidData", err)
+	}
+	if err := st.MarkDeploymentSucceeded(ctx, deployment.ID, 1, resolvedImage); err != nil {
 		t.Fatal(err)
 	}
 	succeeded, err := st.GetDeployment(ctx, deployment.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if succeeded.Status != DeploymentStatusSucceeded || succeeded.FinishedAt == nil {
+	if succeeded.Status != DeploymentStatusSucceeded || succeeded.FinishedAt == nil || succeeded.ResolvedImage != resolvedImage {
 		t.Fatalf("succeeded deployment = %#v", succeeded)
 	}
 	finishedAt := *succeeded.FinishedAt
 	time.Sleep(2 * time.Millisecond)
-	if err := st.MarkDeploymentState(ctx, deployment.ID, 1, DeploymentStatusSucceeded, "", ""); err != nil {
+	if err := st.MarkDeploymentSucceeded(ctx, deployment.ID, 1, "docker.io/library/nginx:changed@sha256:"+strings.Repeat("b", 64)); err != nil {
 		t.Fatal(err)
 	}
 	replayed, err := st.GetDeployment(ctx, deployment.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replayed.FinishedAt == nil || !replayed.FinishedAt.Equal(finishedAt) {
+	if replayed.FinishedAt == nil || !replayed.FinishedAt.Equal(finishedAt) || replayed.ResolvedImage != resolvedImage {
 		t.Fatalf("replayed terminal transition changed finished_at: first=%v replayed=%v", finishedAt, replayed.FinishedAt)
+	}
+	lateResolution := &Deployment{
+		ID:               uuid.NewString(),
+		AppID:            app.ID,
+		SourceType:       SourceTypeImage,
+		Image:            "nginx:concurrent",
+		Status:           DeploymentStatusPending,
+		TriggeredBy:      TriggeredByAPI,
+		CreatedAt:        time.Now().UTC(),
+		TargetGeneration: 1,
+	}
+	if err := st.CreateDeployment(ctx, lateResolution); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := st.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := terminalizeOvertakenDeploymentsTx(ctx, tx, app.ID, 2, 1, time.Now().UTC()); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkDeploymentSucceeded(ctx, lateResolution.ID, 1, resolvedImage); err != nil {
+		t.Fatal(err)
+	}
+	resolvedAfterTerminalization, err := st.GetDeployment(ctx, lateResolution.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedAfterTerminalization.Status != DeploymentStatusSucceeded || resolvedAfterTerminalization.ResolvedImage != resolvedImage {
+		t.Fatalf("late resolved image was not recorded: %#v", resolvedAfterTerminalization)
 	}
 	if err := st.MarkDeploymentState(ctx, deployment.ID, 1, DeploymentStatusFailed, "late_failure", "must not replace success"); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("terminal rewrite error = %v, want ErrInvalidTransition", err)

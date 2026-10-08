@@ -107,9 +107,11 @@ func TestDiffServiceSpecReportsManagedFieldsInStableOrder(t *testing.T) {
 func TestDiffServiceSpecDetectsFixedDockerPolicyDrift(t *testing.T) {
 	tests := map[string]func(*ServiceSpec){
 		"endpoint mode":           func(spec *ServiceSpec) { spec.EndpointMode = "dnsrr" },
+		"update failure ratio":    func(spec *ServiceSpec) { spec.Update.MaxFailureRatio = 0.25 },
 		"update failure action":   func(spec *ServiceSpec) { spec.Update.FailureAction = "continue" },
 		"update order":            func(spec *ServiceSpec) { spec.Update.Order = "start-first" },
 		"rollback failure action": func(spec *ServiceSpec) { spec.Rollback.FailureAction = "continue" },
+		"rollback failure ratio":  func(spec *ServiceSpec) { spec.Rollback.MaxFailureRatio = 0.25 },
 		"rollback order":          func(spec *ServiceSpec) { spec.Rollback.Order = "start-first" },
 		"restart condition":       func(spec *ServiceSpec) { spec.Restart.Condition = "on-failure" },
 	}
