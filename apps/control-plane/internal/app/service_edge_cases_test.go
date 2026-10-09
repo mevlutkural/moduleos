@@ -250,8 +250,9 @@ func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
 	service, st, _, queue := newEdgeService(t)
 	allowedRoot := t.TempDir()
 	inside := filepath.Join(allowedRoot, "inside")
+	nested := filepath.Join(inside, "nested")
 	outside := t.TempDir()
-	if err := os.Mkdir(inside, 0o700); err != nil {
+	if err := os.MkdirAll(nested, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	insideLink := filepath.Join(allowedRoot, "inside-link")
@@ -277,6 +278,8 @@ func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
 		{name: "missing source", source: filepath.Join(allowedRoot, "missing")},
 		{name: "dangling symlink", source: danglingLink},
 		{name: "suffix below dangling symlink", source: filepath.Join(danglingLink, "future")},
+		{name: "allowed root itself", source: allowedRoot},
+		{name: "nested source", source: nested},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := service.CreateApp(t.Context(), CreateAppRequest{
@@ -350,6 +353,35 @@ func TestResolvedDockerSocketIsDeniedWithoutAllowedRoots(t *testing.T) {
 	}
 	if len(queue.snapshot()) != 0 {
 		t.Fatalf("rejected Docker socket was enqueued: %#v", queue.snapshot())
+	}
+	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+		Name: "disabled-bind", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: t.TempDir(), Target: "/data"}},
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("bind mount without allowed roots error = %v, want ErrInvalidData", err)
+	}
+}
+
+func TestAllowedMountRootsCannotOverlap(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	allowedRoot := t.TempDir()
+	nestedRoot := filepath.Join(allowedRoot, "nested")
+	source := filepath.Join(nestedRoot, "data")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service.WithRuntimeLimits(20, []string{allowedRoot, nestedRoot}, time.Minute)
+	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+		Name: "overlapping-roots", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: source, Target: "/data"}},
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("overlapping allowed roots error = %v, want ErrInvalidData", err)
+	}
+	if _, err := st.GetApplication(t.Context(), "overlapping-roots"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("application with overlapping roots was persisted: %v", err)
+	}
+	if len(queue.snapshot()) != 0 {
+		t.Fatalf("application with overlapping roots was enqueued: %#v", queue.snapshot())
 	}
 }
 

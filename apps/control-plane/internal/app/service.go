@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -730,6 +731,13 @@ func isValidNameChar(c rune) bool {
 
 func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.VolumeConfig, error) {
 	canonical := append([]swarm.VolumeConfig(nil), volumes...)
+	if len(canonical) == 0 {
+		return canonical, nil
+	}
+	allowedRoots, err := s.canonicalAllowedMountRoots()
+	if err != nil {
+		return nil, err
+	}
 	for index := range canonical {
 		volume := &canonical[index]
 		if !filepath.IsAbs(volume.Source) || !filepath.IsAbs(volume.Target) ||
@@ -743,21 +751,10 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 		if s.sensitiveMountSource(source) {
 			return nil, fmt.Errorf("%w: mount source is denied", store.ErrInvalidData)
 		}
-		if len(s.allowedMountRoots) == 0 {
-			volume.Source = source
-			continue
-		}
 		allowed := false
-		for _, root := range s.allowedMountRoots {
-			resolvedRoot, err := resolveMountPath(root)
-			if err != nil {
-				return nil, fmt.Errorf("%w: allowed mount root cannot be resolved", store.ErrInvalidData)
-			}
-			if sensitiveMountRoot(resolvedRoot) {
-				return nil, fmt.Errorf("%w: allowed mount root is denied", store.ErrInvalidData)
-			}
-			relative, err := filepath.Rel(resolvedRoot, source)
-			if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		for _, root := range allowedRoots {
+			relative, err := filepath.Rel(root, source)
+			if err == nil && relative != "." && filepath.Dir(relative) == "." {
 				allowed = true
 				break
 			}
@@ -768,6 +765,33 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 		volume.Source = source
 	}
 	return canonical, nil
+}
+
+func (s *Service) canonicalAllowedMountRoots() ([]string, error) {
+	if len(s.allowedMountRoots) == 0 {
+		return nil, fmt.Errorf("%w: bind mounts are disabled", store.ErrInvalidData)
+	}
+	resolved := make([]string, 0, len(s.allowedMountRoots))
+	for _, root := range s.allowedMountRoots {
+		canonical, err := resolveMountPath(root)
+		if err != nil {
+			return nil, fmt.Errorf("%w: allowed mount root cannot be resolved", store.ErrInvalidData)
+		}
+		info, err := os.Stat(canonical)
+		if err != nil || !info.IsDir() {
+			return nil, fmt.Errorf("%w: allowed mount root must be a directory", store.ErrInvalidData)
+		}
+		if sensitiveMountRoot(canonical) {
+			return nil, fmt.Errorf("%w: allowed mount root is denied", store.ErrInvalidData)
+		}
+		for _, existing := range resolved {
+			if pathContains(existing, canonical) || pathContains(canonical, existing) {
+				return nil, fmt.Errorf("%w: allowed mount roots cannot overlap", store.ErrInvalidData)
+			}
+		}
+		resolved = append(resolved, canonical)
+	}
+	return resolved, nil
 }
 
 func (s *Service) sensitiveMountSource(source string) bool {

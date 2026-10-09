@@ -842,8 +842,10 @@ components:
         Validated bind mount accepted as private desired state. Source and target
         must be canonical absolute paths without redundant separators, trailing
         separators, dot segments, or parent traversal; targets must be unique
-        and cannot be the filesystem root.
-      example: {source: /srv/moduleos/data, target: /data, read_only: true}
+        and cannot be the filesystem root. The source must already exist and
+        resolve to a direct child of exactly one configured, non-overlapping
+        allowed mount root; bind mounts are disabled when no roots are configured.
+      example: {source: /srv/moduleos-data/api, target: /data, read_only: true}
       type: object
       additionalProperties: false
       required: [source, target]
@@ -888,7 +890,7 @@ components:
           type: array
           maxItems: 20
           items: {$ref: "#/components/schemas/ApplicationVolumeInput"}
-          example: [{source: /srv/moduleos/data, target: /data, read_only: true}]
+          example: [{source: /srv/moduleos-data/api, target: /data, read_only: true}]
         expose: {type: boolean, default: false, example: false}
         ingress_container_port: {type: integer, minimum: 0, maximum: 65535, default: 0, example: 0}
     UpdateApplicationRequest:

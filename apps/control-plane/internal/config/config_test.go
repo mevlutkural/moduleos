@@ -160,6 +160,8 @@ func TestValidateRejectsInvalidConfigurationBoundaries(t *testing.T) {
 		{name: "missing database parent", mutate: func(c *config.Config) { c.DatabasePath = missingDatabase }, wantMessage: "DATABASE_PATH"},
 		{name: "relative mount root", mutate: func(c *config.Config) { c.AllowedMountRoots = []string{"data"} }, wantMessage: "ALLOWED_MOUNT_ROOTS"},
 		{name: "root mount", mutate: func(c *config.Config) { c.AllowedMountRoots = []string{"/"} }, wantMessage: "ALLOWED_MOUNT_ROOTS"},
+		{name: "noncanonical mount root", mutate: func(c *config.Config) { c.AllowedMountRoots = []string{"/srv/data/../data"} }, wantMessage: "ALLOWED_MOUNT_ROOTS"},
+		{name: "overlapping mount roots", mutate: func(c *config.Config) { c.AllowedMountRoots = []string{"/srv/data", "/srv/data/app"} }, wantMessage: "ALLOWED_MOUNT_ROOTS"},
 		{name: "reconcile duration", mutate: func(c *config.Config) { c.ReconcileInterval = 0 }, wantMessage: "durations"},
 		{name: "backoff duration", mutate: func(c *config.Config) { c.ReconcileMaxBackoff = 0 }, wantMessage: "durations"},
 		{name: "deployment duration", mutate: func(c *config.Config) { c.DeploymentTimeout = 0 }, wantMessage: "durations"},

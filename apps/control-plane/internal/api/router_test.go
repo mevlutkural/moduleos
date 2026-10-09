@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -944,7 +945,14 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	queue := &routerRecordingQueue{}
-	service := controlapp.NewService(st, swarmfake.New(), "moduleos.local", slog.New(slog.NewTextHandler(io.Discard, nil))).WithReconcileQueue(queue)
+	allowedRoot := t.TempDir()
+	mountSource := filepath.Join(allowedRoot, "data")
+	if err := os.Mkdir(mountSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service := controlapp.NewService(st, swarmfake.New(), "moduleos.local", slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithReconcileQueue(queue).
+		WithRuntimeLimits(20, []string{allowedRoot}, time.Minute)
 	options := validRouterOptions()
 	options.Store = st
 	options.Projects = service
@@ -955,7 +963,6 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 		t.Fatal(err)
 	}
 	contractRouter := contractRouterForTest(t)
-	mountSource := t.TempDir()
 	resolvedMountSource, err := filepath.EvalSymlinks(mountSource)
 	if err != nil {
 		t.Fatal(err)
