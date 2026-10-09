@@ -285,6 +285,8 @@ func validateCreateApplicationRequest(request CreateApplicationRequest) map[stri
 	}
 	if request.IngressContainerPort.Null {
 		fields["ingress_container_port"] = "must be an integer"
+	} else if request.IngressContainerPort.Present && request.IngressContainerPort.Value > maximumApplicationPortNumber {
+		fields["ingress_container_port"] = "must be between 0 and 65535"
 	}
 	if len(request.EnvVars.Value) > maximumApplicationEnvironmentEntries {
 		fields["env_vars"] = "must contain at most 200 entries"
@@ -319,6 +321,8 @@ func validateUpdateApplicationRequest(request UpdateApplicationRequest) map[stri
 	}
 	if request.IngressContainerPort.Null {
 		fields["ingress_container_port"] = "must be an integer"
+	} else if request.IngressContainerPort.Present && request.IngressContainerPort.Value > maximumApplicationPortNumber {
+		fields["ingress_container_port"] = "must be between 0 and 65535"
 	}
 	if len(request.EnvVars.Value) > maximumApplicationEnvironmentEntries {
 		fields["env_vars"] = "must contain at most 200 entries"

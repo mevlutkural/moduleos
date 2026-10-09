@@ -26,7 +26,7 @@ func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
 	}
 
 	wantResponses := map[string][]string{
-		"POST /apps":                              {"201", "400", "401", "409", "413", "415", "422", "500", "503"},
+		"POST /apps":                              {"201", "400", "401", "404", "409", "413", "415", "422", "500", "503"},
 		"GET /apps":                               {"200", "401", "500", "503"},
 		"GET /apps/{name}":                        {"200", "400", "401", "404", "500", "503"},
 		"PATCH /apps/{name}":                      {"202", "400", "401", "404", "409", "412", "413", "415", "422", "428", "500", "503"},

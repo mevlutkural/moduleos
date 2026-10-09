@@ -237,7 +237,7 @@ func TestApplicationCreateDefaultsAndRejectsInvalidRequests(t *testing.T) {
 	}
 }
 
-func TestApplicationVolumeValidationPrecedesServiceMutation(t *testing.T) {
+func TestApplicationValidationPrecedesServiceMutation(t *testing.T) {
 	serviceCalls := 0
 	service := &applicationServiceStub{
 		create: func(context.Context, controlapp.CreateAppRequest) (*store.Application, error) {
@@ -251,13 +251,15 @@ func TestApplicationVolumeValidationPrecedesServiceMutation(t *testing.T) {
 	}
 	server := newApplicationServer(t, service, nil)
 	tests := []struct {
-		name, method, path, body, etag string
+		name, method, path, body, etag, field string
 	}{
-		{name: "create parent traversal", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data/../data","target":"/data"}]}`},
-		{name: "create trailing separator", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data/","target":"/data"}]}`},
-		{name: "create relative source", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"srv/data","target":"/data"}]}`},
-		{name: "create duplicate target", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/one","target":"/data"},{"source":"/srv/two","target":"/data"}]}`},
-		{name: "update noncanonical target", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data/"}]}`, etag: `"1"`},
+		{name: "create parent traversal", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data/../data","target":"/data"}]}`, field: "volumes"},
+		{name: "create trailing separator", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data/","target":"/data"}]}`, field: "volumes"},
+		{name: "create relative source", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"srv/data","target":"/data"}]}`, field: "volumes"},
+		{name: "create duplicate target", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/one","target":"/data"},{"source":"/srv/two","target":"/data"}]}`, field: "volumes"},
+		{name: "update noncanonical target", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data/"}]}`, etag: `"1"`, field: "volumes"},
+		{name: "create ingress port overflow", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","ingress_container_port":65536}`, field: "ingress_container_port"},
+		{name: "update ingress port overflow", method: http.MethodPatch, path: "/apps/api", body: `{"ingress_container_port":65536}`, etag: `"1"`, field: "ingress_container_port"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -266,7 +268,7 @@ func TestApplicationVolumeValidationPrecedesServiceMutation(t *testing.T) {
 				t.Fatalf("status = %d", response.StatusCode)
 			}
 			var envelope apiresponse.ErrorResponse
-			if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil || envelope.Error.Fields["volumes"] == "" {
+			if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil || envelope.Error.Fields[test.field] == "" {
 				t.Fatalf("error = %#v / %v", envelope, err)
 			}
 		})
@@ -460,6 +462,7 @@ func TestApplicationMapperFailsClosedForCorruptState(t *testing.T) {
 			value.Volumes = `[{"source":"relative","target":"/data","read_only":false}]`
 		},
 		func(value *store.Application) { value.Expose = true },
+		func(value *store.Application) { value.IngressContainerPort = 65536 },
 	}
 	for index, mutate := range mutations {
 		application := validApplication()

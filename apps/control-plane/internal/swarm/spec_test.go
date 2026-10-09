@@ -256,6 +256,7 @@ func TestBuildDesiredServiceSpecRejectsInvalidInput(t *testing.T) {
 	tests := map[string]func(*DesiredServiceInput){
 		"empty image":                  func(in *DesiredServiceInput) { in.Image = "" },
 		"expose without explicit port": func(in *DesiredServiceInput) { in.Expose = true },
+		"ingress port overflow":        func(in *DesiredServiceInput) { in.IngressPort = 65536 },
 		"duplicate mount target": func(in *DesiredServiceInput) {
 			in.Volumes = []VolumeConfig{{Source: "/srv/a", Target: "/data"}, {Source: "/srv/b", Target: "/data"}}
 		},

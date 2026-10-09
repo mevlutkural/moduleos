@@ -170,6 +170,7 @@ func TestCreateAppValidationDefaultsAndQueue(t *testing.T) {
 		{name: "replica maximum", request: CreateAppRequest{Name: "too-many", Image: "nginx:1.27", Replicas: 3}},
 		{name: "unsupported source", request: CreateAppRequest{Name: "tar-source", Image: "bundle.tar", SourceType: store.SourceTypeTar}},
 		{name: "exposure without port", request: CreateAppRequest{Name: "bad-expose", Image: "nginx:1.27", Expose: true}},
+		{name: "ingress port overflow", request: CreateAppRequest{Name: "bad-ingress-port", Image: "nginx:1.27", IngressContainerPort: 65536}},
 		{name: "relative mount", request: CreateAppRequest{Name: "relative-mount", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "relative", Target: "/data"}}}},
 		{name: "noncanonical mount source", request: CreateAppRequest{Name: "noncanonical-source", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data/../data", Target: "/data"}}}},
 		{name: "noncanonical mount target", request: CreateAppRequest{Name: "noncanonical-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data/"}}}},
@@ -433,6 +434,7 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 	noncanonicalSource := []swarm.VolumeConfig{{Source: "/srv/moduleos/data/../data", Target: "/data"}}
 	noncanonicalTarget := []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data/"}}
 	badPorts := []swarm.PortConfig{{ContainerPort: 0}}
+	ingressPortOverflow := uint32(65536)
 	expose := true
 	requests := []UpdateAppRequest{
 		{AppName: created.Name, ExpectedGeneration: -1},
@@ -441,6 +443,7 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &noncanonicalSource},
 		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &noncanonicalTarget},
 		{AppName: created.Name, ExpectedGeneration: -1, Ports: &badPorts},
+		{AppName: created.Name, ExpectedGeneration: -1, IngressContainerPort: &ingressPortOverflow},
 		{AppName: created.Name, ExpectedGeneration: -1, Expose: &expose},
 	}
 	for index, request := range requests {

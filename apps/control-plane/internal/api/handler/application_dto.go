@@ -19,6 +19,7 @@ const (
 	maximumApplicationEnvironmentEntries = 200
 	maximumApplicationPorts              = 20
 	maximumApplicationVolumes            = 20
+	maximumApplicationPortNumber         = 65535
 )
 
 type optionalValue[T any] struct {
@@ -135,6 +136,7 @@ func mapApplicationResponse(application *store.Application) (ApplicationResponse
 		!validImageReference(application.Image) || !validOptionalImageReference(application.ObservedImage) ||
 		!knownApplicationStatus(application.Status) || !knownDesiredRunState(application.DesiredRunState) ||
 		!knownObservedState(application.ObservedState) || application.Replicas < 0 ||
+		application.IngressContainerPort > maximumApplicationPortNumber ||
 		application.DesiredGeneration < 1 || application.ObservedGeneration < 0 ||
 		application.ObservedGeneration > application.DesiredGeneration || application.ReconcileAttempt < 0 ||
 		application.CreatedAt.IsZero() || application.UpdatedAt.IsZero() || application.UpdatedAt.Before(application.CreatedAt) {
@@ -246,7 +248,7 @@ func decodeCanonicalPorts(raw string) ([]ApplicationPortResponse, error) {
 	result := make([]ApplicationPortResponse, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		if value.ContainerPort == 0 || value.ContainerPort > 65535 || value.PublishedPort > 65535 {
+		if value.ContainerPort == 0 || value.ContainerPort > maximumApplicationPortNumber || value.PublishedPort > maximumApplicationPortNumber {
 			return nil, errInvalidPublicState
 		}
 		protocol := value.Protocol

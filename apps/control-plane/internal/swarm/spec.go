@@ -19,6 +19,8 @@ var ErrInvalidSpec = errors.New("invalid desired service spec")
 var ErrOwnershipConflict = errors.New("resource ownership conflict")
 var ErrImageResolution = errors.New("image resolution failed")
 
+const maximumPortNumber uint32 = 65535
+
 func IsImmutableImageReference(image string) bool {
 	named, err := reference.ParseNormalizedNamed(image)
 	if err != nil {
@@ -123,6 +125,9 @@ func BuildDesiredServiceSpec(input DesiredServiceInput) (ServiceSpec, error) {
 	input.Image = reference.FamiliarString(reference.TagNameOnly(namedImage))
 	if input.Replicas < 0 || input.Generation < 0 {
 		return ServiceSpec{}, fmt.Errorf("%w: replicas and generation cannot be negative", ErrInvalidSpec)
+	}
+	if input.IngressPort > maximumPortNumber {
+		return ServiceSpec{}, fmt.Errorf("%w: ingress port outside 0..65535", ErrInvalidSpec)
 	}
 	if input.ProjectNetwork.Network == "" {
 		return ServiceSpec{}, fmt.Errorf("%w: project network is required", ErrInvalidSpec)
@@ -290,7 +295,7 @@ func normalizePorts(ports []PortConfig) ([]PortConfig, error) {
 	result := append([]PortConfig(nil), ports...)
 	seen := make(map[string]struct{}, len(result))
 	for i := range result {
-		if result[i].ContainerPort == 0 || result[i].ContainerPort > 65535 || result[i].PublishedPort > 65535 {
+		if result[i].ContainerPort == 0 || result[i].ContainerPort > maximumPortNumber || result[i].PublishedPort > maximumPortNumber {
 			return nil, fmt.Errorf("%w: port outside 1..65535", ErrInvalidSpec)
 		}
 		if result[i].Protocol == "" {

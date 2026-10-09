@@ -1073,6 +1073,7 @@ func TestRouterApplicationFailureResponsesMatchOpenAPI(t *testing.T) {
 		{name: "malformed JSON", method: http.MethodPost, path: "/api/v1/apps", body: `{"name":`, contentType: fiber.MIMEApplicationJSON, authorized: true, wantStatus: 400},
 		{name: "wrong media", method: http.MethodPost, path: "/api/v1/apps", body: `{}`, contentType: fiber.MIMETextPlain, authorized: true, wantStatus: 415},
 		{name: "validation", method: http.MethodPost, path: "/api/v1/apps", body: `{}`, contentType: fiber.MIMEApplicationJSON, authorized: true, wantStatus: 422},
+		{name: "missing project", method: http.MethodPost, path: "/api/v1/apps", body: `{"name":"api","project_slug":"missing","image":"nginx:1.27"}`, contentType: fiber.MIMEApplicationJSON, authorized: true, wantStatus: 404},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
