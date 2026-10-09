@@ -256,11 +256,15 @@ func TestBuildDesiredServiceSpecRejectsInvalidInput(t *testing.T) {
 	tests := map[string]func(*DesiredServiceInput){
 		"empty image":                  func(in *DesiredServiceInput) { in.Image = "" },
 		"expose without explicit port": func(in *DesiredServiceInput) { in.Expose = true },
+		"ingress port overflow":        func(in *DesiredServiceInput) { in.IngressPort = 65536 },
 		"duplicate mount target": func(in *DesiredServiceInput) {
 			in.Volumes = []VolumeConfig{{Source: "/srv/a", Target: "/data"}, {Source: "/srv/b", Target: "/data"}}
 		},
 		"relative mount": func(in *DesiredServiceInput) {
 			in.Volumes = []VolumeConfig{{Source: "relative", Target: "/data"}}
+		},
+		"root mount target": func(in *DesiredServiceInput) {
+			in.Volumes = []VolumeConfig{{Source: "/srv/data", Target: "/"}}
 		},
 		"duplicate published port": func(in *DesiredServiceInput) {
 			in.Ports = []PortConfig{{ContainerPort: 80, PublishedPort: 8080}, {ContainerPort: 81, PublishedPort: 8080}}
@@ -268,7 +272,14 @@ func TestBuildDesiredServiceSpecRejectsInvalidInput(t *testing.T) {
 		"invalid protocol": func(in *DesiredServiceInput) {
 			in.Ports = []PortConfig{{ContainerPort: 53, PublishedPort: 53, Protocol: "sctp"}}
 		},
-		"duplicate env": func(in *DesiredServiceInput) { in.Environment = []string{"A=1", "A=2"} },
+		"duplicate env":   func(in *DesiredServiceInput) { in.Environment = []string{"A=1", "A=2"} },
+		"environment NUL": func(in *DesiredServiceInput) { in.Environment = []string{"TOKEN=a\x00b"} },
+		"mount source NUL": func(in *DesiredServiceInput) {
+			in.Volumes = []VolumeConfig{{Source: "/srv/data\x00suffix", Target: "/data"}}
+		},
+		"mount target NUL": func(in *DesiredServiceInput) {
+			in.Volumes = []VolumeConfig{{Source: "/srv/data", Target: "/data\x00suffix"}}
+		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -20,6 +20,8 @@ tags:
     description: Process liveness, dependency readiness, and build metadata.
   - name: Projects
     description: Durable project boundaries and cross-project network-link intent.
+  - name: Applications
+    description: Durable application desired state and asynchronous lifecycle intent.
 security:
   - bearerAuth: []
 paths:
@@ -147,6 +149,206 @@ paths:
                     build_date: "2026-10-08T00:00:00Z"
         "500":
           $ref: "#/components/responses/InternalError"
+  /apps:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    post:
+      operationId: createApplication
+      tags: [Applications]
+      summary: Create an application
+      description: Persists application desired state and queues asynchronous reconciliation.
+      requestBody:
+        description: Image-based application desired state.
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateApplicationRequest"}
+            example: {name: api, project_slug: root, image: "nginx:1.27", replicas: 2}
+      responses:
+        "201":
+          description: Application intent was created.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+            Location: {$ref: "#/components/headers/Location"}
+            ETag: {$ref: "#/components/headers/ApplicationETag"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Application"}
+              examples:
+                current: {$ref: "#/components/examples/Application"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "413": {$ref: "#/components/responses/PayloadTooLarge"}
+        "415": {$ref: "#/components/responses/UnsupportedMediaType"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+    get:
+      operationId: listApplications
+      tags: [Applications]
+      summary: List applications
+      responses:
+        "200":
+          description: Bounded application collection.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ApplicationCollection"}
+              example: {applications: [], total: 0}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /apps/{name}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ApplicationName"
+    get:
+      operationId: getApplication
+      tags: [Applications]
+      summary: Get an application
+      responses:
+        "200":
+          description: Current durable desired and observed application state.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+            ETag: {$ref: "#/components/headers/ApplicationETag"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Application"}
+              examples:
+                current: {$ref: "#/components/examples/Application"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+    patch:
+      operationId: updateApplication
+      tags: [Applications]
+      summary: Replace selected application configuration fields
+      description: Replaces each included collection atomically and queues reconciliation only when desired state changes.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        description: Mutable configuration fields; omitted fields remain unchanged.
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/UpdateApplicationRequest"}
+            example: {env_vars: {MODE: production}, ports: [], volumes: []}
+      responses:
+        "202":
+          description: Updated desired state was accepted.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+            ETag: {$ref: "#/components/headers/ApplicationETag"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Application"}
+              examples:
+                current: {$ref: "#/components/examples/Application"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
+        "413": {$ref: "#/components/responses/PayloadTooLarge"}
+        "415": {$ref: "#/components/responses/UnsupportedMediaType"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+    delete:
+      operationId: deleteApplication
+      tags: [Applications]
+      summary: Request application deletion
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "202": {$ref: "#/components/responses/ApplicationOperationAccepted"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /apps/{name}/start:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ApplicationName"
+      - $ref: "#/components/parameters/IfMatch"
+    post:
+      operationId: startApplication
+      tags: [Applications]
+      summary: Request the running desired state
+      responses:
+        "202": {$ref: "#/components/responses/ApplicationOperationAccepted"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /apps/{name}/stop:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ApplicationName"
+      - $ref: "#/components/parameters/IfMatch"
+    post:
+      operationId: stopApplication
+      tags: [Applications]
+      summary: Request the stopped desired state
+      responses:
+        "202": {$ref: "#/components/responses/ApplicationOperationAccepted"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /apps/{name}/scale:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ApplicationName"
+      - $ref: "#/components/parameters/IfMatch"
+    post:
+      operationId: scaleApplication
+      tags: [Applications]
+      summary: Replace the desired replica count
+      description: Atomically records a replica-count intent when the supplied generation is current.
+      requestBody:
+        description: Desired replica count, where zero requests the stopped state.
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ScaleApplicationRequest"}
+            example: {replicas: 3}
+      responses:
+        "202": {$ref: "#/components/responses/ApplicationOperationAccepted"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
+        "413": {$ref: "#/components/responses/PayloadTooLarge"}
+        "415": {$ref: "#/components/responses/UnsupportedMediaType"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
   /projects:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -389,6 +591,30 @@ paths:
         "500": {$ref: "#/components/responses/InternalError"}
         "503": {$ref: "#/components/responses/ServiceUnavailable"}
 components:
+  examples:
+    Application:
+      summary: Redacted application state
+      description: Example application representation with secret values and host paths removed.
+      value:
+        id: 20000000-0000-4000-8000-000000000001
+        project_id: 00000000-0000-0000-0000-000000000001
+        name: api
+        source_type: image
+        image: "nginx:1.27"
+        status: created
+        replicas: 2
+        desired_run_state: running
+        desired_generation: 1
+        observed_generation: 0
+        observed_state: pending
+        reconcile_retryable: false
+        env_vars: {SECRET: {redacted: true}}
+        ports: [{container_port: 8080, published_port: 0, protocol: tcp, publish_mode: ingress}]
+        volumes: [{target: /data, read_only: true, source_redacted: true}]
+        expose: false
+        ingress_container_port: 0
+        created_at: "2026-10-09T09:00:00Z"
+        updated_at: "2026-10-09T09:00:00Z"
   parameters:
     RequestID:
       name: X-Request-ID
@@ -419,6 +645,26 @@ components:
         type: string
         format: uuid
         pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ApplicationName:
+      name: name
+      in: path
+      required: true
+      description: Globally unique canonical application name.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 63
+        pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Strong ETag containing the expected positive desired generation.
+      schema:
+        type: string
+        minLength: 3
+        maxLength: 21
+        pattern: '^"(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])"$'
   securitySchemes:
     bearerAuth:
       type: http
@@ -452,6 +698,12 @@ components:
       schema:
         type: string
         pattern: "^/api/v1/"
+    ApplicationETag:
+      description: Strong ETag containing the current positive desired generation.
+      required: true
+      schema:
+        type: string
+        pattern: '^"[1-9][0-9]*"$'
   responses:
     BadRequest:
       $ref: "#/components/responses/GenericBadRequest"
@@ -515,6 +767,32 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+    PreconditionFailed:
+      description: The supplied application generation is stale.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    PreconditionRequired:
+      description: A canonical If-Match application generation is required.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    ApplicationOperationAccepted:
+      description: Durable application lifecycle intent was accepted.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+        ETag: {$ref: "#/components/headers/ApplicationETag"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ApplicationOperation"}
+          example: {operation: scale, resource: api, status: accepted, generation: 4}
     ServiceUnavailable:
       description: Work was cancelled, timed out, or a required dependency is temporarily unavailable.
       headers:
@@ -543,6 +821,238 @@ components:
                   request_id: 550e8400-e29b-41d4-a716-446655440000
                   retryable: false
   schemas:
+    ApplicationPortInput:
+      description: Container port and optional Swarm publication settings.
+      example: {container_port: 8080, published_port: 0, protocol: tcp, publish_mode: ingress}
+      type: object
+      additionalProperties: false
+      required: [container_port]
+      properties:
+        container_port: {type: integer, minimum: 1, maximum: 65535, example: 8080}
+        published_port: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        protocol: {type: string, enum: [tcp, udp], default: tcp}
+        publish_mode: {type: string, enum: [ingress, host], default: ingress}
+    ContainerImageReferenceSyntax:
+      description: Docker-compatible normalized container image name with an optional tag and SHA-256 content digest.
+      type: string
+      minLength: 1
+      anyOf:
+        - maxLength: 63
+        - pattern: '[g-zG-Z._/@:-]'
+      pattern: '^(?:(?:(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])(?:\.(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]))*|\[(?:[A-Fa-f0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$'
+      example: "ghcr.io/mevlutkural/moduleos:v0.1.0"
+    ContainerImageReference:
+      description: Desired image reference accepted from an API client.
+      example: "ghcr.io/mevlutkural/moduleos:v0.1.0"
+      allOf:
+        - {$ref: "#/components/schemas/ContainerImageReferenceSyntax"}
+        - {maxLength: 255}
+    PersistedContainerImageReference:
+      description: Persisted desired or observed image reference, including a SHA-256 digest appended during resolution or rollback.
+      example: "ghcr.io/mevlutkural/moduleos:v0.1.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      allOf:
+        - {$ref: "#/components/schemas/ContainerImageReferenceSyntax"}
+        - {maxLength: 327}
+    CanonicalMountPath:
+      description: Canonical absolute non-root POSIX path without NUL bytes, empty segments, or dot segments.
+      type: string
+      minLength: 2
+      pattern: '^/(?:[^./\x00][^/\x00]*|\.{1,2}[^./\x00][^/\x00]*|\.{3,}[^/\x00]*)(?:/(?:[^./\x00][^/\x00]*|\.{1,2}[^./\x00][^/\x00]*|\.{3,}[^/\x00]*))*$'
+    ApplicationVolumeInput:
+      description: >-
+        Validated bind mount accepted as private desired state. Source and target
+        must be canonical absolute paths without redundant separators, trailing
+        separators, dot segments, or parent traversal; targets must be unique
+        and cannot be the filesystem root. The source must already exist,
+        resolve below exactly one configured non-overlapping allowed mount root,
+        and cannot be a strict ancestor or descendant of another application's
+        mount source.
+        Bind mounts are disabled when no roots are configured.
+      example: {source: /srv/moduleos-data/api, target: /data, read_only: true}
+      type: object
+      additionalProperties: false
+      required: [source, target]
+      properties:
+        source: {$ref: "#/components/schemas/CanonicalMountPath"}
+        target: {$ref: "#/components/schemas/CanonicalMountPath"}
+        read_only: {type: boolean, default: false}
+    CreateApplicationRequest:
+      description: Complete desired state for a new image-based application.
+      type: object
+      additionalProperties: false
+      required: [name, image]
+      anyOf:
+        - properties:
+            expose: {type: boolean, enum: [false]}
+        - required: [ingress_container_port]
+          properties:
+            ingress_container_port: {type: integer, minimum: 1, maximum: 65535}
+      properties:
+        name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", example: api}
+        project_slug: {type: string, minLength: 1, maxLength: 48, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", default: root, example: root}
+        image: {$ref: "#/components/schemas/ContainerImageReference"}
+        replicas:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 1
+          example: 2
+          description: Initial desired replica count; the deployment-specific MAX_REPLICAS limit may be lower.
+        env_vars:
+          type: object
+          maxProperties: 200
+          propertyNames: {type: string, pattern: '^[\p{L}_][\p{L}\p{Nd}_]*$'}
+          additionalProperties: {type: string, pattern: '^[^\x00]*$'}
+          example: {MODE: production}
+        ports:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/ApplicationPortInput"}
+          example: [{container_port: 8080}]
+        volumes:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/ApplicationVolumeInput"}
+          example: [{source: /srv/moduleos-data/api, target: /data, read_only: true}]
+        expose: {type: boolean, default: false, example: false}
+        ingress_container_port: {type: integer, minimum: 0, maximum: 65535, default: 0, example: 0}
+    UpdateApplicationRequest:
+      description: Full replacement values for each included mutable configuration field.
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      anyOf:
+        - properties:
+            expose: {type: boolean, enum: [false]}
+        - properties:
+            ingress_container_port: {type: integer, minimum: 1, maximum: 65535}
+      properties:
+        env_vars:
+          type: object
+          maxProperties: 200
+          propertyNames: {type: string, pattern: '^[\p{L}_][\p{L}\p{Nd}_]*$'}
+          additionalProperties: {type: string, pattern: '^[^\x00]*$'}
+          example: {MODE: production}
+        ports:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/ApplicationPortInput"}
+          example: []
+        volumes:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/ApplicationVolumeInput"}
+          example: []
+        expose: {type: boolean, example: false}
+        ingress_container_port: {type: integer, minimum: 0, maximum: 65535, example: 0}
+    ScaleApplicationRequest:
+      description: Complete desired replica-count replacement.
+      example: {replicas: 3}
+      type: object
+      additionalProperties: false
+      required: [replicas]
+      properties:
+        replicas:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          example: 3
+          description: Desired scale target, including zero; the deployment-specific MAX_REPLICAS limit may be lower.
+    RedactedValue:
+      description: Marker proving that a configured value exists without exposing it.
+      example: {redacted: true}
+      type: object
+      additionalProperties: false
+      required: [redacted]
+      properties:
+        redacted: {type: boolean, const: true}
+    ApplicationPort:
+      description: Normalized public port configuration.
+      example: {container_port: 8080, published_port: 0, protocol: tcp, publish_mode: ingress}
+      type: object
+      additionalProperties: false
+      required: [container_port, published_port, protocol, publish_mode]
+      properties:
+        container_port: {type: integer, minimum: 1, maximum: 65535}
+        published_port: {type: integer, minimum: 0, maximum: 65535}
+        protocol: {type: string, enum: [tcp, udp]}
+        publish_mode: {type: string, enum: [ingress, host]}
+    ApplicationVolume:
+      description: Public mount descriptor that never exposes its host source path.
+      example: {target: /data, read_only: true, source_redacted: true}
+      type: object
+      additionalProperties: false
+      required: [target, read_only, source_redacted]
+      properties:
+        target: {type: string, minLength: 1, pattern: "^/"}
+        read_only: {type: boolean}
+        source_redacted: {type: boolean, const: true}
+    Application:
+      description: Public application state with environment values and host paths redacted.
+      type: object
+      additionalProperties: false
+      required: [id, project_id, name, source_type, image, status, replicas, desired_run_state, desired_generation, observed_generation, observed_state, reconcile_retryable, env_vars, ports, volumes, expose, ingress_container_port, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid, example: 20000000-0000-4000-8000-000000000001}
+        project_id: {type: string, format: uuid, example: 00000000-0000-0000-0000-000000000001}
+        name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", example: api}
+        source_type: {type: string, const: image, example: image}
+        image: {$ref: "#/components/schemas/PersistedContainerImageReference"}
+        observed_image: {$ref: "#/components/schemas/PersistedContainerImageReference"}
+        status: {$ref: "#/components/schemas/ApplicationStatus"}
+        replicas: {type: integer, minimum: 0, example: 2}
+        desired_run_state: {$ref: "#/components/schemas/DesiredRunState"}
+        desired_generation: {type: integer, format: int64, minimum: 1, example: 3}
+        observed_generation: {type: integer, format: int64, minimum: 0, example: 2}
+        observed_state: {$ref: "#/components/schemas/ObservedState"}
+        reconcile_error_code: {type: string, pattern: "^[a-z][a-z0-9_]{0,63}$", example: image_pull_failed}
+        reconcile_retryable: {type: boolean, example: false}
+        last_transition_at: {type: string, format: date-time, example: "2026-10-09T09:00:00Z"}
+        last_reconciled_at: {type: string, format: date-time, example: "2026-10-09T09:00:05Z"}
+        deletion_requested_at: {type: string, format: date-time, example: "2026-10-09T10:00:00Z"}
+        env_vars:
+          type: object
+          maxProperties: 200
+          additionalProperties: {$ref: "#/components/schemas/RedactedValue"}
+          example: {SECRET: {redacted: true}}
+        ports:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/ApplicationPort"}
+          example: [{container_port: 8080, published_port: 0, protocol: tcp, publish_mode: ingress}]
+        volumes:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/ApplicationVolume"}
+          example: [{target: /data, read_only: true, source_redacted: true}]
+        expose: {type: boolean, example: false}
+        ingress_container_port: {type: integer, minimum: 0, maximum: 65535, example: 0}
+        created_at: {type: string, format: date-time, example: "2026-10-09T09:00:00Z"}
+        updated_at: {type: string, format: date-time, example: "2026-10-09T09:00:05Z"}
+    ApplicationCollection:
+      description: Bounded application list with explicit empty-array semantics.
+      example: {applications: [], total: 0}
+      type: object
+      additionalProperties: false
+      required: [applications, total]
+      properties:
+        applications:
+          type: array
+          maxItems: 10000
+          items: {$ref: "#/components/schemas/Application"}
+          example: []
+        total: {type: integer, minimum: 0, maximum: 10000}
+    ApplicationOperation:
+      description: Durable asynchronous application operation accepted by the control plane.
+      example: {operation: scale, resource: api, status: accepted, generation: 4}
+      type: object
+      additionalProperties: false
+      required: [operation, resource, status, generation]
+      properties:
+        operation: {type: string, enum: [delete, start, stop, scale], example: scale}
+        resource: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"}
+        status: {type: string, const: accepted}
+        generation: {type: integer, format: int64, minimum: 1}
     CreateProjectRequest:
       description: Project identity accepted by the create operation.
       type: object

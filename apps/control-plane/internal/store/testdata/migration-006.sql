@@ -27,6 +27,44 @@ INSERT INTO applications (
         '10000000-0000-0000-0000-000000000001',
         'legacy-stopped', 'image', 'redis:7-alpine', 'stopped', 0,
         '{}', '[]', '[]', 0, '', '2025-03-02 03:04:05', '2025-03-03 04:05:06'
+    ),
+    (
+        '20000000-0000-0000-0000-000000000004',
+        '10000000-0000-0000-0000-000000000001',
+        'legacy-null-collections', 'image', 'alpine:3.22', 'created', 1,
+        'null', 'null', 'null', 0, '', '2025-04-02 03:04:05', '2025-04-03 04:05:06'
+    ),
+    (
+        '20000000-0000-0000-0000-000000000005',
+        '10000000-0000-0000-0000-000000000001',
+        'legacy-port-defaults', 'image', 'caddy:2.10', 'created', 1,
+        '{}',
+        '[{"container_port":8080,"published_port":18080,"protocol":"udp","publish_mode":"ingress"},{"container_port":8080,"published_port":18080,"protocol":"tcp","publish_mode":"ingress"},{"container_port":8080,"published_port":18080,"protocol":"tcp","publish_mode":"host"},{"container_port":9090,"published_port":0,"protocol":"","publish_mode":""}]',
+        '[]', 0, '', '2025-05-02 03:04:05', '2025-05-03 04:05:06'
+    ),
+    (
+        '20000000-0000-0000-0000-000000000006',
+        '10000000-0000-0000-0000-000000000001',
+        'legacy-volume-paths', 'image', 'busybox:1.37', 'created', 1,
+        '{}', '[]',
+        '[{"source":"/srv/legacy/./data/../data","target":"/z/../data","read_only":true},{"source":"//srv//legacy-cache/","target":"/cache/./","read_only":false}]',
+        0, '', '2025-06-02 03:04:05', '2025-06-03 04:05:06'
+    ),
+    (
+        '20000000-0000-0000-0000-000000000007',
+        '10000000-0000-0000-0000-000000000001',
+        'legacy-volume-conflict', 'image', 'busybox:1.37', 'created', 1,
+        '{}', '[]',
+        '[{"source":"/srv/one","target":"/data/../cache","read_only":false},{"source":"/srv/two","target":"/cache","read_only":false}]',
+        0, '', '2025-07-02 03:04:05', '2025-07-03 04:05:06'
+    ),
+    (
+        '20000000-0000-0000-0000-000000000008',
+        '10000000-0000-0000-0000-000000000001',
+        'legacy-root-target', 'image', 'busybox:1.37', 'created', 1,
+        '{}', '[]',
+        '[{"source":"/srv/root-target","target":"/data/..","read_only":false}]',
+        0, '', '2025-08-02 03:04:05', '2025-08-03 04:05:06'
     );
 
 INSERT INTO deployments (

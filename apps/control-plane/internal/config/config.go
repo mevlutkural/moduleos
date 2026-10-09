@@ -80,6 +80,14 @@ func (c *Config) Validate() error {
 	if !strings.HasPrefix(c.DockerEndpoint, "unix://") && !strings.HasPrefix(c.DockerEndpoint, "tcp://") && !filepath.IsAbs(c.DockerEndpoint) {
 		return fmt.Errorf("DOCKER_ENDPOINT must be unix://, tcp://, or an absolute socket path")
 	}
+	if strings.HasPrefix(c.DockerEndpoint, "unix://") {
+		path := strings.TrimPrefix(c.DockerEndpoint, "unix://")
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return fmt.Errorf("DOCKER_ENDPOINT Unix socket path must be canonical and absolute")
+		}
+	} else if filepath.IsAbs(c.DockerEndpoint) && filepath.Clean(c.DockerEndpoint) != c.DockerEndpoint {
+		return fmt.Errorf("DOCKER_ENDPOINT socket path must be canonical")
+	}
 	if !dnsName.MatchString(c.BaseDomain) || !strings.Contains(c.BaseDomain, ".") {
 		return fmt.Errorf("BASE_DOMAIN must be a valid DNS name")
 	}
@@ -102,9 +110,14 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("DATABASE_PATH parent directory is not writable")
 		}
 	}
-	for _, root := range c.AllowedMountRoots {
-		if !filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator) {
-			return fmt.Errorf("ALLOWED_MOUNT_ROOTS entries must be absolute and cannot be root")
+	for index, root := range c.AllowedMountRoots {
+		if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) || strings.ContainsRune(root, '\x00') {
+			return fmt.Errorf("ALLOWED_MOUNT_ROOTS entries must be canonical absolute paths and cannot be root")
+		}
+		for _, previous := range c.AllowedMountRoots[:index] {
+			if configPathContains(previous, root) || configPathContains(root, previous) {
+				return fmt.Errorf("ALLOWED_MOUNT_ROOTS entries cannot overlap")
+			}
 		}
 	}
 	if c.ReconcileInterval <= 0 || c.ReconcileMaxBackoff <= 0 || c.DeploymentTimeout <= 0 || c.StabilizationWindow < 0 || c.ShutdownTimeout <= 0 {
@@ -123,6 +136,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("per-app SSE limit cannot exceed global SSE limit")
 	}
 	return nil
+}
+
+func configPathContains(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func (c *Config) SafeSummary() map[string]any {

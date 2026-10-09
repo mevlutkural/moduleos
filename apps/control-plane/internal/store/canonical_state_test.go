@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,7 +62,18 @@ func TestCanonicalStateRoundTripAndConstraints(t *testing.T) {
 	invalid := canonicalTestApp("invalid-json")
 	invalid.EnvVars = "KEY=value"
 	if err := st.CreateApplication(ctx, invalid); err == nil {
-		t.Fatal("invalid JSON must be rejected by the database")
+		t.Fatal("invalid JSON must be rejected")
+	}
+	for index, mutate := range []func(*Application){
+		func(value *Application) { value.EnvVars = "null" },
+		func(value *Application) { value.Ports = "null" },
+		func(value *Application) { value.Volumes = "null" },
+	} {
+		invalid = canonicalTestApp(fmt.Sprintf("null-collection-%d", index))
+		mutate(invalid)
+		if err := st.CreateApplication(ctx, invalid); err == nil {
+			t.Fatalf("null collection %d must be rejected", index)
+		}
 	}
 
 	invalid = canonicalTestApp("invalid-project")
@@ -280,6 +292,36 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if stopped.DesiredRunState != DesiredRunStateStopped || stopped.ObservedState != ObservedStateStopped || stopped.ResumeReplicas != 1 {
 		t.Fatalf("stopped legacy state changed: %#v", stopped)
 	}
+	nullCollections, err := upgraded.GetApplication(ctx, "legacy-null-collections")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nullCollections.EnvVars != "{}" || nullCollections.Ports != "[]" || nullCollections.Volumes != "[]" {
+		t.Fatalf("legacy null collections were not normalized: %#v", nullCollections)
+	}
+	portDefaults, err := upgraded.GetApplication(ctx, "legacy-port-defaults")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if portDefaults.Ports != `[{"container_port":8080,"published_port":18080,"protocol":"tcp","publish_mode":"host"},{"container_port":8080,"published_port":18080,"protocol":"tcp","publish_mode":"ingress"},{"container_port":8080,"published_port":18080,"protocol":"udp","publish_mode":"ingress"},{"container_port":9090,"published_port":0,"protocol":"tcp","publish_mode":"ingress"}]` {
+		t.Fatalf("legacy port defaults were not normalized: %#v", portDefaults)
+	}
+	volumePaths, err := upgraded.GetApplication(ctx, "legacy-volume-paths")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if volumePaths.Volumes != `[{"source":"/srv/legacy-cache","target":"/cache","read_only":false},{"source":"/srv/legacy/data","target":"/data","read_only":true}]` {
+		t.Fatalf("legacy volume paths were not normalized: %#v", volumePaths)
+	}
+	for _, name := range []string{"legacy-volume-conflict", "legacy-root-target"} {
+		application, err := upgraded.GetApplication(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if application.Volumes != "[]" {
+			t.Fatalf("irreconcilable legacy volumes were not disabled for %s: %#v", name, application)
+		}
+	}
 	project, err := upgraded.GetProject(ctx, "legacy-project")
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +368,7 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if err := upgraded.db.QueryRowContext(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&migrationVersion, &migrationDirty); err != nil {
 		t.Fatal(err)
 	}
-	if migrationVersion != "10" || migrationDirty {
+	if migrationVersion != "11" || migrationDirty {
 		t.Fatalf("migration state version=%s dirty=%v", migrationVersion, migrationDirty)
 	}
 	var integrity string

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -26,6 +27,7 @@ type Service struct {
 	log               *slog.Logger
 	queue             ReconcileQueue
 	allowedMountRoots []string
+	dockerSocketPath  string
 	maxReplicas       int
 	maxApplications   int
 	maxProjects       int
@@ -95,6 +97,7 @@ func NewService(st store.Store, sw swarm.Client, baseDomain string, log *slog.Lo
 		baseDomain:        baseDomain,
 		ingressNetwork:    "moduleos-ingress",
 		log:               log,
+		dockerSocketPath:  "/var/run/docker.sock",
 		maxReplicas:       20,
 		maxApplications:   100,
 		maxProjects:       20,
@@ -109,6 +112,22 @@ func (s *Service) WithRuntimeLimits(maxReplicas int, allowedMountRoots []string,
 	s.allowedMountRoots = append([]string(nil), allowedMountRoots...)
 	if deploymentTimeout > 0 {
 		s.deploymentTimeout = deploymentTimeout
+	}
+	return s
+}
+
+func (s *Service) WithDockerEndpoint(endpoint string) *Service {
+	path := endpoint
+	if strings.HasPrefix(endpoint, "unix://") {
+		path = strings.TrimPrefix(endpoint, "unix://")
+	} else if strings.HasPrefix(endpoint, "tcp://") {
+		s.dockerSocketPath = ""
+		return s
+	}
+	if filepath.IsAbs(path) && filepath.Clean(path) == path {
+		s.dockerSocketPath = path
+	} else {
+		s.dockerSocketPath = ""
 	}
 	return s
 }
@@ -229,7 +248,8 @@ func (s *Service) CreateApp(ctx context.Context, req CreateAppRequest) (*store.A
 	if replicas > s.maxReplicas {
 		return nil, fmt.Errorf("%w: replicas exceed configured maximum", store.ErrInvalidData)
 	}
-	if err := s.validateMountRoots(req.Volumes); err != nil {
+	volumes, err := s.canonicalizeMounts(ctx, req.Name, req.Volumes)
+	if err != nil {
 		return nil, err
 	}
 	if err := validateCollectionLimits(len(req.EnvVars), len(req.Ports), len(req.Volumes)); err != nil {
@@ -238,7 +258,7 @@ func (s *Service) CreateApp(ctx context.Context, req CreateAppRequest) (*store.A
 	if _, err := swarm.BuildDesiredServiceSpec(swarm.DesiredServiceInput{
 		ApplicationID: uuid.NewString(), ProjectID: project.ID, ProjectSlug: project.Slug,
 		Name: req.Name, Image: req.Image, DesiredRunning: true, Replicas: replicas, Generation: 1,
-		Environment: decodeEnvVars(encodeEnvVars(req.EnvVars)), Ports: req.Ports, Volumes: req.Volumes,
+		Environment: decodeEnvVars(encodeEnvVars(req.EnvVars)), Ports: req.Ports, Volumes: volumes,
 		ProjectNetwork: swarm.NetworkAttachment{Network: project.Network}, Expose: req.Expose,
 		IngressPort: req.IngressContainerPort, IngressNetwork: s.ingressNetwork, BaseDomain: s.baseDomain,
 	}); err != nil {
@@ -256,7 +276,7 @@ func (s *Service) CreateApp(ctx context.Context, req CreateAppRequest) (*store.A
 		Replicas:             replicas,
 		EnvVars:              encodeEnvVars(req.EnvVars),
 		Ports:                encodePorts(req.Ports),
-		Volumes:              encodeVolumes(req.Volumes),
+		Volumes:              encodeVolumes(volumes),
 		Expose:               req.Expose,
 		IngressContainerPort: req.IngressContainerPort,
 		DesiredRunState:      store.DesiredRunStateRunning,
@@ -326,6 +346,9 @@ func (s *Service) DeleteAppIntent(ctx context.Context, name string, expectedGene
 }
 
 func (s *Service) SetRunState(ctx context.Context, name string, state store.DesiredRunState, expectedGeneration int64) (*store.Application, error) {
+	if state != store.DesiredRunStateRunning && state != store.DesiredRunStateStopped {
+		return nil, fmt.Errorf("%w: invalid desired run state", store.ErrInvalidData)
+	}
 	if err := s.lockResources(ctx); err != nil {
 		return nil, err
 	}
@@ -337,6 +360,12 @@ func (s *Service) SetRunState(ctx context.Context, name string, state store.Desi
 	}
 	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
 		return nil, err
+	}
+	if current.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("%w: application is being deleted", store.ErrConflict)
+	}
+	if state == store.DesiredRunStateRunning && current.ResumeReplicas > s.maxReplicas {
+		return nil, fmt.Errorf("%w: resumed replicas exceed configured maximum", store.ErrConflict)
 	}
 	if current.DesiredRunState == state {
 		return current, nil
@@ -385,6 +414,9 @@ func (s *Service) ScaleAppIntent(ctx context.Context, name string, replicas int,
 	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
 		return nil, err
 	}
+	if current.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("%w: application is being deleted", store.ErrConflict)
+	}
 	if current.Replicas == replicas {
 		return current, nil
 	}
@@ -427,6 +459,9 @@ func (s *Service) UpdateApp(ctx context.Context, req UpdateAppRequest) (*store.A
 	if err := checkExpectedGeneration(current.DesiredGeneration, req.ExpectedGeneration); err != nil {
 		return nil, err
 	}
+	if current.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("%w: application is being deleted", store.ErrConflict)
+	}
 	if req.EnvVars != nil {
 		value := encodeEnvVars(req.EnvVars)
 		mutation.EnvVars = &value
@@ -436,10 +471,11 @@ func (s *Service) UpdateApp(ctx context.Context, req UpdateAppRequest) (*store.A
 		mutation.Ports = &value
 	}
 	if req.Volumes != nil {
-		if err := s.validateMountRoots(*req.Volumes); err != nil {
+		volumes, err := s.canonicalizeMounts(ctx, req.AppName, *req.Volumes)
+		if err != nil {
 			return nil, err
 		}
-		value := encodeVolumes(*req.Volumes)
+		value := encodeVolumes(volumes)
 		mutation.Volumes = &value
 	}
 	mutation.Expose = req.Expose
@@ -622,6 +658,9 @@ func (s *Service) UpdateAppStatus(ctx context.Context, name string, status store
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func (s *Service) buildDesiredServiceSpec(ctx context.Context, app *store.Application) (swarm.ServiceSpec, error) {
+	if app.Replicas > s.maxReplicas {
+		return swarm.ServiceSpec{}, fmt.Errorf("%w: replicas exceed configured maximum", store.ErrInvalidData)
+	}
 	project, err := s.store.GetProjectByID(ctx, app.ProjectID)
 	if err != nil {
 		return swarm.ServiceSpec{}, fmt.Errorf("resolve project for desired spec: %w", err)
@@ -634,7 +673,8 @@ func (s *Service) buildDesiredServiceSpec(ctx context.Context, app *store.Applic
 	if err != nil {
 		return swarm.ServiceSpec{}, err
 	}
-	if err := s.validateMountRoots(volumes); err != nil {
+	volumes, err = s.canonicalizeMounts(ctx, app.Name, volumes)
+	if err != nil {
 		return swarm.ServiceSpec{}, err
 	}
 	linkedNetworks := make([]swarm.NetworkAttachment, 0)
@@ -698,28 +738,174 @@ func isValidNameChar(c rune) bool {
 	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'
 }
 
-func (s *Service) validateMountRoots(volumes []swarm.VolumeConfig) error {
-	for _, volume := range volumes {
-		source := filepath.Clean(volume.Source)
-		if source == "/" || source == "/var/run/docker.sock" || source == "/proc" || strings.HasPrefix(source, "/proc/") || source == "/sys" || strings.HasPrefix(source, "/sys/") || source == "/dev" || strings.HasPrefix(source, "/dev/") || source == "/etc" || strings.HasPrefix(source, "/etc/") {
-			return fmt.Errorf("%w: mount source is denied", store.ErrInvalidData)
+func (s *Service) canonicalizeMounts(ctx context.Context, applicationName string, volumes []swarm.VolumeConfig) ([]swarm.VolumeConfig, error) {
+	canonical := append([]swarm.VolumeConfig(nil), volumes...)
+	if len(canonical) == 0 {
+		return canonical, nil
+	}
+	allowedRoots, err := s.canonicalAllowedMountRoots()
+	if err != nil {
+		return nil, err
+	}
+	for index := range canonical {
+		volume := &canonical[index]
+		if !filepath.IsAbs(volume.Source) || !filepath.IsAbs(volume.Target) ||
+			filepath.Clean(volume.Source) != volume.Source || filepath.Clean(volume.Target) != volume.Target {
+			return nil, fmt.Errorf("%w: mount source and target must be canonical absolute paths", store.ErrInvalidData)
 		}
-		if len(s.allowedMountRoots) == 0 {
-			continue
+		source, err := resolveMountPath(volume.Source)
+		if err != nil {
+			return nil, fmt.Errorf("%w: mount source cannot be resolved", store.ErrInvalidData)
+		}
+		if s.sensitiveMountSource(source) {
+			return nil, fmt.Errorf("%w: mount source is denied", store.ErrInvalidData)
 		}
 		allowed := false
-		for _, root := range s.allowedMountRoots {
-			relative, err := filepath.Rel(filepath.Clean(root), source)
-			if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		for _, root := range allowedRoots {
+			relative, err := filepath.Rel(root, source)
+			if err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 				allowed = true
 				break
 			}
 		}
 		if !allowed {
-			return fmt.Errorf("%w: mount source is outside allowed roots", store.ErrInvalidData)
+			return nil, fmt.Errorf("%w: mount source is outside allowed roots", store.ErrInvalidData)
+		}
+		volume.Source = source
+	}
+	if err := s.validateMountSourceIsolation(ctx, applicationName, canonical); err != nil {
+		return nil, err
+	}
+	return canonical, nil
+}
+
+func (s *Service) validateMountSourceIsolation(ctx context.Context, applicationName string, volumes []swarm.VolumeConfig) error {
+	for left := range volumes {
+		for right := 0; right < left; right++ {
+			if mountSourcesOverlap(volumes[left].Source, volumes[right].Source) {
+				return fmt.Errorf("%w: mount sources cannot contain one another", store.ErrInvalidData)
+			}
+		}
+	}
+	applications, err := s.store.ListApplications(ctx)
+	if err != nil {
+		return fmt.Errorf("list applications for mount isolation: %w", err)
+	}
+	for _, application := range applications {
+		if application.Name == applicationName {
+			continue
+		}
+		existing, err := decodeVolumes(application.Volumes)
+		if err != nil {
+			return err
+		}
+		for _, volume := range existing {
+			source, err := resolveMountPath(volume.Source)
+			if err != nil {
+				return fmt.Errorf("%w: persisted mount source cannot be resolved", store.ErrInvalidData)
+			}
+			for _, candidate := range volumes {
+				if mountSourcesOverlap(source, candidate.Source) {
+					return fmt.Errorf("%w: mount source overlaps another application", store.ErrInvalidData)
+				}
+			}
 		}
 	}
 	return nil
+}
+
+func mountSourcesOverlap(left, right string) bool {
+	return left != right && (pathContains(left, right) || pathContains(right, left))
+}
+
+func (s *Service) canonicalAllowedMountRoots() ([]string, error) {
+	if len(s.allowedMountRoots) == 0 {
+		return nil, fmt.Errorf("%w: bind mounts are disabled", store.ErrInvalidData)
+	}
+	resolved := make([]string, 0, len(s.allowedMountRoots))
+	for _, root := range s.allowedMountRoots {
+		canonical, err := resolveMountPath(root)
+		if err != nil {
+			return nil, fmt.Errorf("%w: allowed mount root cannot be resolved", store.ErrInvalidData)
+		}
+		info, err := os.Stat(canonical)
+		if err != nil || !info.IsDir() {
+			return nil, fmt.Errorf("%w: allowed mount root must be a directory", store.ErrInvalidData)
+		}
+		if sensitiveMountRoot(canonical) {
+			return nil, fmt.Errorf("%w: allowed mount root is denied", store.ErrInvalidData)
+		}
+		for _, existing := range resolved {
+			if pathContains(existing, canonical) || pathContains(canonical, existing) {
+				return nil, fmt.Errorf("%w: allowed mount roots cannot overlap", store.ErrInvalidData)
+			}
+		}
+		resolved = append(resolved, canonical)
+	}
+	return resolved, nil
+}
+
+func (s *Service) sensitiveMountSource(source string) bool {
+	if sensitiveMountRoot(source) {
+		return true
+	}
+	sockets := []string{"/var/run/docker.sock", "/run/docker.sock"}
+	dockerSocket, err := resolveMountPath("/var/run/docker.sock")
+	if err == nil {
+		sockets = append(sockets, dockerSocket)
+	}
+	dockerSocket, err = resolvePotentialPath("/var/run/docker.sock")
+	if err == nil {
+		sockets = append(sockets, dockerSocket)
+	}
+	if s.dockerSocketPath != "" {
+		sockets = append(sockets, s.dockerSocketPath)
+		configuredSocket, resolveErr := resolveMountPath(s.dockerSocketPath)
+		if resolveErr == nil {
+			sockets = append(sockets, configuredSocket)
+		}
+		configuredSocket, resolveErr = resolvePotentialPath(s.dockerSocketPath)
+		if resolveErr == nil {
+			sockets = append(sockets, configuredSocket)
+		}
+	}
+	for _, socket := range sockets {
+		if pathContains(source, socket) {
+			return true
+		}
+	}
+	return false
+}
+
+func sensitiveMountRoot(source string) bool {
+	return source == "/" || source == "/proc" || strings.HasPrefix(source, "/proc/") ||
+		source == "/sys" || strings.HasPrefix(source, "/sys/") ||
+		source == "/dev" || strings.HasPrefix(source, "/dev/") ||
+		source == "/etc" || strings.HasPrefix(source, "/etc/")
+}
+
+func pathContains(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// resolveMountPath requires the complete bind source to exist and resolves all
+// symlink components before the path is checked and persisted.
+func resolveMountPath(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func resolvePotentialPath(path string) (string, error) {
+	path = filepath.Clean(path)
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
 }
 
 func validateCollectionLimits(environment, ports, volumes int) error {
@@ -766,6 +952,9 @@ func applicationConfigEqual(left, right *store.Application) bool {
 }
 
 func encodeEnvVars(envVars map[string]string) string {
+	if envVars == nil {
+		return "{}"
+	}
 	encoded, err := json.Marshal(envVars)
 	if err != nil {
 		return "{}"
@@ -816,12 +1005,29 @@ func decodeVolumes(raw string) ([]swarm.VolumeConfig, error) {
 }
 
 func encodePorts(ports []swarm.PortConfig) string {
-	ordered := append([]swarm.PortConfig(nil), ports...)
-	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].ContainerPort == ordered[j].ContainerPort {
-			return ordered[i].PublishedPort < ordered[j].PublishedPort
+	ordered := make([]swarm.PortConfig, len(ports))
+	copy(ordered, ports)
+	for index := range ordered {
+		if ordered[index].Protocol == "" {
+			ordered[index].Protocol = "tcp"
 		}
-		return ordered[i].ContainerPort < ordered[j].ContainerPort
+		if ordered[index].PublishMode == "" {
+			ordered[index].PublishMode = "ingress"
+		}
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		left := ordered[i]
+		right := ordered[j]
+		if left.ContainerPort != right.ContainerPort {
+			return left.ContainerPort < right.ContainerPort
+		}
+		if left.PublishedPort != right.PublishedPort {
+			return left.PublishedPort < right.PublishedPort
+		}
+		if left.Protocol != right.Protocol {
+			return left.Protocol < right.Protocol
+		}
+		return left.PublishMode < right.PublishMode
 	})
 	encoded, err := json.Marshal(ordered)
 	if err != nil {
@@ -831,7 +1037,8 @@ func encodePorts(ports []swarm.PortConfig) string {
 }
 
 func encodeVolumes(volumes []swarm.VolumeConfig) string {
-	ordered := append([]swarm.VolumeConfig(nil), volumes...)
+	ordered := make([]swarm.VolumeConfig, len(volumes))
+	copy(ordered, volumes)
 	sort.Slice(ordered, func(i, j int) bool {
 		if ordered[i].Target == ordered[j].Target {
 			return ordered[i].Source < ordered[j].Source

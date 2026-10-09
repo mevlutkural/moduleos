@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -140,16 +142,20 @@ func TestServiceConfigurationAndAccessors(t *testing.T) {
 	}
 
 	roots := []string{"/srv/moduleos"}
-	service.WithRuntimeLimits(3, roots, 2*time.Second).WithIngressNetwork("custom-ingress")
+	service.WithRuntimeLimits(3, roots, 2*time.Second).WithDockerEndpoint("unix:///srv/moduleos/docker.sock").WithIngressNetwork("custom-ingress")
 	roots[0] = "/mutated"
 	if service.maxReplicas != 3 || service.deploymentTimeout != 2*time.Second ||
 		len(service.allowedMountRoots) != 1 || service.allowedMountRoots[0] != "/srv/moduleos" ||
-		service.IngressNetwork() != "custom-ingress" {
+		service.dockerSocketPath != "/srv/moduleos/docker.sock" || service.IngressNetwork() != "custom-ingress" {
 		t.Fatalf("runtime configuration was not applied defensively: %#v", service)
 	}
 	service.WithRuntimeLimits(0, nil, 0).WithResourceLimits(0, 0).WithIngressNetwork("")
 	if service.maxReplicas != 3 || service.deploymentTimeout != 2*time.Second || service.IngressNetwork() != "custom-ingress" {
 		t.Fatal("non-positive or empty overrides changed existing limits")
+	}
+	service.WithDockerEndpoint("tcp://127.0.0.1:2375")
+	if service.dockerSocketPath != "" {
+		t.Fatalf("TCP endpoint retained a local socket path: %q", service.dockerSocketPath)
 	}
 	serviceWithDefaultLogger := NewService(st, swarmfake.New(), "moduleos.local", nil)
 	if serviceWithDefaultLogger.log == nil {
@@ -159,7 +165,13 @@ func TestServiceConfigurationAndAccessors(t *testing.T) {
 
 func TestCreateAppValidationDefaultsAndQueue(t *testing.T) {
 	service, st, _, queue := newEdgeService(t)
-	service.WithRuntimeLimits(2, []string{"/srv/moduleos"}, time.Minute)
+	allowedRoot := t.TempDir()
+	mountSource := filepath.Join(allowedRoot, "data")
+	if err := os.Mkdir(mountSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsideRoot := t.TempDir()
+	service.WithRuntimeLimits(2, []string{allowedRoot}, time.Minute)
 
 	tests := []struct {
 		name    string
@@ -170,8 +182,14 @@ func TestCreateAppValidationDefaultsAndQueue(t *testing.T) {
 		{name: "replica maximum", request: CreateAppRequest{Name: "too-many", Image: "nginx:1.27", Replicas: 3}},
 		{name: "unsupported source", request: CreateAppRequest{Name: "tar-source", Image: "bundle.tar", SourceType: store.SourceTypeTar}},
 		{name: "exposure without port", request: CreateAppRequest{Name: "bad-expose", Image: "nginx:1.27", Expose: true}},
+		{name: "ingress port overflow", request: CreateAppRequest{Name: "bad-ingress-port", Image: "nginx:1.27", IngressContainerPort: 65536}},
+		{name: "environment NUL", request: CreateAppRequest{Name: "bad-environment", Image: "nginx:1.27", EnvVars: map[string]string{"TOKEN": "a\x00b"}}},
 		{name: "relative mount", request: CreateAppRequest{Name: "relative-mount", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "relative", Target: "/data"}}}},
-		{name: "outside allowed root", request: CreateAppRequest{Name: "outside-root", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/other", Target: "/data"}}}},
+		{name: "noncanonical mount source", request: CreateAppRequest{Name: "noncanonical-source", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: mountSource + "/../data", Target: "/data"}}}},
+		{name: "noncanonical mount target", request: CreateAppRequest{Name: "noncanonical-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: mountSource, Target: "/data/"}}}},
+		{name: "root mount target", request: CreateAppRequest{Name: "root-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: mountSource, Target: "/"}}}},
+		{name: "mount path NUL", request: CreateAppRequest{Name: "nul-mount", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: mountSource, Target: "/data\x00suffix"}}}},
+		{name: "outside allowed root", request: CreateAppRequest{Name: "outside-root", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: outsideRoot, Target: "/data"}}}},
 		{name: "sensitive mount", request: CreateAppRequest{Name: "docker-socket", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/var/run/docker.sock", Target: "/socket"}}}},
 	}
 	for _, test := range tests {
@@ -186,7 +204,7 @@ func TestCreateAppValidationDefaultsAndQueue(t *testing.T) {
 		Name:     "valid-app",
 		Image:    "nginx:1.27",
 		EnvVars:  map[string]string{"Z": "last", "A": "first"},
-		Volumes:  []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data"}},
+		Volumes:  []swarm.VolumeConfig{{Source: mountSource, Target: "/data"}},
 		Replicas: 0,
 	})
 	if created.Replicas != 1 || created.ResumeReplicas != 1 || created.SourceType != store.SourceTypeImage ||
@@ -225,6 +243,255 @@ func TestCreateAppCollectionLimits(t *testing.T) {
 		if _, err := service.CreateApp(t.Context(), request); !errors.Is(err, store.ErrInvalidData) {
 			t.Fatalf("CreateApp(%s) error = %v, want ErrInvalidData", request.Name, err)
 		}
+	}
+}
+
+func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	allowedRoot := t.TempDir()
+	inside := filepath.Join(allowedRoot, "inside")
+	outside := t.TempDir()
+	if err := os.Mkdir(inside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	insideLink := filepath.Join(allowedRoot, "inside-link")
+	escapeLink := filepath.Join(allowedRoot, "escape-link")
+	danglingLink := filepath.Join(allowedRoot, "dangling-link")
+	if err := os.Symlink(inside, insideLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(outside, escapeLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "missing"), danglingLink); err != nil {
+		t.Fatal(err)
+	}
+	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute)
+
+	for _, test := range []struct {
+		name   string
+		source string
+	}{
+		{name: "existing destination", source: escapeLink},
+		{name: "missing suffix", source: filepath.Join(escapeLink, "future")},
+		{name: "missing source", source: filepath.Join(allowedRoot, "missing")},
+		{name: "dangling symlink", source: danglingLink},
+		{name: "suffix below dangling symlink", source: filepath.Join(danglingLink, "future")},
+		{name: "allowed root itself", source: allowedRoot},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+				Name: "escape-create", Image: "nginx:1.27",
+				Volumes: []swarm.VolumeConfig{{Source: test.source, Target: "/data"}},
+			}); !errors.Is(err, store.ErrInvalidData) {
+				t.Fatalf("symlink escape create error = %v, want ErrInvalidData", err)
+			}
+			if _, err := st.GetApplication(t.Context(), "escape-create"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("rejected symlink escape was persisted: %v", err)
+			}
+		})
+	}
+
+	requestVolumes := []swarm.VolumeConfig{{Source: insideLink, Target: "/data"}}
+	created := mustCreateApp(t, service, CreateAppRequest{
+		Name: "inside-link", Image: "nginx:1.27", Volumes: requestVolumes,
+	})
+	if requestVolumes[0].Source != insideLink {
+		t.Fatalf("caller's mount input was mutated: %#v", requestVolumes)
+	}
+	resolvedInside, err := filepath.EvalSymlinks(inside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistedVolumes, err := decodeVolumes(created.Volumes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persistedVolumes) != 1 || persistedVolumes[0].Source != resolvedInside {
+		t.Fatalf("persisted mount source = %#v, want resolved source %q", persistedVolumes, resolvedInside)
+	}
+
+	queue.reset()
+	generation := created.DesiredGeneration
+	escapeVolumes := []swarm.VolumeConfig{{Source: escapeLink, Target: "/data"}}
+	if _, err := service.UpdateApp(t.Context(), UpdateAppRequest{
+		AppName: created.Name, ExpectedGeneration: generation, Volumes: &escapeVolumes,
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("symlink escape update error = %v, want ErrInvalidData", err)
+	}
+	unchanged, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.DesiredGeneration != generation || len(queue.snapshot()) != 0 {
+		t.Fatalf("rejected update mutated intent: app=%#v queue=%#v", unchanged, queue.snapshot())
+	}
+
+	unchanged.Volumes = encodeVolumes(escapeVolumes)
+	if err := st.UpdateApplication(t.Context(), unchanged); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.BuildDesiredServiceSpec(t.Context(), unchanged); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("persisted symlink escape desired spec error = %v, want ErrInvalidData", err)
+	}
+}
+
+func TestNestedMountSourcesRemainCompatibleWhenIsolated(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	allowedRoot := t.TempDir()
+	ancestor := filepath.Join(allowedRoot, "tenant")
+	source := filepath.Join(ancestor, "data")
+	descendant := filepath.Join(source, "nested")
+	if err := os.MkdirAll(descendant, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute)
+	created := mustCreateApp(t, service, CreateAppRequest{
+		Name: "legacy-nested", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: source, Target: "/data"}},
+	})
+	if _, err := service.BuildDesiredServiceSpec(t.Context(), created); err != nil {
+		t.Fatalf("isolated nested mount no longer converges after upgrade: %v", err)
+	}
+	selfAncestor := filepath.Join(allowedRoot, "self")
+	selfDescendant := filepath.Join(selfAncestor, "nested")
+	if err := os.MkdirAll(selfDescendant, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+		Name: "self-overlap", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{
+			{Source: selfAncestor, Target: "/one"},
+			{Source: selfDescendant, Target: "/two"},
+		},
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("same-application overlapping mounts error = %v, want ErrInvalidData", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		source string
+	}{
+		{name: "ancestor", source: ancestor},
+		{name: "descendant", source: descendant},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+				Name: "overlap-" + test.name, Image: "nginx:1.27",
+				Volumes: []swarm.VolumeConfig{{Source: test.source, Target: "/data"}},
+			}); !errors.Is(err, store.ErrInvalidData) {
+				t.Fatalf("overlapping mount error = %v, want ErrInvalidData", err)
+			}
+			if _, err := st.GetApplication(t.Context(), "overlap-"+test.name); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("overlapping mount was persisted: %v", err)
+			}
+		})
+	}
+	if _, err := st.GetApplication(t.Context(), "self-overlap"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("same-application overlapping mounts were persisted: %v", err)
+	}
+	if len(queue.snapshot()) != 1 {
+		t.Fatalf("rejected overlaps were enqueued: %#v", queue.snapshot())
+	}
+}
+
+func TestResolvedDockerSocketIsDeniedWithoutAllowedRoots(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	for _, source := range []string{"/var/run/docker.sock"} {
+		if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+			Name: "docker-socket", Image: "nginx:1.27",
+			Volumes: []swarm.VolumeConfig{{Source: source, Target: "/docker"}},
+		}); !errors.Is(err, store.ErrInvalidData) {
+			t.Fatalf("Docker socket source %q error = %v, want ErrInvalidData", source, err)
+		}
+	}
+	if _, err := st.GetApplication(t.Context(), "docker-socket"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("rejected Docker socket was persisted: %v", err)
+	}
+	if len(queue.snapshot()) != 0 {
+		t.Fatalf("rejected Docker socket was enqueued: %#v", queue.snapshot())
+	}
+	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+		Name: "disabled-bind", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: t.TempDir(), Target: "/data"}},
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("bind mount without allowed roots error = %v, want ErrInvalidData", err)
+	}
+}
+
+func TestAllowedMountRootsCannotOverlap(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	allowedRoot := t.TempDir()
+	nestedRoot := filepath.Join(allowedRoot, "nested")
+	source := filepath.Join(nestedRoot, "data")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service.WithRuntimeLimits(20, []string{allowedRoot, nestedRoot}, time.Minute)
+	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+		Name: "overlapping-roots", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: source, Target: "/data"}},
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("overlapping allowed roots error = %v, want ErrInvalidData", err)
+	}
+	if _, err := st.GetApplication(t.Context(), "overlapping-roots"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("application with overlapping roots was persisted: %v", err)
+	}
+	if len(queue.snapshot()) != 0 {
+		t.Fatalf("application with overlapping roots was enqueued: %#v", queue.snapshot())
+	}
+}
+
+func TestConfiguredDockerSocketIsDeniedInsideAllowedRoot(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	allowedRoot := t.TempDir()
+	socket := filepath.Join(allowedRoot, "custom-docker.sock")
+	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute).WithDockerEndpoint("unix://" + socket)
+	for _, source := range []string{socket, allowedRoot} {
+		if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+			Name: "custom-docker-socket", Image: "nginx:1.27",
+			Volumes: []swarm.VolumeConfig{{Source: source, Target: "/docker"}},
+		}); !errors.Is(err, store.ErrInvalidData) {
+			t.Fatalf("configured Docker socket source %q error = %v, want ErrInvalidData", source, err)
+		}
+	}
+	if _, err := st.GetApplication(t.Context(), "custom-docker-socket"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("application with configured Docker socket was persisted: %v", err)
+	}
+	if len(queue.snapshot()) != 0 {
+		t.Fatalf("application with configured Docker socket was enqueued: %#v", queue.snapshot())
+	}
+	safeSibling := filepath.Join(allowedRoot, "application-data")
+	if err := os.Mkdir(safeSibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	created := mustCreateApp(t, service, CreateAppRequest{
+		Name: "safe-sibling", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: safeSibling, Target: "/data"}},
+	})
+	if created.Name != "safe-sibling" || len(queue.snapshot()) != 1 {
+		t.Fatalf("safe sibling mount = %#v queue=%#v", created, queue.snapshot())
+	}
+}
+
+func TestResolvedAllowedMountRootCannotBeSensitive(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	rootLink := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(string(filepath.Separator), rootLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	service.WithRuntimeLimits(20, []string{rootLink}, time.Minute)
+	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+		Name: "root-link", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: t.TempDir(), Target: "/data"}},
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("resolved root allowed-mount error = %v, want ErrInvalidData", err)
+	}
+	if _, err := st.GetApplication(t.Context(), "root-link"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("application with resolved root allowed-mount was persisted: %v", err)
+	}
+	if len(queue.snapshot()) != 0 {
+		t.Fatalf("application with resolved root allowed-mount was enqueued: %#v", queue.snapshot())
 	}
 }
 
@@ -364,6 +631,25 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 	service, st, _, queue := newEdgeService(t)
 	created := mustCreateApp(t, service, CreateAppRequest{Name: "patch-app", Image: "nginx:1.27"})
 	queue.reset()
+	if created.EnvVars != "{}" || created.Ports != "[]" || created.Volumes != "[]" {
+		t.Fatalf("omitted collections persisted as env=%q ports=%q volumes=%q", created.EnvVars, created.Ports, created.Volumes)
+	}
+
+	emptyEnvironment := map[string]string{}
+	replayed, err := service.UpdateApp(t.Context(), UpdateAppRequest{
+		AppName: created.Name, ExpectedGeneration: created.DesiredGeneration, EnvVars: emptyEnvironment,
+	})
+	if err != nil || replayed.DesiredGeneration != created.DesiredGeneration || len(queue.snapshot()) != 0 {
+		t.Fatalf("empty environment replay = %#v, %v; queue=%#v", replayed, err, queue.snapshot())
+	}
+	emptyPorts := []swarm.PortConfig{}
+	emptyVolumes := []swarm.VolumeConfig{}
+	replayed, err = service.UpdateApp(t.Context(), UpdateAppRequest{
+		AppName: created.Name, ExpectedGeneration: created.DesiredGeneration, Ports: &emptyPorts, Volumes: &emptyVolumes,
+	})
+	if err != nil || replayed.DesiredGeneration != created.DesiredGeneration || len(queue.snapshot()) != 0 {
+		t.Fatalf("empty collection replay = %#v, %v; queue=%#v", replayed, err, queue.snapshot())
+	}
 
 	sameImage := created.Image
 	if result, err := service.UpdateApp(t.Context(), UpdateAppRequest{
@@ -371,7 +657,7 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 	}); !errors.Is(err, store.ErrGenerationConflict) || result != nil || len(queue.snapshot()) != 0 {
 		t.Fatalf("zero generation no-op = %#v, %v; queue=%#v", result, err, queue.snapshot())
 	}
-	replayed, err := service.UpdateApp(t.Context(), UpdateAppRequest{
+	replayed, err = service.UpdateApp(t.Context(), UpdateAppRequest{
 		AppName: created.Name, ExpectedGeneration: created.DesiredGeneration, Image: &sameImage,
 	})
 	if err != nil {
@@ -422,25 +708,47 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 }
 
 func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
-	service, _, _, _ := newEdgeService(t)
-	service.WithRuntimeLimits(20, []string{"/srv/moduleos"}, time.Minute)
+	service, st, _, queue := newEdgeService(t)
+	allowedRoot := t.TempDir()
+	mountSource := filepath.Join(allowedRoot, "data")
+	if err := os.Mkdir(mountSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsideRoot := t.TempDir()
+	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute)
 	created := mustCreateApp(t, service, CreateAppRequest{Name: "validation-app", Image: "nginx:1.27"})
 
 	emptyImage := "   "
-	outsideVolumes := []swarm.VolumeConfig{{Source: "/srv/outside", Target: "/data"}}
+	outsideVolumes := []swarm.VolumeConfig{{Source: outsideRoot, Target: "/data"}}
+	noncanonicalSource := []swarm.VolumeConfig{{Source: mountSource + "/../data", Target: "/data"}}
+	noncanonicalTarget := []swarm.VolumeConfig{{Source: mountSource, Target: "/data/"}}
+	rootTarget := []swarm.VolumeConfig{{Source: mountSource, Target: "/"}}
+	nulTarget := []swarm.VolumeConfig{{Source: mountSource, Target: "/data\x00suffix"}}
+	nulEnvironment := map[string]string{"TOKEN": "a\x00b"}
 	badPorts := []swarm.PortConfig{{ContainerPort: 0}}
+	ingressPortOverflow := uint32(65536)
 	expose := true
 	requests := []UpdateAppRequest{
 		{AppName: created.Name, ExpectedGeneration: -1},
 		{AppName: created.Name, ExpectedGeneration: -1, Image: &emptyImage},
 		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &outsideVolumes},
+		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &noncanonicalSource},
+		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &noncanonicalTarget},
+		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &rootTarget},
+		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &nulTarget},
+		{AppName: created.Name, ExpectedGeneration: -1, EnvVars: nulEnvironment},
 		{AppName: created.Name, ExpectedGeneration: -1, Ports: &badPorts},
+		{AppName: created.Name, ExpectedGeneration: -1, IngressContainerPort: &ingressPortOverflow},
 		{AppName: created.Name, ExpectedGeneration: -1, Expose: &expose},
 	}
 	for index, request := range requests {
 		if _, err := service.UpdateApp(t.Context(), request); !errors.Is(err, store.ErrInvalidData) {
 			t.Fatalf("invalid patch %d error = %v, want ErrInvalidData", index, err)
 		}
+	}
+	persisted, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil || persisted.DesiredGeneration != created.DesiredGeneration || persisted.Volumes != created.Volumes || len(queue.snapshot()) != 1 {
+		t.Fatalf("invalid patches mutated state: app=%#v err=%v queue=%#v", persisted, err, queue.snapshot())
 	}
 	newImage := "nginx:2.0"
 	if _, err := service.UpdateApp(t.Context(), UpdateAppRequest{AppName: "missing", ExpectedGeneration: -1, Image: &newImage}); !errors.Is(err, store.ErrNotFound) {
@@ -450,13 +758,19 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 
 func TestDesiredSpecRevalidatesPersistedMountPolicy(t *testing.T) {
 	service, st, _, _ := newEdgeService(t)
-	service.WithRuntimeLimits(20, []string{"/srv/moduleos"}, time.Minute)
+	allowedRoot := t.TempDir()
+	mountSource := filepath.Join(allowedRoot, "data")
+	if err := os.Mkdir(mountSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsideRoot := t.TempDir()
+	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute)
 	created := mustCreateApp(t, service, CreateAppRequest{
 		Name: "mount-policy", Image: "nginx:1.27",
-		Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data"}},
+		Volumes: []swarm.VolumeConfig{{Source: mountSource, Target: "/data"}},
 	})
 
-	created.Volumes = `[{"source":"/srv/outside","target":"/data","read_only":false}]`
+	created.Volumes = encodeVolumes([]swarm.VolumeConfig{{Source: outsideRoot, Target: "/data"}})
 	if err := st.UpdateApplication(t.Context(), created); err != nil {
 		t.Fatal(err)
 	}
@@ -541,6 +855,28 @@ func TestRunStateScaleAndDeletionIntentSemantics(t *testing.T) {
 		t.Fatalf("deletion intent = %#v", deleting)
 	}
 	queue.reset()
+	sameImage := deleting.Image
+	for name, mutate := range map[string]func() error{
+		"update": func() error {
+			_, err := service.UpdateApp(t.Context(), UpdateAppRequest{AppName: deleting.Name, ExpectedGeneration: deleting.DesiredGeneration, Image: &sameImage})
+			return err
+		},
+		"run state": func() error {
+			_, err := service.SetRunState(t.Context(), deleting.Name, deleting.DesiredRunState, deleting.DesiredGeneration)
+			return err
+		},
+		"scale": func() error {
+			_, err := service.ScaleAppIntent(t.Context(), deleting.Name, deleting.Replicas, deleting.DesiredGeneration)
+			return err
+		},
+	} {
+		if err := mutate(); !errors.Is(err, store.ErrConflict) {
+			t.Errorf("deleting application %s no-op error = %v, want ErrConflict", name, err)
+		}
+	}
+	if len(queue.snapshot()) != 0 {
+		t.Fatalf("rejected deleting-application mutations enqueued work: %#v", queue.snapshot())
+	}
 	staleDelete, err := service.DeleteAppIntent(t.Context(), created.Name, scaled.DesiredGeneration)
 	if !errors.Is(err, store.ErrGenerationConflict) || staleDelete != nil || len(queue.snapshot()) != 0 {
 		t.Fatalf("stale delete replay = %#v err=%v queue=%#v", staleDelete, err, queue.snapshot())
@@ -553,6 +889,38 @@ func TestRunStateScaleAndDeletionIntentSemantics(t *testing.T) {
 	persisted, err := st.GetApplication(t.Context(), created.Name)
 	if err != nil || persisted.DeletionTimestamp == nil {
 		t.Fatalf("persisted deletion = %#v err=%v", persisted, err)
+	}
+}
+
+func TestRuntimeReplicaLimitIsRevalidatedAfterConfigurationChange(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	created := mustCreateApp(t, service, CreateAppRequest{Name: "limit-change", Image: "nginx:1.27", Replicas: 3})
+	queue.reset()
+	service.WithRuntimeLimits(2, nil, time.Minute)
+
+	if _, err := service.BuildDesiredServiceSpec(t.Context(), created); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("oversized persisted desired spec error = %v, want ErrInvalidData", err)
+	}
+	stopped, err := service.SetRunState(t.Context(), created.Name, store.DesiredRunStateStopped, created.DesiredGeneration)
+	if err != nil {
+		t.Fatalf("stop above the new limit: %v", err)
+	}
+	if stopped.Replicas != 0 || stopped.ResumeReplicas != 3 {
+		t.Fatalf("stopped application = %#v", stopped)
+	}
+	if _, err := service.BuildDesiredServiceSpec(t.Context(), stopped); err != nil {
+		t.Fatalf("stopped desired spec should remain reconcilable: %v", err)
+	}
+	queueAfterStop := len(queue.snapshot())
+	if _, err := service.SetRunState(t.Context(), created.Name, store.DesiredRunStateRunning, stopped.DesiredGeneration); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("restart above the new limit error = %v, want ErrConflict", err)
+	}
+	unchanged, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.DesiredGeneration != stopped.DesiredGeneration || unchanged.DesiredRunState != store.DesiredRunStateStopped || len(queue.snapshot()) != queueAfterStop {
+		t.Fatalf("rejected restart mutated intent: app=%#v queue=%#v", unchanged, queue.snapshot())
 	}
 }
 
@@ -892,7 +1260,12 @@ func TestCancelledMutationsPersistNothing(t *testing.T) {
 
 func TestBuildDesiredSpecIncludesCanonicalNetworksAndRouting(t *testing.T) {
 	service, st, _, _ := newEdgeService(t)
-	service.WithRuntimeLimits(5, []string{"/srv/moduleos"}, time.Minute).WithIngressNetwork("edge-ingress")
+	allowedRoot := t.TempDir()
+	mountSource := filepath.Join(allowedRoot, "api")
+	if err := os.Mkdir(mountSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service.WithRuntimeLimits(5, []string{allowedRoot}, time.Minute).WithIngressNetwork("edge-ingress")
 
 	targetProject := mustCreateProject(t, service, "Target", "target")
 	sourceProject := mustCreateProject(t, service, "Source", "source")
@@ -903,7 +1276,7 @@ func TestBuildDesiredSpecIncludesCanonicalNetworksAndRouting(t *testing.T) {
 		Replicas:             2,
 		EnvVars:              map[string]string{"B": "2", "A": "1"},
 		Ports:                []swarm.PortConfig{{ContainerPort: 8080, PublishedPort: 18080}},
-		Volumes:              []swarm.VolumeConfig{{Source: "/srv/moduleos/api", Target: "/data", ReadOnly: true}},
+		Volumes:              []swarm.VolumeConfig{{Source: mountSource, Target: "/data", ReadOnly: true}},
 		Expose:               true,
 		IngressContainerPort: 8080,
 	})
@@ -929,7 +1302,11 @@ func TestBuildDesiredSpecIncludesCanonicalNetworksAndRouting(t *testing.T) {
 	if len(spec.Ports) != 1 || spec.Ports[0].ContainerPort != 8080 || spec.Ports[0].PublishedPort != 18080 {
 		t.Fatalf("ports mismatch: %#v", spec.Ports)
 	}
-	if len(spec.Volumes) != 1 || spec.Volumes[0].Source != "/srv/moduleos/api" ||
+	resolvedMountSource, err := filepath.EvalSymlinks(mountSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.Volumes) != 1 || spec.Volumes[0].Source != resolvedMountSource ||
 		spec.Volumes[0].Target != "/data" || !spec.Volumes[0].ReadOnly {
 		t.Fatalf("volumes mismatch: %#v", spec.Volumes)
 	}
@@ -1005,11 +1382,15 @@ func TestValidationAndEncodingHelpers(t *testing.T) {
 	ports := []swarm.PortConfig{{ContainerPort: 8080, PublishedPort: 18080}, {ContainerPort: 80, PublishedPort: 10080}}
 	encodedPorts := encodePorts(ports)
 	decodedPorts, err := decodePorts(encodedPorts)
-	if err != nil || len(decodedPorts) != 2 || decodedPorts[0].ContainerPort != 80 || ports[0].ContainerPort != 8080 {
+	if err != nil || len(decodedPorts) != 2 || decodedPorts[0].ContainerPort != 80 || decodedPorts[0].Protocol != "tcp" || decodedPorts[0].PublishMode != "ingress" ||
+		ports[0].ContainerPort != 8080 || ports[0].Protocol != "" || ports[0].PublishMode != "" {
 		t.Fatalf("ports round trip=%#v err=%v original=%#v", decodedPorts, err, ports)
 	}
 	if _, err := decodePorts("not-json"); !errors.Is(err, store.ErrInvalidData) {
 		t.Fatalf("invalid ports error = %v", err)
+	}
+	if encoded := encodePorts(nil); encoded != "[]" {
+		t.Fatalf("nil ports encoded as %q", encoded)
 	}
 	volumes := []swarm.VolumeConfig{{Source: "/srv/z", Target: "/z"}, {Source: "/srv/a", Target: "/a"}}
 	encodedVolumes := encodeVolumes(volumes)
@@ -1019,6 +1400,9 @@ func TestValidationAndEncodingHelpers(t *testing.T) {
 	}
 	if _, err := decodeVolumes("not-json"); !errors.Is(err, store.ErrInvalidData) {
 		t.Fatalf("invalid volumes error = %v", err)
+	}
+	if encoded := encodeVolumes(nil); encoded != "[]" {
+		t.Fatalf("nil volumes encoded as %q", encoded)
 	}
 	if decoded := decodeEnvVars("B=2\nA=1"); len(decoded) != 2 || decoded[0] != "B=2" {
 		t.Fatalf("legacy environment decode = %#v", decoded)

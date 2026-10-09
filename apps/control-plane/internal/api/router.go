@@ -39,6 +39,7 @@ type RouterOptions struct {
 	Store              handler.HealthStore
 	Runtime            handler.HealthRuntime
 	Projects           handler.ProjectService
+	Applications       handler.ApplicationService
 	Environment        string
 	APIKey             string
 	IngressNetwork     string
@@ -71,6 +72,10 @@ func NewRouter(options RouterOptions) (*Router, error) {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
 	}
 	projects, err := handler.NewProjectHandler(options.Projects, options.Logger)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
+	}
+	applications, err := handler.NewApplicationHandler(options.Applications, options.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
 	}
@@ -129,6 +134,14 @@ func NewRouter(options RouterOptions) (*Router, error) {
 	protected.Delete("/projects/:slug/links/:link_id", projects.DeleteLink)
 	protected.Get("/projects/:slug", projects.Get)
 	protected.Delete("/projects/:slug", projects.Delete)
+	protected.Post("/apps", applications.Create)
+	protected.Get("/apps", applications.List)
+	protected.Get("/apps/:name", applications.Get)
+	protected.Patch("/apps/:name", applications.Update)
+	protected.Delete("/apps/:name", applications.Delete)
+	protected.Post("/apps/:name/start", applications.Start)
+	protected.Post("/apps/:name/stop", applications.Stop)
+	protected.Post("/apps/:name/scale", applications.Scale)
 
 	return &Router{App: app, Health: health}, nil
 }
@@ -141,6 +154,8 @@ func validateRouterOptions(options RouterOptions) ([]string, error) {
 		return nil, fmt.Errorf("%w: health store is required", ErrInvalidRouterOptions)
 	case options.Runtime == nil:
 		return nil, fmt.Errorf("%w: health runtime is required", ErrInvalidRouterOptions)
+	case options.Applications == nil:
+		return nil, fmt.Errorf("%w: application service is required", ErrInvalidRouterOptions)
 	case options.Environment != "development" && options.Environment != "production":
 		return nil, fmt.Errorf("%w: environment must be development or production", ErrInvalidRouterOptions)
 	case options.Environment == "production" && len(options.APIKey) < 32:
