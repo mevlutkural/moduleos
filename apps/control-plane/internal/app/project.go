@@ -58,7 +58,9 @@ func (s *Service) CreateProject(ctx context.Context, req CreateProjectRequest) (
 		return nil, fmt.Errorf("%w: root is reserved", store.ErrConflict)
 	}
 
-	s.resourceMu.Lock()
+	if err := s.lockResources(ctx); err != nil {
+		return nil, err
+	}
 	defer s.resourceMu.Unlock()
 
 	if _, err := s.store.GetProject(ctx, slug); err == nil {
@@ -124,7 +126,9 @@ func (s *Service) DeleteProject(ctx context.Context, slug string) error {
 		return fmt.Errorf("%w: root project cannot be deleted", store.ErrConflict)
 	}
 
-	s.resourceMu.Lock()
+	if err := s.lockResources(ctx); err != nil {
+		return err
+	}
 	defer s.resourceMu.Unlock()
 
 	project, err := s.store.GetProject(ctx, slug)
@@ -172,7 +176,9 @@ func (s *Service) ListProjectApps(ctx context.Context, slug string) ([]*store.Ap
 // The source can reach the target, and the target can reach the source network.
 // If strict one-way isolation is required, a different approach (like a proxy or sidecar) is needed.
 func (s *Service) CreateProjectLink(ctx context.Context, projectSlug, targetAppName, alias string) (*ProjectLinkDetails, error) {
-	s.resourceMu.Lock()
+	if err := s.lockResources(ctx); err != nil {
+		return nil, err
+	}
 	defer s.resourceMu.Unlock()
 
 	p, err := s.store.GetProject(ctx, projectSlug)
@@ -281,7 +287,9 @@ func (s *Service) ListProjectLinks(ctx context.Context, projectSlug string) ([]*
 
 // DeleteProjectLink removes a project link.
 func (s *Service) DeleteProjectLink(ctx context.Context, projectSlug, linkID string) error {
-	s.resourceMu.Lock()
+	if err := s.lockResources(ctx); err != nil {
+		return err
+	}
 	defer s.resourceMu.Unlock()
 
 	p, err := s.store.GetProject(ctx, projectSlug)
