@@ -250,9 +250,8 @@ func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
 	service, st, _, queue := newEdgeService(t)
 	allowedRoot := t.TempDir()
 	inside := filepath.Join(allowedRoot, "inside")
-	nested := filepath.Join(inside, "nested")
 	outside := t.TempDir()
-	if err := os.MkdirAll(nested, 0o700); err != nil {
+	if err := os.Mkdir(inside, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	insideLink := filepath.Join(allowedRoot, "inside-link")
@@ -279,7 +278,6 @@ func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
 		{name: "dangling symlink", source: danglingLink},
 		{name: "suffix below dangling symlink", source: filepath.Join(danglingLink, "future")},
 		{name: "allowed root itself", source: allowedRoot},
-		{name: "nested source", source: nested},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := service.CreateApp(t.Context(), CreateAppRequest{
@@ -335,6 +333,65 @@ func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
 	}
 	if _, err := service.BuildDesiredServiceSpec(t.Context(), unchanged); !errors.Is(err, store.ErrInvalidData) {
 		t.Fatalf("persisted symlink escape desired spec error = %v, want ErrInvalidData", err)
+	}
+}
+
+func TestNestedMountSourcesRemainCompatibleWhenIsolated(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	allowedRoot := t.TempDir()
+	ancestor := filepath.Join(allowedRoot, "tenant")
+	source := filepath.Join(ancestor, "data")
+	descendant := filepath.Join(source, "nested")
+	if err := os.MkdirAll(descendant, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute)
+	created := mustCreateApp(t, service, CreateAppRequest{
+		Name: "legacy-nested", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: source, Target: "/data"}},
+	})
+	if _, err := service.BuildDesiredServiceSpec(t.Context(), created); err != nil {
+		t.Fatalf("isolated nested mount no longer converges after upgrade: %v", err)
+	}
+	selfAncestor := filepath.Join(allowedRoot, "self")
+	selfDescendant := filepath.Join(selfAncestor, "nested")
+	if err := os.MkdirAll(selfDescendant, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+		Name: "self-overlap", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{
+			{Source: selfAncestor, Target: "/one"},
+			{Source: selfDescendant, Target: "/two"},
+		},
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("same-application overlapping mounts error = %v, want ErrInvalidData", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		source string
+	}{
+		{name: "ancestor", source: ancestor},
+		{name: "descendant", source: descendant},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+				Name: "overlap-" + test.name, Image: "nginx:1.27",
+				Volumes: []swarm.VolumeConfig{{Source: test.source, Target: "/data"}},
+			}); !errors.Is(err, store.ErrInvalidData) {
+				t.Fatalf("overlapping mount error = %v, want ErrInvalidData", err)
+			}
+			if _, err := st.GetApplication(t.Context(), "overlap-"+test.name); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("overlapping mount was persisted: %v", err)
+			}
+		})
+	}
+	if _, err := st.GetApplication(t.Context(), "self-overlap"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("same-application overlapping mounts were persisted: %v", err)
+	}
+	if len(queue.snapshot()) != 1 {
+		t.Fatalf("rejected overlaps were enqueued: %#v", queue.snapshot())
 	}
 }
 

@@ -248,7 +248,7 @@ func (s *Service) CreateApp(ctx context.Context, req CreateAppRequest) (*store.A
 	if replicas > s.maxReplicas {
 		return nil, fmt.Errorf("%w: replicas exceed configured maximum", store.ErrInvalidData)
 	}
-	volumes, err := s.canonicalizeMounts(req.Volumes)
+	volumes, err := s.canonicalizeMounts(ctx, req.Name, req.Volumes)
 	if err != nil {
 		return nil, err
 	}
@@ -462,7 +462,7 @@ func (s *Service) UpdateApp(ctx context.Context, req UpdateAppRequest) (*store.A
 		mutation.Ports = &value
 	}
 	if req.Volumes != nil {
-		volumes, err := s.canonicalizeMounts(*req.Volumes)
+		volumes, err := s.canonicalizeMounts(ctx, req.AppName, *req.Volumes)
 		if err != nil {
 			return nil, err
 		}
@@ -664,7 +664,7 @@ func (s *Service) buildDesiredServiceSpec(ctx context.Context, app *store.Applic
 	if err != nil {
 		return swarm.ServiceSpec{}, err
 	}
-	volumes, err = s.canonicalizeMounts(volumes)
+	volumes, err = s.canonicalizeMounts(ctx, app.Name, volumes)
 	if err != nil {
 		return swarm.ServiceSpec{}, err
 	}
@@ -729,7 +729,7 @@ func isValidNameChar(c rune) bool {
 	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'
 }
 
-func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.VolumeConfig, error) {
+func (s *Service) canonicalizeMounts(ctx context.Context, applicationName string, volumes []swarm.VolumeConfig) ([]swarm.VolumeConfig, error) {
 	canonical := append([]swarm.VolumeConfig(nil), volumes...)
 	if len(canonical) == 0 {
 		return canonical, nil
@@ -754,7 +754,7 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 		allowed := false
 		for _, root := range allowedRoots {
 			relative, err := filepath.Rel(root, source)
-			if err == nil && relative != "." && filepath.Dir(relative) == "." {
+			if err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 				allowed = true
 				break
 			}
@@ -764,7 +764,49 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 		}
 		volume.Source = source
 	}
+	if err := s.validateMountSourceIsolation(ctx, applicationName, canonical); err != nil {
+		return nil, err
+	}
 	return canonical, nil
+}
+
+func (s *Service) validateMountSourceIsolation(ctx context.Context, applicationName string, volumes []swarm.VolumeConfig) error {
+	for left := range volumes {
+		for right := 0; right < left; right++ {
+			if mountSourcesOverlap(volumes[left].Source, volumes[right].Source) {
+				return fmt.Errorf("%w: mount sources cannot contain one another", store.ErrInvalidData)
+			}
+		}
+	}
+	applications, err := s.store.ListApplications(ctx)
+	if err != nil {
+		return fmt.Errorf("list applications for mount isolation: %w", err)
+	}
+	for _, application := range applications {
+		if application.Name == applicationName {
+			continue
+		}
+		existing, err := decodeVolumes(application.Volumes)
+		if err != nil {
+			return err
+		}
+		for _, volume := range existing {
+			source, err := resolveMountPath(volume.Source)
+			if err != nil {
+				return fmt.Errorf("%w: persisted mount source cannot be resolved", store.ErrInvalidData)
+			}
+			for _, candidate := range volumes {
+				if mountSourcesOverlap(source, candidate.Source) {
+					return fmt.Errorf("%w: mount source overlaps another application", store.ErrInvalidData)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func mountSourcesOverlap(left, right string) bool {
+	return left != right && (pathContains(left, right) || pathContains(right, left))
 }
 
 func (s *Service) canonicalAllowedMountRoots() ([]string, error) {
