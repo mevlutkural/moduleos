@@ -710,6 +710,38 @@ func TestRunStateScaleAndDeletionIntentSemantics(t *testing.T) {
 	}
 }
 
+func TestRuntimeReplicaLimitIsRevalidatedAfterConfigurationChange(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	created := mustCreateApp(t, service, CreateAppRequest{Name: "limit-change", Image: "nginx:1.27", Replicas: 3})
+	queue.reset()
+	service.WithRuntimeLimits(2, nil, time.Minute)
+
+	if _, err := service.BuildDesiredServiceSpec(t.Context(), created); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("oversized persisted desired spec error = %v, want ErrInvalidData", err)
+	}
+	stopped, err := service.SetRunState(t.Context(), created.Name, store.DesiredRunStateStopped, created.DesiredGeneration)
+	if err != nil {
+		t.Fatalf("stop above the new limit: %v", err)
+	}
+	if stopped.Replicas != 0 || stopped.ResumeReplicas != 3 {
+		t.Fatalf("stopped application = %#v", stopped)
+	}
+	if _, err := service.BuildDesiredServiceSpec(t.Context(), stopped); err != nil {
+		t.Fatalf("stopped desired spec should remain reconcilable: %v", err)
+	}
+	queueAfterStop := len(queue.snapshot())
+	if _, err := service.SetRunState(t.Context(), created.Name, store.DesiredRunStateRunning, stopped.DesiredGeneration); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("restart above the new limit error = %v, want ErrInvalidData", err)
+	}
+	unchanged, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.DesiredGeneration != stopped.DesiredGeneration || unchanged.DesiredRunState != store.DesiredRunStateStopped || len(queue.snapshot()) != queueAfterStop {
+		t.Fatalf("rejected restart mutated intent: app=%#v queue=%#v", unchanged, queue.snapshot())
+	}
+}
+
 func TestRollbackValidationAndSuccess(t *testing.T) {
 	service, st, _, queue := newEdgeService(t)
 	application := mustCreateApp(t, service, CreateAppRequest{Name: "rollback-app", Image: "nginx:1.0"})

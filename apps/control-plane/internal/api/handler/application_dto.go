@@ -38,16 +38,16 @@ func (value *optionalValue[T]) UnmarshalJSON(data []byte) error {
 }
 
 type ApplicationPortInput struct {
-	ContainerPort uint32 `json:"container_port"`
-	PublishedPort uint32 `json:"published_port,omitempty"`
-	Protocol      string `json:"protocol,omitempty"`
-	PublishMode   string `json:"publish_mode,omitempty"`
+	ContainerPort uint32                `json:"container_port"`
+	PublishedPort optionalValue[uint32] `json:"published_port,omitempty"`
+	Protocol      optionalValue[string] `json:"protocol,omitempty"`
+	PublishMode   optionalValue[string] `json:"publish_mode,omitempty"`
 }
 
 type ApplicationVolumeInput struct {
-	Source   string `json:"source"`
-	Target   string `json:"target"`
-	ReadOnly bool   `json:"read_only,omitempty"`
+	Source   string              `json:"source"`
+	Target   string              `json:"target"`
+	ReadOnly optionalValue[bool] `json:"read_only,omitempty"`
 }
 
 type CreateApplicationRequest struct {
@@ -335,7 +335,7 @@ func validEnvironmentKey(key string) bool {
 func applicationPorts(values []ApplicationPortInput) []swarm.PortConfig {
 	result := make([]swarm.PortConfig, len(values))
 	for index, value := range values {
-		result[index] = swarm.PortConfig{ContainerPort: value.ContainerPort, PublishedPort: value.PublishedPort, Protocol: value.Protocol, PublishMode: value.PublishMode}
+		result[index] = swarm.PortConfig{ContainerPort: value.ContainerPort, PublishedPort: value.PublishedPort.Value, Protocol: value.Protocol.Value, PublishMode: value.PublishMode.Value}
 	}
 	return result
 }
@@ -343,9 +343,40 @@ func applicationPorts(values []ApplicationPortInput) []swarm.PortConfig {
 func applicationVolumes(values []ApplicationVolumeInput) []swarm.VolumeConfig {
 	result := make([]swarm.VolumeConfig, len(values))
 	for index, value := range values {
-		result[index] = swarm.VolumeConfig{Source: value.Source, Target: value.Target, ReadOnly: value.ReadOnly}
+		result[index] = swarm.VolumeConfig{Source: value.Source, Target: value.Target, ReadOnly: value.ReadOnly.Value}
 	}
 	return result
+}
+
+func validApplicationPortInputs(values []ApplicationPortInput) bool {
+	seenPublished := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value.ContainerPort == 0 || value.ContainerPort > maximumApplicationPortNumber ||
+			value.PublishedPort.Null || value.PublishedPort.Value > maximumApplicationPortNumber ||
+			value.Protocol.Null || value.PublishMode.Null {
+			return false
+		}
+		protocol := "tcp"
+		if value.Protocol.Present {
+			protocol = value.Protocol.Value
+		}
+		mode := "ingress"
+		if value.PublishMode.Present {
+			mode = value.PublishMode.Value
+		}
+		if protocol != "tcp" && protocol != "udp" || mode != "ingress" && mode != "host" {
+			return false
+		}
+		if value.PublishedPort.Value == 0 {
+			continue
+		}
+		key := strconv.FormatUint(uint64(value.PublishedPort.Value), 10) + "/" + protocol + "/" + mode
+		if _, exists := seenPublished[key]; exists {
+			return false
+		}
+		seenPublished[key] = struct{}{}
+	}
+	return true
 }
 
 func validApplicationEnvironmentInputs(values map[string]string) bool {
@@ -360,7 +391,7 @@ func validApplicationEnvironmentInputs(values map[string]string) bool {
 func validApplicationVolumeInputs(values []ApplicationVolumeInput) bool {
 	seenTargets := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		if !canonicalAbsolutePath(value.Source) || !canonicalAbsolutePath(value.Target) || value.Target == string(filepath.Separator) {
+		if value.ReadOnly.Null || !canonicalAbsolutePath(value.Source) || !canonicalAbsolutePath(value.Target) || value.Target == string(filepath.Separator) {
 			return false
 		}
 		if _, exists := seenTargets[value.Target]; exists {

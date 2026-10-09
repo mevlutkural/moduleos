@@ -328,6 +328,9 @@ func (s *Service) DeleteAppIntent(ctx context.Context, name string, expectedGene
 }
 
 func (s *Service) SetRunState(ctx context.Context, name string, state store.DesiredRunState, expectedGeneration int64) (*store.Application, error) {
+	if state != store.DesiredRunStateRunning && state != store.DesiredRunStateStopped {
+		return nil, fmt.Errorf("%w: invalid desired run state", store.ErrInvalidData)
+	}
 	if err := s.lockResources(ctx); err != nil {
 		return nil, err
 	}
@@ -339,6 +342,9 @@ func (s *Service) SetRunState(ctx context.Context, name string, state store.Desi
 	}
 	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
 		return nil, err
+	}
+	if state == store.DesiredRunStateRunning && current.ResumeReplicas > s.maxReplicas {
+		return nil, fmt.Errorf("%w: resumed replicas exceed configured maximum", store.ErrInvalidData)
 	}
 	if current.DesiredRunState == state {
 		return current, nil
@@ -625,6 +631,9 @@ func (s *Service) UpdateAppStatus(ctx context.Context, name string, status store
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func (s *Service) buildDesiredServiceSpec(ctx context.Context, app *store.Application) (swarm.ServiceSpec, error) {
+	if app.Replicas > s.maxReplicas {
+		return swarm.ServiceSpec{}, fmt.Errorf("%w: replicas exceed configured maximum", store.ErrInvalidData)
+	}
 	project, err := s.store.GetProjectByID(ctx, app.ProjectID)
 	if err != nil {
 		return swarm.ServiceSpec{}, fmt.Errorf("resolve project for desired spec: %w", err)

@@ -297,6 +297,8 @@ func validateCreateApplicationRequest(request CreateApplicationRequest) map[stri
 	}
 	if len(request.Ports.Value) > maximumApplicationPorts {
 		fields["ports"] = "must contain at most 20 entries"
+	} else if request.Ports.Present && !request.Ports.Null && !validApplicationPortInputs(request.Ports.Value) {
+		fields["ports"] = "must contain valid non-null port definitions"
 	}
 	if len(request.Volumes.Value) > maximumApplicationVolumes {
 		fields["volumes"] = "must contain at most 20 entries"
@@ -335,6 +337,8 @@ func validateUpdateApplicationRequest(request UpdateApplicationRequest) map[stri
 	}
 	if len(request.Ports.Value) > maximumApplicationPorts {
 		fields["ports"] = "must contain at most 20 entries"
+	} else if request.Ports.Present && !request.Ports.Null && !validApplicationPortInputs(request.Ports.Value) {
+		fields["ports"] = "must contain valid non-null port definitions"
 	}
 	if len(request.Volumes.Value) > maximumApplicationVolumes {
 		fields["volumes"] = "must contain at most 20 entries"
