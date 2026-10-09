@@ -754,7 +754,7 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 			if err != nil {
 				return nil, fmt.Errorf("%w: allowed mount root cannot be resolved", store.ErrInvalidData)
 			}
-			if s.sensitiveMountSource(resolvedRoot) {
+			if sensitiveMountRoot(resolvedRoot) {
 				return nil, fmt.Errorf("%w: allowed mount root is denied", store.ErrInvalidData)
 			}
 			relative, err := filepath.Rel(resolvedRoot, source)
@@ -772,26 +772,39 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 }
 
 func (s *Service) sensitiveMountSource(source string) bool {
-	dockerSocket, err := resolveMountPath("/var/run/docker.sock")
-	if source == "/var/run/docker.sock" || source == "/run/docker.sock" {
+	if sensitiveMountRoot(source) {
 		return true
 	}
-	if err == nil && source == dockerSocket {
-		return true
+	sockets := []string{"/var/run/docker.sock", "/run/docker.sock"}
+	dockerSocket, err := resolveMountPath("/var/run/docker.sock")
+	if err == nil {
+		sockets = append(sockets, dockerSocket)
 	}
 	if s.dockerSocketPath != "" {
+		sockets = append(sockets, s.dockerSocketPath)
 		configuredSocket, resolveErr := resolveMountPath(s.dockerSocketPath)
-		if source == s.dockerSocketPath {
-			return true
+		if resolveErr == nil {
+			sockets = append(sockets, configuredSocket)
 		}
-		if resolveErr == nil && source == configuredSocket {
+	}
+	for _, socket := range sockets {
+		if pathContains(source, socket) {
 			return true
 		}
 	}
+	return false
+}
+
+func sensitiveMountRoot(source string) bool {
 	return source == "/" || source == "/proc" || strings.HasPrefix(source, "/proc/") ||
 		source == "/sys" || strings.HasPrefix(source, "/sys/") ||
 		source == "/dev" || strings.HasPrefix(source, "/dev/") ||
 		source == "/etc" || strings.HasPrefix(source, "/etc/")
+}
+
+func pathContains(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // resolveMountPath resolves every existing symlink component while preserving

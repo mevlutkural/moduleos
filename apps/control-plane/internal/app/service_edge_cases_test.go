@@ -324,11 +324,13 @@ func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
 
 func TestResolvedDockerSocketIsDeniedWithoutAllowedRoots(t *testing.T) {
 	service, st, _, queue := newEdgeService(t)
-	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
-		Name: "docker-socket", Image: "nginx:1.27",
-		Volumes: []swarm.VolumeConfig{{Source: "/var/run/docker.sock", Target: "/docker.sock"}},
-	}); !errors.Is(err, store.ErrInvalidData) {
-		t.Fatalf("resolved Docker socket error = %v, want ErrInvalidData", err)
+	for _, source := range []string{"/var/run/docker.sock"} {
+		if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+			Name: "docker-socket", Image: "nginx:1.27",
+			Volumes: []swarm.VolumeConfig{{Source: source, Target: "/docker"}},
+		}); !errors.Is(err, store.ErrInvalidData) {
+			t.Fatalf("Docker socket source %q error = %v, want ErrInvalidData", source, err)
+		}
 	}
 	if _, err := st.GetApplication(t.Context(), "docker-socket"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("rejected Docker socket was persisted: %v", err)
@@ -343,17 +345,27 @@ func TestConfiguredDockerSocketIsDeniedInsideAllowedRoot(t *testing.T) {
 	allowedRoot := t.TempDir()
 	socket := filepath.Join(allowedRoot, "custom-docker.sock")
 	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute).WithDockerEndpoint("unix://" + socket)
-	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
-		Name: "custom-docker-socket", Image: "nginx:1.27",
-		Volumes: []swarm.VolumeConfig{{Source: socket, Target: "/docker.sock"}},
-	}); !errors.Is(err, store.ErrInvalidData) {
-		t.Fatalf("configured Docker socket error = %v, want ErrInvalidData", err)
+	for _, source := range []string{socket, allowedRoot} {
+		if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+			Name: "custom-docker-socket", Image: "nginx:1.27",
+			Volumes: []swarm.VolumeConfig{{Source: source, Target: "/docker"}},
+		}); !errors.Is(err, store.ErrInvalidData) {
+			t.Fatalf("configured Docker socket source %q error = %v, want ErrInvalidData", source, err)
+		}
 	}
 	if _, err := st.GetApplication(t.Context(), "custom-docker-socket"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("application with configured Docker socket was persisted: %v", err)
 	}
 	if len(queue.snapshot()) != 0 {
 		t.Fatalf("application with configured Docker socket was enqueued: %#v", queue.snapshot())
+	}
+	safeSibling := filepath.Join(allowedRoot, "application-data")
+	created := mustCreateApp(t, service, CreateAppRequest{
+		Name: "safe-sibling", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: safeSibling, Target: "/data"}},
+	})
+	if created.Name != "safe-sibling" || len(queue.snapshot()) != 1 {
+		t.Fatalf("safe sibling mount = %#v queue=%#v", created, queue.snapshot())
 	}
 }
 
