@@ -495,8 +495,9 @@ func TestUpdateApp_EnvVars(t *testing.T) {
 
 	newVars := map[string]string{"FOO": "bar", "BAZ": "qux"}
 	updated, err := svc.UpdateApp(ctx, app.UpdateAppRequest{
-		AppName: "my-api",
-		EnvVars: newVars,
+		AppName:            "my-api",
+		ExpectedGeneration: -1,
+		EnvVars:            newVars,
 	})
 	if err != nil {
 		t.Fatalf("UpdateApp error: %v", err)
@@ -521,6 +522,7 @@ func TestUpdateApp_Expose(t *testing.T) {
 	ingressPort := uint32(8080)
 	_, err := svc.UpdateApp(ctx, app.UpdateAppRequest{
 		AppName:              "my-api",
+		ExpectedGeneration:   -1,
 		Expose:               &expose,
 		IngressContainerPort: &ingressPort,
 	})
@@ -542,8 +544,9 @@ func TestUpdateApp_Image(t *testing.T) {
 
 	newImage := "nginx:2.0"
 	_, err := svc.UpdateApp(ctx, app.UpdateAppRequest{
-		AppName: "my-api",
-		Image:   &newImage,
+		AppName:            "my-api",
+		ExpectedGeneration: -1,
+		Image:              &newImage,
 	})
 	if err != nil {
 		t.Fatalf("UpdateApp error: %v", err)
@@ -559,7 +562,8 @@ func TestUpdateApp_NotFound(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := context.Background()
 
-	_, err := svc.UpdateApp(ctx, app.UpdateAppRequest{AppName: "ghost"})
+	image := "nginx:1.0"
+	_, err := svc.UpdateApp(ctx, app.UpdateAppRequest{AppName: "ghost", ExpectedGeneration: -1, Image: &image})
 	if err == nil {
 		t.Error("expected error for unknown app")
 	}
@@ -817,8 +821,7 @@ func TestConcurrentDeployAndScaleSerializeWithoutLostIntent(t *testing.T) {
 		_, scaleErr := svc.ScaleAppIntent(ctx, created.Name, 2, created.DesiredGeneration)
 		results <- result{operation: "scale", err: scaleErr}
 	}()
-	requireBarrierEntries(t, ctx, entered, "deploy", "update")
-	close(release)
+	releaseFirstBarrierEntry(t, ctx, entered, release, "deploy", "update")
 
 	operationErrors := map[string]error{}
 	for range 2 {
@@ -889,8 +892,7 @@ func TestConcurrentUpdateAndDeleteHaveSingleGenerationWinner(t *testing.T) {
 		_, deleteErr := svc.DeleteAppIntent(ctx, created.Name, created.DesiredGeneration)
 		results <- result{operation: "delete", err: deleteErr}
 	}()
-	requireBarrierEntries(t, ctx, entered, "update", "delete")
-	close(release)
+	releaseFirstBarrierEntry(t, ctx, entered, release, "update", "delete")
 
 	operationErrors := map[string]error{}
 	for range 2 {
@@ -927,21 +929,77 @@ func TestConcurrentUpdateAndDeleteHaveSingleGenerationWinner(t *testing.T) {
 	}
 }
 
-func requireBarrierEntries(t *testing.T, ctx context.Context, entered <-chan string, expected ...string) {
+func releaseFirstBarrierEntry(t *testing.T, ctx context.Context, entered <-chan string, release chan struct{}, expected ...string) {
 	t.Helper()
-	seen := make(map[string]bool, len(expected))
-	for range expected {
-		select {
-		case operation := <-entered:
-			seen[operation] = true
-		case <-ctx.Done():
-			t.Fatalf("concurrent operations did not reach mutation barrier: %v", ctx.Err())
-		}
+	if len(expected) != 2 {
+		t.Fatalf("barrier requires exactly two operations, got %d", len(expected))
 	}
-	for _, operation := range expected {
-		if !seen[operation] {
-			t.Fatalf("operation %q did not reach mutation barrier; got %#v", operation, seen)
+	first := ""
+	select {
+	case operation := <-entered:
+		first = operation
+	case <-ctx.Done():
+		t.Fatalf("first operation did not reach mutation barrier: %v", ctx.Err())
+	}
+	if first != expected[0] && first != expected[1] {
+		t.Fatalf("unexpected first operation %q; want one of %#v", first, expected)
+	}
+	close(release)
+}
+
+func TestApplicationMutationLockIsReleasedAfterCancellation(t *testing.T) {
+	baseService, st, mock := newTestService(t)
+	created, err := baseService.CreateApp(t.Context(), app.CreateAppRequest{Name: "cancelled-mutation", Image: "nginx:1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	svc := serviceWithStore(&applicationMutationBarrierStore{Store: st, entered: entered, release: release}, mock)
+	cancelled, cancel := context.WithCancel(context.Background())
+	scaleResult := make(chan error, 1)
+	go func() {
+		_, scaleErr := svc.ScaleAppIntent(cancelled, created.Name, 2, created.DesiredGeneration)
+		scaleResult <- scaleErr
+	}()
+	select {
+	case operation := <-entered:
+		if operation != "update" {
+			t.Fatalf("first operation = %q, want update", operation)
 		}
+	case <-time.After(time.Second):
+		t.Fatal("scale did not reach the mutation barrier")
+	}
+	cancel()
+	if err := <-scaleResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled scale error = %v, want context cancellation", err)
+	}
+
+	deployResult := make(chan error, 1)
+	go func() {
+		_, deployErr := svc.DeployApp(context.Background(), app.DeployAppRequest{AppName: created.Name, Image: "nginx:2.0"})
+		deployResult <- deployErr
+	}()
+	select {
+	case operation := <-entered:
+		if operation != "deploy" {
+			t.Fatalf("second operation = %q, want deploy", operation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("deploy did not acquire the mutation lock after cancellation")
+	}
+	close(release)
+	if err := <-deployResult; err != nil {
+		t.Fatalf("deploy after cancellation: %v", err)
+	}
+
+	persisted, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Image != "nginx:2.0" || persisted.Replicas != created.Replicas || persisted.DesiredGeneration != created.DesiredGeneration+1 {
+		t.Fatalf("cancelled mutation leaked partial state: %#v", persisted)
 	}
 }
 
