@@ -258,13 +258,18 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	if err := validate(create, map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 1000}); err != nil {
 		t.Fatalf("global replica ceiling rejected: %v", err)
 	}
+	if err := validate(create, map[string]any{"name": "api", "image": "nginx:1.27", "expose": true, "ingress_container_port": 1}); err != nil {
+		t.Fatalf("valid exposed application rejected: %v", err)
+	}
 	for name, value := range map[string]any{
-		"zero replicas":    map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 0},
-		"replica overflow": map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 1001},
-		"uppercase name":   map[string]any{"name": "API", "image": "nginx:1.27"},
-		"null project":     map[string]any{"name": "api", "image": "nginx:1.27", "project_slug": nil},
-		"null environment": map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": nil},
-		"environment NUL":  map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": map[string]any{"TOKEN": "a\x00b"}},
+		"zero replicas":            map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 0},
+		"replica overflow":         map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 1001},
+		"uppercase name":           map[string]any{"name": "API", "image": "nginx:1.27"},
+		"null project":             map[string]any{"name": "api", "image": "nginx:1.27", "project_slug": nil},
+		"null environment":         map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": nil},
+		"environment NUL":          map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": map[string]any{"TOKEN": "a\x00b"}},
+		"expose without ingress":   map[string]any{"name": "api", "image": "nginx:1.27", "expose": true},
+		"expose with zero ingress": map[string]any{"name": "api", "image": "nginx:1.27", "expose": true, "ingress_container_port": 0},
 		"root mount target": map[string]any{"name": "api", "image": "nginx:1.27", "volumes": []any{
 			map[string]any{"source": "/srv/data", "target": "/"},
 		}},

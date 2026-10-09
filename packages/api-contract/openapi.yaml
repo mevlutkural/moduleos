@@ -856,6 +856,12 @@ components:
       type: object
       additionalProperties: false
       required: [name, image]
+      anyOf:
+        - properties:
+            expose: {type: boolean, enum: [false]}
+        - required: [ingress_container_port]
+          properties:
+            ingress_container_port: {type: integer, minimum: 1, maximum: 65535}
       properties:
         name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", example: api}
         project_slug: {type: string, minLength: 1, maxLength: 48, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", default: root, example: root}

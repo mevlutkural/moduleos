@@ -422,6 +422,20 @@ func TestApplicationMutationValidationErrorMapsToUnprocessableEntity(t *testing.
 	}
 }
 
+func TestApplicationStartConflictUsesClientError(t *testing.T) {
+	server := newApplicationServer(t, &applicationServiceStub{run: func(context.Context, string, store.DesiredRunState, int64) (*store.Application, error) {
+		return nil, store.ErrConflict
+	}}, nil)
+	response := applicationRequest(t, server, http.MethodPost, "/apps/api/start", "", `"1"`)
+	if response.StatusCode != fiber.StatusConflict {
+		t.Fatalf("status = %d, want %d", response.StatusCode, fiber.StatusConflict)
+	}
+	var envelope apiresponse.ErrorResponse
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil || envelope.Error.Code != "conflict" {
+		t.Fatalf("error = %#v / %v", envelope, err)
+	}
+}
+
 func TestApplicationHandlersRejectMismatchedServiceIdentity(t *testing.T) {
 	other := validApplication()
 	other.Name = "other"

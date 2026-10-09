@@ -344,7 +344,7 @@ func (s *Service) SetRunState(ctx context.Context, name string, state store.Desi
 		return nil, err
 	}
 	if state == store.DesiredRunStateRunning && current.ResumeReplicas > s.maxReplicas {
-		return nil, fmt.Errorf("%w: resumed replicas exceed configured maximum", store.ErrInvalidData)
+		return nil, fmt.Errorf("%w: resumed replicas exceed configured maximum", store.ErrConflict)
 	}
 	if current.DesiredRunState == state {
 		return current, nil

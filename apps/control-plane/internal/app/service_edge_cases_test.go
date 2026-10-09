@@ -730,8 +730,8 @@ func TestRuntimeReplicaLimitIsRevalidatedAfterConfigurationChange(t *testing.T) 
 		t.Fatalf("stopped desired spec should remain reconcilable: %v", err)
 	}
 	queueAfterStop := len(queue.snapshot())
-	if _, err := service.SetRunState(t.Context(), created.Name, store.DesiredRunStateRunning, stopped.DesiredGeneration); !errors.Is(err, store.ErrInvalidData) {
-		t.Fatalf("restart above the new limit error = %v, want ErrInvalidData", err)
+	if _, err := service.SetRunState(t.Context(), created.Name, store.DesiredRunStateRunning, stopped.DesiredGeneration); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("restart above the new limit error = %v, want ErrConflict", err)
 	}
 	unchanged, err := st.GetApplication(t.Context(), created.Name)
 	if err != nil {
