@@ -142,16 +142,20 @@ func TestServiceConfigurationAndAccessors(t *testing.T) {
 	}
 
 	roots := []string{"/srv/moduleos"}
-	service.WithRuntimeLimits(3, roots, 2*time.Second).WithIngressNetwork("custom-ingress")
+	service.WithRuntimeLimits(3, roots, 2*time.Second).WithDockerEndpoint("unix:///srv/moduleos/docker.sock").WithIngressNetwork("custom-ingress")
 	roots[0] = "/mutated"
 	if service.maxReplicas != 3 || service.deploymentTimeout != 2*time.Second ||
 		len(service.allowedMountRoots) != 1 || service.allowedMountRoots[0] != "/srv/moduleos" ||
-		service.IngressNetwork() != "custom-ingress" {
+		service.dockerSocketPath != "/srv/moduleos/docker.sock" || service.IngressNetwork() != "custom-ingress" {
 		t.Fatalf("runtime configuration was not applied defensively: %#v", service)
 	}
 	service.WithRuntimeLimits(0, nil, 0).WithResourceLimits(0, 0).WithIngressNetwork("")
 	if service.maxReplicas != 3 || service.deploymentTimeout != 2*time.Second || service.IngressNetwork() != "custom-ingress" {
 		t.Fatal("non-positive or empty overrides changed existing limits")
+	}
+	service.WithDockerEndpoint("tcp://127.0.0.1:2375")
+	if service.dockerSocketPath != "" {
+		t.Fatalf("TCP endpoint retained a local socket path: %q", service.dockerSocketPath)
 	}
 	serviceWithDefaultLogger := NewService(st, swarmfake.New(), "moduleos.local", nil)
 	if serviceWithDefaultLogger.log == nil {
@@ -331,6 +335,25 @@ func TestResolvedDockerSocketIsDeniedWithoutAllowedRoots(t *testing.T) {
 	}
 	if len(queue.snapshot()) != 0 {
 		t.Fatalf("rejected Docker socket was enqueued: %#v", queue.snapshot())
+	}
+}
+
+func TestConfiguredDockerSocketIsDeniedInsideAllowedRoot(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	allowedRoot := t.TempDir()
+	socket := filepath.Join(allowedRoot, "custom-docker.sock")
+	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute).WithDockerEndpoint("unix://" + socket)
+	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+		Name: "custom-docker-socket", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: socket, Target: "/docker.sock"}},
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("configured Docker socket error = %v, want ErrInvalidData", err)
+	}
+	if _, err := st.GetApplication(t.Context(), "custom-docker-socket"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("application with configured Docker socket was persisted: %v", err)
+	}
+	if len(queue.snapshot()) != 0 {
+		t.Fatalf("application with configured Docker socket was enqueued: %#v", queue.snapshot())
 	}
 }
 

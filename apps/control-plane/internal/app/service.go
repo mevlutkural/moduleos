@@ -27,6 +27,7 @@ type Service struct {
 	log               *slog.Logger
 	queue             ReconcileQueue
 	allowedMountRoots []string
+	dockerSocketPath  string
 	maxReplicas       int
 	maxApplications   int
 	maxProjects       int
@@ -96,6 +97,7 @@ func NewService(st store.Store, sw swarm.Client, baseDomain string, log *slog.Lo
 		baseDomain:        baseDomain,
 		ingressNetwork:    "moduleos-ingress",
 		log:               log,
+		dockerSocketPath:  "/var/run/docker.sock",
 		maxReplicas:       20,
 		maxApplications:   100,
 		maxProjects:       20,
@@ -110,6 +112,22 @@ func (s *Service) WithRuntimeLimits(maxReplicas int, allowedMountRoots []string,
 	s.allowedMountRoots = append([]string(nil), allowedMountRoots...)
 	if deploymentTimeout > 0 {
 		s.deploymentTimeout = deploymentTimeout
+	}
+	return s
+}
+
+func (s *Service) WithDockerEndpoint(endpoint string) *Service {
+	path := endpoint
+	if strings.HasPrefix(endpoint, "unix://") {
+		path = strings.TrimPrefix(endpoint, "unix://")
+	} else if strings.HasPrefix(endpoint, "tcp://") {
+		s.dockerSocketPath = ""
+		return s
+	}
+	if filepath.IsAbs(path) && filepath.Clean(path) == path {
+		s.dockerSocketPath = path
+	} else {
+		s.dockerSocketPath = ""
 	}
 	return s
 }
@@ -723,7 +741,7 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 		if err != nil {
 			return nil, fmt.Errorf("%w: mount source cannot be resolved", store.ErrInvalidData)
 		}
-		if sensitiveMountSource(source) {
+		if s.sensitiveMountSource(source) {
 			return nil, fmt.Errorf("%w: mount source is denied", store.ErrInvalidData)
 		}
 		if len(s.allowedMountRoots) == 0 {
@@ -736,7 +754,7 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 			if err != nil {
 				return nil, fmt.Errorf("%w: allowed mount root cannot be resolved", store.ErrInvalidData)
 			}
-			if sensitiveMountSource(resolvedRoot) {
+			if s.sensitiveMountSource(resolvedRoot) {
 				return nil, fmt.Errorf("%w: allowed mount root is denied", store.ErrInvalidData)
 			}
 			relative, err := filepath.Rel(resolvedRoot, source)
@@ -753,13 +771,22 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 	return canonical, nil
 }
 
-func sensitiveMountSource(source string) bool {
+func (s *Service) sensitiveMountSource(source string) bool {
 	dockerSocket, err := resolveMountPath("/var/run/docker.sock")
 	if source == "/var/run/docker.sock" || source == "/run/docker.sock" {
 		return true
 	}
 	if err == nil && source == dockerSocket {
 		return true
+	}
+	if s.dockerSocketPath != "" {
+		configuredSocket, resolveErr := resolveMountPath(s.dockerSocketPath)
+		if source == s.dockerSocketPath {
+			return true
+		}
+		if resolveErr == nil && source == configuredSocket {
+			return true
+		}
 	}
 	return source == "/" || source == "/proc" || strings.HasPrefix(source, "/proc/") ||
 		source == "/sys" || strings.HasPrefix(source, "/sys/") ||

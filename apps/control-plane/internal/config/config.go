@@ -80,6 +80,14 @@ func (c *Config) Validate() error {
 	if !strings.HasPrefix(c.DockerEndpoint, "unix://") && !strings.HasPrefix(c.DockerEndpoint, "tcp://") && !filepath.IsAbs(c.DockerEndpoint) {
 		return fmt.Errorf("DOCKER_ENDPOINT must be unix://, tcp://, or an absolute socket path")
 	}
+	if strings.HasPrefix(c.DockerEndpoint, "unix://") {
+		path := strings.TrimPrefix(c.DockerEndpoint, "unix://")
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return fmt.Errorf("DOCKER_ENDPOINT Unix socket path must be canonical and absolute")
+		}
+	} else if filepath.IsAbs(c.DockerEndpoint) && filepath.Clean(c.DockerEndpoint) != c.DockerEndpoint {
+		return fmt.Errorf("DOCKER_ENDPOINT socket path must be canonical")
+	}
 	if !dnsName.MatchString(c.BaseDomain) || !strings.Contains(c.BaseDomain, ".") {
 		return fmt.Errorf("BASE_DOMAIN must be a valid DNS name")
 	}
