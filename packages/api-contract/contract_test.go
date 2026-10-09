@@ -217,7 +217,8 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	create := document.Components.Schemas["CreateApplicationRequest"]
 	update := document.Components.Schemas["UpdateApplicationRequest"]
 	scale := document.Components.Schemas["ScaleApplicationRequest"]
-	if create == nil || create.Value == nil || update == nil || update.Value == nil || scale == nil || scale.Value == nil {
+	volume := document.Components.Schemas["ApplicationVolumeInput"]
+	if create == nil || create.Value == nil || update == nil || update.Value == nil || scale == nil || scale.Value == nil || volume == nil || volume.Value == nil {
 		t.Fatal("application request schemas are unresolved")
 	}
 	for name, schema := range map[string]*openapi3.SchemaRef{"create": create, "update": update} {
@@ -236,6 +237,20 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	}
 	validate := func(schema *openapi3.SchemaRef, value any) error {
 		return schema.Value.VisitJSON(value, openapi3.EnableJSONSchema2020())
+	}
+	for name, value := range map[string]any{
+		"root source":           map[string]any{"source": "/", "target": "/data"},
+		"dot source":            map[string]any{"source": "/srv/./data", "target": "/data"},
+		"parent source":         map[string]any{"source": "/srv/data/../data", "target": "/data"},
+		"duplicate separator":   map[string]any{"source": "/srv//data", "target": "/data"},
+		"trailing target slash": map[string]any{"source": "/srv/data", "target": "/data/"},
+	} {
+		if err := validate(volume, value); err == nil {
+			t.Errorf("%s mount was accepted", name)
+		}
+	}
+	if err := validate(volume, map[string]any{"source": "/srv/.state/...", "target": "/data/.cache"}); err != nil {
+		t.Fatalf("canonical hidden mount path rejected: %v", err)
 	}
 	if err := validate(create, map[string]any{"name": "api", "image": "nginx:1.27"}); err != nil {
 		t.Fatalf("minimal create rejected: %v", err)
@@ -290,10 +305,12 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	if ifMatch == nil || ifMatch.Value == nil || ifMatch.Value.Schema == nil || ifMatch.Value.Schema.Value == nil {
 		t.Fatal("IfMatch parameter is unresolved")
 	}
-	if err := ifMatch.Value.Schema.Value.VisitJSON(`"12"`); err != nil {
-		t.Fatalf("canonical If-Match rejected: %v", err)
+	for _, value := range []string{`"1"`, `"999999999999999999"`, `"1000000000000000000"`, `"9000000000000000000"`, `"9223372036854775799"`, `"9223372036854775807"`} {
+		if err := ifMatch.Value.Schema.Value.VisitJSON(value); err != nil {
+			t.Fatalf("canonical If-Match %q rejected: %v", value, err)
+		}
 	}
-	for _, value := range []string{`12`, `W/"12"`, `"01"`, `*`, `"1", "2"`} {
+	for _, value := range []string{`12`, `W/"12"`, `"01"`, `*`, `"1", "2"`, `"9223372036854775808"`, `"9999999999999999999"`, `"10000000000000000000"`} {
 		if err := ifMatch.Value.Schema.Value.VisitJSON(value); err == nil {
 			t.Errorf("invalid If-Match %q was accepted", value)
 		}
