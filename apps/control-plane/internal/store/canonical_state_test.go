@@ -306,6 +306,22 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if portDefaults.Ports != `[{"container_port":8080,"published_port":18080,"protocol":"tcp","publish_mode":"host"},{"container_port":8080,"published_port":18080,"protocol":"tcp","publish_mode":"ingress"},{"container_port":8080,"published_port":18080,"protocol":"udp","publish_mode":"ingress"},{"container_port":9090,"published_port":0,"protocol":"tcp","publish_mode":"ingress"}]` {
 		t.Fatalf("legacy port defaults were not normalized: %#v", portDefaults)
 	}
+	volumePaths, err := upgraded.GetApplication(ctx, "legacy-volume-paths")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if volumePaths.Volumes != `[{"source":"/srv/legacy-cache","target":"/cache","read_only":false},{"source":"/srv/legacy/data","target":"/data","read_only":true}]` {
+		t.Fatalf("legacy volume paths were not normalized: %#v", volumePaths)
+	}
+	for _, name := range []string{"legacy-volume-conflict", "legacy-root-target"} {
+		application, err := upgraded.GetApplication(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if application.Volumes != "[]" {
+			t.Fatalf("irreconcilable legacy volumes were not disabled for %s: %#v", name, application)
+		}
+	}
 	project, err := upgraded.GetProject(ctx, "legacy-project")
 	if err != nil {
 		t.Fatal(err)
