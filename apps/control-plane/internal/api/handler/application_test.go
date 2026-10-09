@@ -159,6 +159,32 @@ func TestNewApplicationHandlerRejectsMissingDependencies(t *testing.T) {
 	}
 }
 
+func TestApplicationImageReferenceBoundary(t *testing.T) {
+	for _, value := range []string{
+		"nginx",
+		"ghcr.io/mevlutkural/moduleos:v0.1.0",
+		"registry.example.com:5000/team/api@sha256:" + strings.Repeat("a", 64),
+	} {
+		if !validImageReference(value) {
+			t.Errorf("valid image reference %q rejected", value)
+		}
+	}
+	for _, value := range []string{
+		"bad image",
+		"example.com/UPPERCASE",
+		"nginx:",
+		"nginx@sha256:short",
+		"nginx@sha256:" + strings.Repeat("a", 32),
+		"nginx@sha512:" + strings.Repeat("a", 128),
+		strings.Repeat("a", 64),
+		strings.Repeat("repo", 64),
+	} {
+		if validImageReference(value) {
+			t.Errorf("invalid image reference %q accepted", value)
+		}
+	}
+}
+
 func TestApplicationCreateMapsInputAndRedactsOutput(t *testing.T) {
 	called := false
 	service := &applicationServiceStub{create: func(_ context.Context, request controlapp.CreateAppRequest) (*store.Application, error) {
@@ -262,6 +288,8 @@ func TestApplicationValidationPrecedesServiceMutation(t *testing.T) {
 		{name: "create root target", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data","target":"/"}]}`, field: "volumes"},
 		{name: "create environment NUL", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","env_vars":{"TOKEN":"a\u0000b"}}`, field: "env_vars"},
 		{name: "create null environment value", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","env_vars":{"TOKEN":null}}`, field: "env_vars"},
+		{name: "create invalid image", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"bad image"}`, field: "image"},
+		{name: "create ambiguous hex image", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, field: "image"},
 		{name: "create exposed without ingress", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","expose":true}`, field: "ingress_container_port"},
 		{name: "create exposed with zero ingress", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","expose":true,"ingress_container_port":0}`, field: "ingress_container_port"},
 		{name: "create null published port", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","ports":[{"container_port":8080,"published_port":null}]}`, field: "ports"},

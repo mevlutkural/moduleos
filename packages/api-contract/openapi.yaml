@@ -832,6 +832,16 @@ components:
         published_port: {type: integer, minimum: 0, maximum: 65535, default: 0}
         protocol: {type: string, enum: [tcp, udp], default: tcp}
         publish_mode: {type: string, enum: [ingress, host], default: ingress}
+    ContainerImageReference:
+      description: Docker-compatible normalized container image name with an optional tag and SHA-256 content digest.
+      type: string
+      minLength: 1
+      maxLength: 255
+      anyOf:
+        - maxLength: 63
+        - pattern: '[g-zG-Z._/@:-]'
+      pattern: '^(?:(?:(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])(?:\.(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]))*|\[(?:[A-Fa-f0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$'
+      example: "ghcr.io/mevlutkural/moduleos:v0.1.0"
     CanonicalMountPath:
       description: Canonical absolute non-root POSIX path without NUL bytes, empty segments, or dot segments.
       type: string
@@ -867,7 +877,7 @@ components:
       properties:
         name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", example: api}
         project_slug: {type: string, minLength: 1, maxLength: 48, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", default: root, example: root}
-        image: {type: string, minLength: 1, maxLength: 512, example: "nginx:1.27"}
+        image: {$ref: "#/components/schemas/ContainerImageReference"}
         replicas:
           type: integer
           minimum: 1
@@ -974,8 +984,8 @@ components:
         project_id: {type: string, format: uuid, example: 00000000-0000-0000-0000-000000000001}
         name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", example: api}
         source_type: {type: string, const: image, example: image}
-        image: {type: string, minLength: 1, example: "nginx:1.27"}
-        observed_image: {type: string, minLength: 1, example: "nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+        image: {$ref: "#/components/schemas/ContainerImageReference"}
+        observed_image: {$ref: "#/components/schemas/ContainerImageReference"}
         status: {$ref: "#/components/schemas/ApplicationStatus"}
         replicas: {type: integer, minimum: 0, example: 2}
         desired_run_state: {$ref: "#/components/schemas/DesiredRunState"}

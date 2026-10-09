@@ -218,7 +218,8 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	update := document.Components.Schemas["UpdateApplicationRequest"]
 	scale := document.Components.Schemas["ScaleApplicationRequest"]
 	volume := document.Components.Schemas["ApplicationVolumeInput"]
-	if create == nil || create.Value == nil || update == nil || update.Value == nil || scale == nil || scale.Value == nil || volume == nil || volume.Value == nil {
+	image := document.Components.Schemas["ContainerImageReference"]
+	if create == nil || create.Value == nil || update == nil || update.Value == nil || scale == nil || scale.Value == nil || volume == nil || volume.Value == nil || image == nil || image.Value == nil {
 		t.Fatal("application request schemas are unresolved")
 	}
 	for name, schema := range map[string]*openapi3.SchemaRef{"create": create, "update": update} {
@@ -237,6 +238,16 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	}
 	validate := func(schema *openapi3.SchemaRef, value any) error {
 		return schema.Value.VisitJSON(value, openapi3.EnableJSONSchema2020())
+	}
+	for _, value := range []string{"nginx", "ghcr.io/mevlutkural/moduleos:v0.1.0", "registry.example.com:5000/team/api@sha256:" + strings.Repeat("a", 64)} {
+		if err := validate(image, value); err != nil {
+			t.Errorf("valid image reference %q rejected: %v", value, err)
+		}
+	}
+	for _, value := range []string{"bad image", "example.com/UPPERCASE", "nginx:", "nginx@sha256:short", "nginx@sha256:" + strings.Repeat("a", 32), "nginx@sha512:" + strings.Repeat("a", 128), strings.Repeat("a", 64), strings.Repeat("repo", 64)} {
+		if err := validate(image, value); err == nil {
+			t.Errorf("invalid image reference %q accepted", value)
+		}
 	}
 	for name, value := range map[string]any{
 		"root source":           map[string]any{"source": "/", "target": "/data"},
@@ -265,6 +276,7 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 		"zero replicas":            map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 0},
 		"replica overflow":         map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 1001},
 		"uppercase name":           map[string]any{"name": "API", "image": "nginx:1.27"},
+		"invalid image":            map[string]any{"name": "api", "image": "bad image"},
 		"null project":             map[string]any{"name": "api", "image": "nginx:1.27", "project_slug": nil},
 		"null environment":         map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": nil},
 		"null environment value":   map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": map[string]any{"TOKEN": nil}},

@@ -212,11 +212,35 @@ func mapApplicationCollection(applications []*store.Application) (ApplicationCol
 }
 
 func validImageReference(value string) bool {
-	if !utf8.ValidString(value) || strings.TrimSpace(value) != value || value == "" {
+	if !utf8.ValidString(value) || strings.TrimSpace(value) != value || value == "" || len(value) > 255 || longLowerHexIdentifier(value) {
 		return false
+	}
+	if separator := strings.LastIndexByte(value, '@'); separator >= 0 {
+		digest := value[separator+1:]
+		if len(digest) != len("sha256:")+64 || !strings.HasPrefix(digest, "sha256:") || !lowerHex(digest[len("sha256:"):]) {
+			return false
+		}
 	}
 	_, err := reference.ParseNormalizedNamed(value)
 	return err == nil
+}
+
+func longLowerHexIdentifier(value string) bool {
+	return len(value) >= 64 && lowerHex(value)
+}
+
+func lowerHex(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validOptionalImageReference(value string) bool {
