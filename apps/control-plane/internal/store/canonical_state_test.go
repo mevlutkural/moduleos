@@ -303,7 +303,7 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if portDefaults.Ports != `[{"container_port":8080,"published_port":0,"protocol":"tcp","publish_mode":"ingress"}]` {
+	if portDefaults.Ports != `[{"container_port":8080,"published_port":18080,"protocol":"tcp","publish_mode":"host"},{"container_port":8080,"published_port":18080,"protocol":"tcp","publish_mode":"ingress"},{"container_port":8080,"published_port":18080,"protocol":"udp","publish_mode":"ingress"},{"container_port":9090,"published_port":0,"protocol":"tcp","publish_mode":"ingress"}]` {
 		t.Fatalf("legacy port defaults were not normalized: %#v", portDefaults)
 	}
 	project, err := upgraded.GetProject(ctx, "legacy-project")

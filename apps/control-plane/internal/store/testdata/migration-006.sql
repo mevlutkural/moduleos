@@ -39,7 +39,7 @@ INSERT INTO applications (
         '10000000-0000-0000-0000-000000000001',
         'legacy-port-defaults', 'image', 'caddy:2.10', 'created', 1,
         '{}',
-        '[{"container_port":8080,"published_port":0,"protocol":"","publish_mode":""}]',
+        '[{"container_port":8080,"published_port":18080,"protocol":"udp","publish_mode":"ingress"},{"container_port":8080,"published_port":18080,"protocol":"tcp","publish_mode":"ingress"},{"container_port":8080,"published_port":18080,"protocol":"tcp","publish_mode":"host"},{"container_port":9090,"published_port":0,"protocol":"","publish_mode":""}]',
         '[]', 0, '', '2025-05-02 03:04:05', '2025-05-03 04:05:06'
     );
 
