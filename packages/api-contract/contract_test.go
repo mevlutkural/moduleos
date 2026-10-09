@@ -26,6 +26,14 @@ func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
 	}
 
 	wantResponses := map[string][]string{
+		"POST /apps":                              {"201", "400", "401", "409", "413", "415", "422", "500", "503"},
+		"GET /apps":                               {"200", "401", "500", "503"},
+		"GET /apps/{name}":                        {"200", "400", "401", "404", "500", "503"},
+		"PATCH /apps/{name}":                      {"202", "400", "401", "404", "409", "412", "413", "415", "422", "428", "500", "503"},
+		"DELETE /apps/{name}":                     {"202", "400", "401", "404", "409", "412", "428", "500", "503"},
+		"POST /apps/{name}/start":                 {"202", "400", "401", "404", "409", "412", "428", "500", "503"},
+		"POST /apps/{name}/stop":                  {"202", "400", "401", "404", "409", "412", "428", "500", "503"},
+		"POST /apps/{name}/scale":                 {"202", "400", "401", "404", "409", "412", "413", "415", "422", "428", "500", "503"},
 		"GET /live":                               {"200", "500"},
 		"GET /ready":                              {"200", "500", "503"},
 		"GET /version":                            {"200", "500"},
@@ -39,6 +47,8 @@ func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
 		"DELETE /projects/{slug}/links/{link_id}": {"202", "400", "401", "404", "500", "503"},
 	}
 	systemOperations := map[string]bool{"GET /live": true, "GET /ready": true, "GET /version": true}
+	bodyOperations := map[string]bool{"POST /apps": true, "PATCH /apps/{name}": true, "POST /apps/{name}/scale": true, "POST /projects": true, "POST /projects/{slug}/links": true}
+	createOperations := map[string]bool{"POST /apps": true, "POST /projects": true, "POST /projects/{slug}/links": true}
 	var operations []string
 	operationIDs := make(map[string]struct{})
 	for _, path := range document.Paths.InMatchingOrder() {
@@ -94,10 +104,12 @@ func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
 					t.Fatalf("%s response 401 is missing WWW-Authenticate", operationKey)
 				}
 			}
-			if method == "POST" {
+			if bodyOperations[operationKey] {
 				if operation.RequestBody == nil || operation.RequestBody.Value == nil || operation.RequestBody.Value.Content.Get("application/json") == nil {
 					t.Fatalf("%s is missing its JSON request body", operationKey)
 				}
+			}
+			if createOperations[operationKey] {
 				if operation.Responses.Value("201").Value.Headers["Location"] == nil {
 					t.Fatalf("%s response 201 is missing Location", operationKey)
 				}
@@ -109,8 +121,11 @@ func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
 	}
 	sort.Strings(operations)
 	want := []string{
+		"DELETE /apps/{name}",
 		"DELETE /projects/{slug}",
 		"DELETE /projects/{slug}/links/{link_id}",
+		"GET /apps",
+		"GET /apps/{name}",
 		"GET /live",
 		"GET /projects",
 		"GET /projects/{slug}",
@@ -118,6 +133,11 @@ func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
 		"GET /projects/{slug}/links",
 		"GET /ready",
 		"GET /version",
+		"PATCH /apps/{name}",
+		"POST /apps",
+		"POST /apps/{name}/scale",
+		"POST /apps/{name}/start",
+		"POST /apps/{name}/stop",
 		"POST /projects",
 		"POST /projects/{slug}/links",
 	}
@@ -139,6 +159,8 @@ func TestProjectSchemasKeepPersistenceAndSecretFieldsPrivate(t *testing.T) {
 		{schema: "Project", forbidden: []string{"network", "finalizer_state", "reconcile_error_message"}},
 		{schema: "ProjectApplicationSummary", forbidden: []string{"project_id", "image", "observed_image", "env_vars", "ports", "volumes", "domain", "reconcile_error_message", "finalizer_state"}},
 		{schema: "ProjectLink", forbidden: []string{"source_project_id", "target_app_id", "deletion_timestamp"}},
+		{schema: "Application", forbidden: []string{"reconcile_error_message", "reconcile_attempt", "resume_replicas", "domain", "finalizer_state"}},
+		{schema: "ApplicationVolume", forbidden: []string{"source"}},
 	}
 	for _, test := range tests {
 		schema := document.Components.Schemas[test.schema]
@@ -183,5 +205,62 @@ func TestProjectRequestSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	}
 	if err := linkID.Value.Schema.Value.VisitJSON("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"); err == nil {
 		t.Fatal("uppercase non-canonical project-link UUID was accepted")
+	}
+}
+
+func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
+	loader := openapi3.NewLoader()
+	document, err := loader.LoadFromFile("openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	create := document.Components.Schemas["CreateApplicationRequest"]
+	update := document.Components.Schemas["UpdateApplicationRequest"]
+	scale := document.Components.Schemas["ScaleApplicationRequest"]
+	if create == nil || create.Value == nil || update == nil || update.Value == nil || scale == nil || scale.Value == nil {
+		t.Fatal("application request schemas are unresolved")
+	}
+	if err := create.Value.VisitJSON(map[string]any{"name": "api", "image": "nginx:1.27"}); err != nil {
+		t.Fatalf("minimal create rejected: %v", err)
+	}
+	for name, value := range map[string]any{
+		"zero replicas":    map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 0},
+		"uppercase name":   map[string]any{"name": "API", "image": "nginx:1.27"},
+		"null environment": map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": nil},
+	} {
+		if err := create.Value.VisitJSON(value); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	if err := update.Value.VisitJSON(map[string]any{"env_vars": map[string]any{}}); err != nil {
+		t.Fatalf("empty replacement rejected: %v", err)
+	}
+	for name, value := range map[string]any{
+		"empty patch": map[string]any{},
+		"image patch": map[string]any{"image": "nginx:2"},
+		"null patch":  map[string]any{"env_vars": nil},
+	} {
+		if err := update.Value.VisitJSON(value); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	if err := scale.Value.VisitJSON(map[string]any{"replicas": 0}); err != nil {
+		t.Fatalf("scale-to-zero rejected: %v", err)
+	}
+	if err := scale.Value.VisitJSON(map[string]any{"replicas": -1}); err == nil {
+		t.Fatal("negative scale was accepted")
+	}
+
+	ifMatch := document.Components.Parameters["IfMatch"]
+	if ifMatch == nil || ifMatch.Value == nil || ifMatch.Value.Schema == nil || ifMatch.Value.Schema.Value == nil {
+		t.Fatal("IfMatch parameter is unresolved")
+	}
+	if err := ifMatch.Value.Schema.Value.VisitJSON(`"12"`); err != nil {
+		t.Fatalf("canonical If-Match rejected: %v", err)
+	}
+	for _, value := range []string{`12`, `W/"12"`, `"01"`, `*`, `"1", "2"`} {
+		if err := ifMatch.Value.Schema.Value.VisitJSON(value); err == nil {
+			t.Errorf("invalid If-Match %q was accepted", value)
+		}
 	}
 }

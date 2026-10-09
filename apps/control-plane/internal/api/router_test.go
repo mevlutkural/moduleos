@@ -64,6 +64,53 @@ type routerHealthRuntime struct {
 
 type routerProjectService struct{}
 
+type routerApplicationService struct{}
+
+type routerRecordingQueue struct {
+	mu    sync.Mutex
+	names []string
+}
+
+func (q *routerRecordingQueue) Enqueue(name string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.names = append(q.names, name)
+}
+
+func (q *routerRecordingQueue) count() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.names)
+}
+
+func (*routerApplicationService) CreateApp(context.Context, controlapp.CreateAppRequest) (*store.Application, error) {
+	return nil, store.ErrNotFound
+}
+
+func (*routerApplicationService) ListApps(context.Context) ([]*store.Application, error) {
+	return []*store.Application{}, nil
+}
+
+func (*routerApplicationService) GetApp(context.Context, string) (*store.Application, error) {
+	return nil, store.ErrNotFound
+}
+
+func (*routerApplicationService) UpdateApp(context.Context, controlapp.UpdateAppRequest) (*store.Application, error) {
+	return nil, store.ErrNotFound
+}
+
+func (*routerApplicationService) DeleteAppIntent(context.Context, string, int64) (*store.Application, error) {
+	return nil, store.ErrNotFound
+}
+
+func (*routerApplicationService) SetRunState(context.Context, string, store.DesiredRunState, int64) (*store.Application, error) {
+	return nil, store.ErrNotFound
+}
+
+func (*routerApplicationService) ScaleAppIntent(context.Context, string, int, int64) (*store.Application, error) {
+	return nil, store.ErrNotFound
+}
+
 func (*routerProjectService) CreateProject(context.Context, controlapp.CreateProjectRequest) (*store.Project, error) {
 	return nil, store.ErrNotFound
 }
@@ -149,6 +196,7 @@ func validRouterOptions() RouterOptions {
 		Store:              &routerHealthStore{},
 		Runtime:            &routerHealthRuntime{},
 		Projects:           &routerProjectService{},
+		Applications:       &routerApplicationService{},
 		Environment:        "development",
 		IngressNetwork:     "moduleos-ingress",
 		BodyLimit:          1024,
@@ -212,6 +260,7 @@ func TestNewRouterRejectsInvalidOptions(t *testing.T) {
 		{name: "store", mutate: func(options *RouterOptions) { options.Store = nil }},
 		{name: "runtime", mutate: func(options *RouterOptions) { options.Runtime = nil }},
 		{name: "projects", mutate: func(options *RouterOptions) { options.Projects = nil }},
+		{name: "applications", mutate: func(options *RouterOptions) { options.Applications = nil }},
 		{name: "environment", mutate: func(options *RouterOptions) { options.Environment = "staging" }},
 		{name: "production API key missing", mutate: func(options *RouterOptions) { options.Environment = "production" }},
 		{name: "production API key short", mutate: func(options *RouterOptions) {
@@ -285,6 +334,12 @@ func TestNewRouterRejectsTypedNilHealthDependencies(t *testing.T) {
 	if _, err := NewRouter(options); !errors.Is(err, ErrInvalidRouterOptions) {
 		t.Fatalf("projects error = %v", err)
 	}
+	var nilApplications *routerApplicationService
+	options = validRouterOptions()
+	options.Applications = nilApplications
+	if _, err := NewRouter(options); !errors.Is(err, ErrInvalidRouterOptions) {
+		t.Fatalf("applications error = %v", err)
+	}
 }
 
 func TestNormalizeOriginsTrimsCanonicalizesDeduplicatesAndSorts(t *testing.T) {
@@ -310,15 +365,18 @@ func TestNormalizeOriginsTrimsCanonicalizesDeduplicatesAndSorts(t *testing.T) {
 	}
 }
 
-func TestRouterRegistersPhase6BContractRoutes(t *testing.T) {
+func TestRouterRegistersPhase6C1ContractRoutes(t *testing.T) {
 	router, err := NewRouter(validRouterOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := routeInventory(router.App)
 	want := []string{
+		"DELETE /api/v1/apps/:name",
 		"DELETE /api/v1/projects/:slug",
 		"DELETE /api/v1/projects/:slug/links/:link_id",
+		"GET /api/v1/apps",
+		"GET /api/v1/apps/:name",
 		"GET /api/v1/live",
 		"GET /api/v1/projects",
 		"GET /api/v1/projects/:slug",
@@ -326,6 +384,11 @@ func TestRouterRegistersPhase6BContractRoutes(t *testing.T) {
 		"GET /api/v1/projects/:slug/links",
 		"GET /api/v1/ready",
 		"GET /api/v1/version",
+		"PATCH /api/v1/apps/:name",
+		"POST /api/v1/apps",
+		"POST /api/v1/apps/:name/scale",
+		"POST /api/v1/apps/:name/start",
+		"POST /api/v1/apps/:name/stop",
 		"POST /api/v1/projects",
 		"POST /api/v1/projects/:slug/links",
 	}
@@ -368,6 +431,9 @@ func TestRouterUsesStableErrorsAndStrictPaths(t *testing.T) {
 	}{
 		{method: http.MethodGet, path: "/api/v1/health", wantStatus: 404, wantCode: "not_found"},
 		{method: http.MethodGet, path: "/api/v1/live/", wantStatus: 404, wantCode: "not_found"},
+		{method: http.MethodGet, path: "/api/v1/apps/", wantStatus: 404, wantCode: "not_found"},
+		{method: http.MethodGet, path: "/api/v1/apps/api/", wantStatus: 404, wantCode: "not_found"},
+		{method: http.MethodGet, path: "/api/v1/apps/api%2Fother", wantStatus: 400, wantCode: "invalid_request"},
 		{method: http.MethodGet, path: "/API/v1/live", wantStatus: 404, wantCode: "not_found"},
 		{method: http.MethodPost, path: "/api/v1/live", wantStatus: 405, wantCode: "method_not_allowed"},
 		{method: "PROPFIND", path: "/api/v1/live", wantStatus: 405, wantCode: "method_not_allowed"},
@@ -624,7 +690,7 @@ func TestRouterRoutesMatchOpenAPIContract(t *testing.T) {
 	for _, path := range document.Paths.InMatchingOrder() {
 		item := document.Paths.Find(path)
 		for method := range item.Operations() {
-			fiberPath := strings.NewReplacer("{slug}", ":slug", "{link_id}", ":link_id").Replace(path)
+			fiberPath := strings.NewReplacer("{slug}", ":slug", "{link_id}", ":link_id", "{name}", ":name").Replace(path)
 			contractRoutes = append(contractRoutes, strings.ToUpper(method)+" "+prefix+fiberPath)
 		}
 	}
@@ -763,9 +829,9 @@ func TestRouterProjectCORSPreflightRunsBeforeAuthentication(t *testing.T) {
 	request := httptest.NewRequest(http.MethodOptions, "/api/v1/projects", nil)
 	request.Header.Set(fiber.HeaderOrigin, "https://dashboard.example.com")
 	request.Header.Set(fiber.HeaderAccessControlRequestMethod, http.MethodPost)
-	request.Header.Set(fiber.HeaderAccessControlRequestHeaders, "authorization, content-type")
+	request.Header.Set(fiber.HeaderAccessControlRequestHeaders, "authorization, content-type, if-match")
 	response := sendRequest(t, router.App, request)
-	if response.StatusCode != fiber.StatusNoContent || response.Header.Get(fiber.HeaderAccessControlAllowOrigin) != "https://dashboard.example.com" {
+	if response.StatusCode != fiber.StatusNoContent || response.Header.Get(fiber.HeaderAccessControlAllowOrigin) != "https://dashboard.example.com" || !strings.Contains(strings.ToLower(response.Header.Get(fiber.HeaderAccessControlAllowHeaders)), "if-match") {
 		t.Fatalf("preflight = %d/%#v", response.StatusCode, response.Header)
 	}
 }
@@ -867,6 +933,198 @@ func TestRouterProjectLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T) {
 	persisted, err := st.GetProject(t.Context(), "payments")
 	if err != nil || persisted.DeletionTimestamp == nil {
 		t.Fatalf("deletion intent = %#v/%v", persisted, err)
+	}
+}
+
+func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T) {
+	st, err := store.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	queue := &routerRecordingQueue{}
+	service := controlapp.NewService(st, swarmfake.New(), "moduleos.local", slog.New(slog.NewTextHandler(io.Discard, nil))).WithReconcileQueue(queue)
+	options := validRouterOptions()
+	options.Store = st
+	options.Projects = service
+	options.Applications = service
+	options.APIKey = "test-key"
+	router, err := NewRouter(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractRouter := contractRouterForTest(t)
+
+	send := func(method, path, body, etag string) (*http.Response, []byte) {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set(fiber.HeaderAuthorization, "Bearer test-key")
+		if body != "" {
+			request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+		}
+		if etag != "" {
+			request.Header.Set(fiber.HeaderIfMatch, etag)
+		}
+		response := sendRequest(t, router.App, request)
+		return response, validateOpenAPIResponse(t, contractRouter, request, response)
+	}
+
+	created, createdBody := send(http.MethodPost, "/api/v1/apps", `{"name":"api","image":"nginx:1.27","replicas":2,"env_vars":{"SECRET":"private"},"ports":[{"container_port":8080}],"volumes":[{"source":"/srv/moduleos/data","target":"/data","read_only":true}]}`, "")
+	if created.StatusCode != fiber.StatusCreated || created.Header.Get(fiber.HeaderETag) != `"1"` || created.Header.Get(fiber.HeaderLocation) != "/api/v1/apps/api" || queue.count() != 1 {
+		t.Fatalf("create = %d/%#v queue=%d body=%s", created.StatusCode, created.Header, queue.count(), createdBody)
+	}
+	for _, forbidden := range []string{"private", "/srv/moduleos/data", "reconcile_error_message", "finalizer_state"} {
+		if strings.Contains(string(createdBody), forbidden) {
+			t.Fatalf("create leaked %q: %s", forbidden, createdBody)
+		}
+	}
+
+	listed, listedBody := send(http.MethodGet, "/api/v1/apps", "", "")
+	if listed.StatusCode != fiber.StatusOK || decodeJSONBytes[handler.ApplicationCollectionResponse](t, listedBody).Total != 1 {
+		t.Fatalf("list = %d/%s", listed.StatusCode, listedBody)
+	}
+	got, gotBody := send(http.MethodGet, "/api/v1/apps/api", "", "")
+	if got.StatusCode != fiber.StatusOK || got.Header.Get(fiber.HeaderETag) != `"1"` {
+		t.Fatalf("get = %d/%#v/%s", got.StatusCode, got.Header, gotBody)
+	}
+
+	updated, updatedBody := send(http.MethodPatch, "/api/v1/apps/api", `{"env_vars":{"MODE":"production"},"ports":[],"volumes":[]}`, `"1"`)
+	if updated.StatusCode != fiber.StatusAccepted || updated.Header.Get(fiber.HeaderETag) != `"2"` || queue.count() != 2 {
+		t.Fatalf("update = %d/%#v queue=%d body=%s", updated.StatusCode, updated.Header, queue.count(), updatedBody)
+	}
+	stale, staleBody := send(http.MethodPatch, "/api/v1/apps/api", `{"env_vars":{"MODE":"production"}}`, `"1"`)
+	if stale.StatusCode != fiber.StatusPreconditionFailed || queue.count() != 2 || decodeJSONBytes[apiresponse.ErrorResponse](t, staleBody).Error.Code != "precondition_failed" {
+		t.Fatalf("stale = %d queue=%d body=%s", stale.StatusCode, queue.count(), staleBody)
+	}
+	replayed, replayedBody := send(http.MethodPatch, "/api/v1/apps/api", `{"env_vars":{"MODE":"production"}}`, `"2"`)
+	if replayed.StatusCode != fiber.StatusAccepted || replayed.Header.Get(fiber.HeaderETag) != `"2"` || queue.count() != 2 {
+		t.Fatalf("replay = %d/%#v queue=%d body=%s", replayed.StatusCode, replayed.Header, queue.count(), replayedBody)
+	}
+
+	scaled, scaledBody := send(http.MethodPost, "/api/v1/apps/api/scale", `{"replicas":3}`, `"2"`)
+	if scaled.StatusCode != fiber.StatusAccepted || scaled.Header.Get(fiber.HeaderETag) != `"3"` || queue.count() != 3 {
+		t.Fatalf("scale = %d/%#v queue=%d body=%s", scaled.StatusCode, scaled.Header, queue.count(), scaledBody)
+	}
+	stopped, stoppedBody := send(http.MethodPost, "/api/v1/apps/api/stop", "", `"3"`)
+	if stopped.StatusCode != fiber.StatusAccepted || stopped.Header.Get(fiber.HeaderETag) != `"4"` || queue.count() != 4 {
+		t.Fatalf("stop = %d/%#v queue=%d body=%s", stopped.StatusCode, stopped.Header, queue.count(), stoppedBody)
+	}
+	stopReplay, stopReplayBody := send(http.MethodPost, "/api/v1/apps/api/stop", "", `"4"`)
+	if stopReplay.StatusCode != fiber.StatusAccepted || stopReplay.Header.Get(fiber.HeaderETag) != `"4"` || queue.count() != 4 {
+		t.Fatalf("stop replay = %d/%#v queue=%d body=%s", stopReplay.StatusCode, stopReplay.Header, queue.count(), stopReplayBody)
+	}
+	started, startedBody := send(http.MethodPost, "/api/v1/apps/api/start", "", `"4"`)
+	if started.StatusCode != fiber.StatusAccepted || started.Header.Get(fiber.HeaderETag) != `"5"` || queue.count() != 5 {
+		t.Fatalf("start = %d/%#v queue=%d body=%s", started.StatusCode, started.Header, queue.count(), startedBody)
+	}
+
+	deleting, deletingBody := send(http.MethodDelete, "/api/v1/apps/api", "", `"5"`)
+	if deleting.StatusCode != fiber.StatusAccepted || deleting.Header.Get(fiber.HeaderETag) != `"6"` || queue.count() != 6 {
+		t.Fatalf("delete = %d/%#v queue=%d body=%s", deleting.StatusCode, deleting.Header, queue.count(), deletingBody)
+	}
+	deleteReplay, deleteReplayBody := send(http.MethodDelete, "/api/v1/apps/api", "", `"6"`)
+	if deleteReplay.StatusCode != fiber.StatusAccepted || deleteReplay.Header.Get(fiber.HeaderETag) != `"6"` || queue.count() != 6 {
+		t.Fatalf("delete replay = %d/%#v queue=%d body=%s", deleteReplay.StatusCode, deleteReplay.Header, queue.count(), deleteReplayBody)
+	}
+	persisted, err := st.GetApplication(t.Context(), "api")
+	if err != nil || persisted.DeletionTimestamp == nil || persisted.DesiredGeneration != 6 {
+		t.Fatalf("persisted = %#v/%v", persisted, err)
+	}
+}
+
+func TestRouterApplicationFailureResponsesMatchOpenAPI(t *testing.T) {
+	contractRouter := contractRouterForTest(t)
+	options := validRouterOptions()
+	options.APIKey = "test-key"
+	router, err := NewRouter(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, method, path, body, contentType, etag string
+		authorized                                  bool
+		wantStatus                                  int
+	}{
+		{name: "unauthorized", method: http.MethodGet, path: "/api/v1/apps", wantStatus: 401},
+		{name: "invalid path", method: http.MethodGet, path: "/api/v1/apps/Bad", authorized: true, wantStatus: 400},
+		{name: "not found", method: http.MethodGet, path: "/api/v1/apps/missing", authorized: true, wantStatus: 404},
+		{name: "missing precondition", method: http.MethodDelete, path: "/api/v1/apps/missing", authorized: true, wantStatus: 428},
+		{name: "malformed precondition", method: http.MethodDelete, path: "/api/v1/apps/missing", etag: `W/"1"`, authorized: true, wantStatus: 400},
+		{name: "malformed JSON", method: http.MethodPost, path: "/api/v1/apps", body: `{"name":`, contentType: fiber.MIMEApplicationJSON, authorized: true, wantStatus: 400},
+		{name: "wrong media", method: http.MethodPost, path: "/api/v1/apps", body: `{}`, contentType: fiber.MIMETextPlain, authorized: true, wantStatus: 415},
+		{name: "validation", method: http.MethodPost, path: "/api/v1/apps", body: `{}`, contentType: fiber.MIMEApplicationJSON, authorized: true, wantStatus: 422},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			if test.contentType != "" {
+				request.Header.Set(fiber.HeaderContentType, test.contentType)
+			}
+			if test.etag != "" {
+				request.Header.Set(fiber.HeaderIfMatch, test.etag)
+			}
+			if test.authorized {
+				request.Header.Set(fiber.HeaderAuthorization, "Bearer test-key")
+			}
+			response := sendRequest(t, router.App, request)
+			payload := validateOpenAPIResponse(t, contractRouter, request, response)
+			var envelope apiresponse.ErrorResponse
+			if err := json.Unmarshal(payload, &envelope); err != nil || response.StatusCode != test.wantStatus || envelope.Error.RequestID == "" || response.Header.Get(fiber.HeaderCacheControl) != "no-store" {
+				t.Fatalf("response = %d/%#v/%v/%#v", response.StatusCode, envelope, err, response.Header)
+			}
+		})
+	}
+}
+
+func TestRouterConcurrentApplicationMutationHasOneWinner(t *testing.T) {
+	st, err := store.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	queue := &routerRecordingQueue{}
+	service := controlapp.NewService(st, swarmfake.New(), "moduleos.local", slog.New(slog.NewTextHandler(io.Discard, nil))).WithReconcileQueue(queue)
+	created, err := service.CreateApp(t.Context(), controlapp.CreateAppRequest{Name: "race-app", Image: "nginx:1.27"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := validRouterOptions()
+	options.Store = st
+	options.Projects = service
+	options.Applications = service
+	options.APIKey = "test-key"
+	options.RequestConcurrency = 8
+	router, err := NewRouter(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	statuses := make(chan int, 2)
+	start := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-start
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/apps/race-app/scale", strings.NewReader(`{"replicas":2}`))
+			request.Header.Set(fiber.HeaderAuthorization, "Bearer test-key")
+			request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+			request.Header.Set(fiber.HeaderIfMatch, `"1"`)
+			response, requestErr := router.App.Test(request, fiber.TestConfig{Timeout: 0})
+			if requestErr != nil {
+				statuses <- 0
+				return
+			}
+			_ = response.Body.Close()
+			statuses <- response.StatusCode
+		}()
+	}
+	close(start)
+	first, second := <-statuses, <-statuses
+	if !((first == fiber.StatusAccepted && second == fiber.StatusPreconditionFailed) || (first == fiber.StatusPreconditionFailed && second == fiber.StatusAccepted)) {
+		t.Fatalf("statuses = %d/%d", first, second)
+	}
+	persisted, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil || persisted.DesiredGeneration != 2 || persisted.Replicas != 2 || queue.count() != 2 {
+		t.Fatalf("application = %#v err=%v queue=%d", persisted, err, queue.count())
 	}
 }
 
