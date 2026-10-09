@@ -220,10 +220,27 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	if create == nil || create.Value == nil || update == nil || update.Value == nil || scale == nil || scale.Value == nil {
 		t.Fatal("application request schemas are unresolved")
 	}
-	if err := create.Value.VisitJSON(map[string]any{"name": "api", "image": "nginx:1.27"}); err != nil {
+	for name, schema := range map[string]*openapi3.SchemaRef{"create": create, "update": update} {
+		environment := schema.Value.Properties["env_vars"]
+		if environment == nil || environment.Value == nil || environment.Value.PropertyNames == nil || environment.Value.PropertyNames.Value == nil {
+			t.Fatalf("%s environment property-name schema is unresolved", name)
+		}
+		if err := environment.Value.VisitJSON(map[string]any{"MODE": "production", "_TOKEN": "value"}, openapi3.EnableJSONSchema2020()); err != nil {
+			t.Errorf("%s environment property-name schema rejected valid keys: %v", name, err)
+		}
+		for _, invalid := range []string{"", "1MODE", "BAD-KEY"} {
+			if err := environment.Value.VisitJSON(map[string]any{invalid: "value"}, openapi3.EnableJSONSchema2020()); err == nil {
+				t.Errorf("%s environment property-name schema accepted invalid key %q", name, invalid)
+			}
+		}
+	}
+	validate := func(schema *openapi3.SchemaRef, value any) error {
+		return schema.Value.VisitJSON(value, openapi3.EnableJSONSchema2020())
+	}
+	if err := validate(create, map[string]any{"name": "api", "image": "nginx:1.27"}); err != nil {
 		t.Fatalf("minimal create rejected: %v", err)
 	}
-	if err := create.Value.VisitJSON(map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 1000}); err != nil {
+	if err := validate(create, map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 1000}); err != nil {
 		t.Fatalf("global replica ceiling rejected: %v", err)
 	}
 	for name, value := range map[string]any{
@@ -240,11 +257,11 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 			map[string]any{"source": "/srv/data", "target": "/data\x00suffix"},
 		}},
 	} {
-		if err := create.Value.VisitJSON(value); err == nil {
+		if err := validate(create, value); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
 	}
-	if err := update.Value.VisitJSON(map[string]any{"env_vars": map[string]any{}}); err != nil {
+	if err := validate(update, map[string]any{"env_vars": map[string]any{}}); err != nil {
 		t.Fatalf("empty replacement rejected: %v", err)
 	}
 	for name, value := range map[string]any{
@@ -252,20 +269,20 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 		"image patch": map[string]any{"image": "nginx:2"},
 		"null patch":  map[string]any{"env_vars": nil},
 	} {
-		if err := update.Value.VisitJSON(value); err == nil {
+		if err := validate(update, value); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
 	}
-	if err := scale.Value.VisitJSON(map[string]any{"replicas": 0}); err != nil {
+	if err := validate(scale, map[string]any{"replicas": 0}); err != nil {
 		t.Fatalf("scale-to-zero rejected: %v", err)
 	}
-	if err := scale.Value.VisitJSON(map[string]any{"replicas": 1000}); err != nil {
+	if err := validate(scale, map[string]any{"replicas": 1000}); err != nil {
 		t.Fatalf("global scale ceiling rejected: %v", err)
 	}
-	if err := scale.Value.VisitJSON(map[string]any{"replicas": -1}); err == nil {
+	if err := validate(scale, map[string]any{"replicas": -1}); err == nil {
 		t.Fatal("negative scale was accepted")
 	}
-	if err := scale.Value.VisitJSON(map[string]any{"replicas": 1001}); err == nil {
+	if err := validate(scale, map[string]any{"replicas": 1001}); err == nil {
 		t.Fatal("scale above global ceiling was accepted")
 	}
 

@@ -318,6 +318,22 @@ func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
 	}
 }
 
+func TestResolvedDockerSocketIsDeniedWithoutAllowedRoots(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+		Name: "docker-socket", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: "/var/run/docker.sock", Target: "/docker.sock"}},
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("resolved Docker socket error = %v, want ErrInvalidData", err)
+	}
+	if _, err := st.GetApplication(t.Context(), "docker-socket"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("rejected Docker socket was persisted: %v", err)
+	}
+	if len(queue.snapshot()) != 0 {
+		t.Fatalf("rejected Docker socket was enqueued: %#v", queue.snapshot())
+	}
+}
+
 func TestCreateAdmissionIsSerializedAndLimitCannotBeExceeded(t *testing.T) {
 	baseService, st, mock, _ := newEdgeService(t)
 	probe := &admissionProbeStore{Store: st}

@@ -863,6 +863,7 @@ components:
         env_vars:
           type: object
           maxProperties: 200
+          propertyNames: {type: string, pattern: '^[\p{L}_][\p{L}\p{Nd}_]*$'}
           additionalProperties: {type: string, pattern: '^[^\x00]*$'}
           example: {MODE: production}
         ports:
@@ -886,6 +887,7 @@ components:
         env_vars:
           type: object
           maxProperties: 200
+          propertyNames: {type: string, pattern: '^[\p{L}_][\p{L}\p{Nd}_]*$'}
           additionalProperties: {type: string, pattern: '^[^\x00]*$'}
           example: {MODE: production}
         ports:

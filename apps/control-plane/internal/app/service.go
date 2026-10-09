@@ -714,7 +714,7 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 		if err != nil {
 			return nil, fmt.Errorf("%w: mount source cannot be resolved", store.ErrInvalidData)
 		}
-		if source == "/" || source == "/var/run/docker.sock" || source == "/proc" || strings.HasPrefix(source, "/proc/") || source == "/sys" || strings.HasPrefix(source, "/sys/") || source == "/dev" || strings.HasPrefix(source, "/dev/") || source == "/etc" || strings.HasPrefix(source, "/etc/") {
+		if sensitiveMountSource(source) {
 			return nil, fmt.Errorf("%w: mount source is denied", store.ErrInvalidData)
 		}
 		if len(s.allowedMountRoots) == 0 {
@@ -739,6 +739,20 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 		volume.Source = source
 	}
 	return canonical, nil
+}
+
+func sensitiveMountSource(source string) bool {
+	dockerSocket, err := resolveMountPath("/var/run/docker.sock")
+	if source == "/var/run/docker.sock" || source == "/run/docker.sock" {
+		return true
+	}
+	if err == nil && source == dockerSocket {
+		return true
+	}
+	return source == "/" || source == "/proc" || strings.HasPrefix(source, "/proc/") ||
+		source == "/sys" || strings.HasPrefix(source, "/sys/") ||
+		source == "/dev" || strings.HasPrefix(source, "/dev/") ||
+		source == "/etc" || strings.HasPrefix(source, "/etc/")
 }
 
 // resolveMountPath resolves every existing symlink component while preserving
