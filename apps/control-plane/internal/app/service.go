@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -781,9 +779,17 @@ func (s *Service) sensitiveMountSource(source string) bool {
 	if err == nil {
 		sockets = append(sockets, dockerSocket)
 	}
+	dockerSocket, err = resolvePotentialPath("/var/run/docker.sock")
+	if err == nil {
+		sockets = append(sockets, dockerSocket)
+	}
 	if s.dockerSocketPath != "" {
 		sockets = append(sockets, s.dockerSocketPath)
 		configuredSocket, resolveErr := resolveMountPath(s.dockerSocketPath)
+		if resolveErr == nil {
+			sockets = append(sockets, configuredSocket)
+		}
+		configuredSocket, resolveErr = resolvePotentialPath(s.dockerSocketPath)
 		if resolveErr == nil {
 			sockets = append(sockets, configuredSocket)
 		}
@@ -808,35 +814,23 @@ func pathContains(root, path string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-// resolveMountPath resolves every existing symlink component while preserving
-// a missing suffix. This prevents an existing link beneath an allowed root from
-// escaping that root without requiring a future bind source to exist yet.
+// resolveMountPath requires the complete bind source to exist and resolves all
+// symlink components before the path is checked and persisted.
 func resolveMountPath(path string) (string, error) {
-	current := filepath.Clean(path)
-	missing := make([]string, 0)
-	for {
-		resolved, err := filepath.EvalSymlinks(current)
-		if err == nil {
-			for index := len(missing) - 1; index >= 0; index-- {
-				resolved = filepath.Join(resolved, missing[index])
-			}
-			return filepath.Clean(resolved), nil
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", err
-		}
-		if _, lstatErr := os.Lstat(current); lstatErr == nil {
-			return "", fmt.Errorf("path contains a dangling symlink")
-		} else if !errors.Is(lstatErr, fs.ErrNotExist) {
-			return "", lstatErr
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", err
-		}
-		missing = append(missing, filepath.Base(current))
-		current = parent
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		return "", err
 	}
+	return filepath.Clean(resolved), nil
+}
+
+func resolvePotentialPath(path string) (string, error) {
+	path = filepath.Clean(path)
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
 }
 
 func validateCollectionLimits(environment, ports, volumes int) error {

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -954,6 +955,11 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 		t.Fatal(err)
 	}
 	contractRouter := contractRouterForTest(t)
+	mountSource := t.TempDir()
+	resolvedMountSource, err := filepath.EvalSymlinks(mountSource)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	send := func(method, path, body, etag string) (*http.Response, []byte) {
 		t.Helper()
@@ -969,7 +975,11 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 		return response, validateOpenAPIResponse(t, contractRouter, request, response)
 	}
 
-	invalidCreate, invalidCreateBody := send(http.MethodPost, "/api/v1/apps", `{"name":"invalid-volume","image":"nginx:1.27","volumes":[{"source":"/srv/moduleos/data/../data","target":"/data"}]}`, "")
+	invalidCreatePayload, err := json.Marshal(map[string]any{"name": "invalid-volume", "image": "nginx:1.27", "volumes": []swarm.VolumeConfig{{Source: mountSource + "/.", Target: "/data"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidCreate, invalidCreateBody := send(http.MethodPost, "/api/v1/apps", string(invalidCreatePayload), "")
 	if invalidCreate.StatusCode != fiber.StatusUnprocessableEntity || queue.count() != 0 {
 		t.Fatalf("invalid create = %d queue=%d body=%s", invalidCreate.StatusCode, queue.count(), invalidCreateBody)
 	}
@@ -977,11 +987,20 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 		t.Fatalf("invalid create persisted application: %v", err)
 	}
 
-	created, createdBody := send(http.MethodPost, "/api/v1/apps", `{"name":"api","image":"nginx:1.27","replicas":2,"env_vars":{"SECRET":"private"},"ports":[{"container_port":8080}],"volumes":[{"source":"/srv/moduleos/data","target":"/data","read_only":true}]}`, "")
+	createPayload, err := json.Marshal(map[string]any{
+		"name": "api", "image": "nginx:1.27", "replicas": 2,
+		"env_vars": map[string]string{"SECRET": "private"},
+		"ports":    []map[string]any{{"container_port": 8080}},
+		"volumes":  []swarm.VolumeConfig{{Source: mountSource, Target: "/data", ReadOnly: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, createdBody := send(http.MethodPost, "/api/v1/apps", string(createPayload), "")
 	if created.StatusCode != fiber.StatusCreated || created.Header.Get(fiber.HeaderETag) != `"1"` || created.Header.Get(fiber.HeaderLocation) != "/api/v1/apps/api" || queue.count() != 1 {
 		t.Fatalf("create = %d/%#v queue=%d body=%s", created.StatusCode, created.Header, queue.count(), createdBody)
 	}
-	for _, forbidden := range []string{"private", "/srv/moduleos/data", "reconcile_error_message", "finalizer_state"} {
+	for _, forbidden := range []string{"private", mountSource, "reconcile_error_message", "finalizer_state"} {
 		if strings.Contains(string(createdBody), forbidden) {
 			t.Fatalf("create leaked %q: %s", forbidden, createdBody)
 		}
@@ -999,12 +1018,20 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 	if portReplay.StatusCode != fiber.StatusAccepted || portReplay.Header.Get(fiber.HeaderETag) != `"1"` || queue.count() != 1 {
 		t.Fatalf("port replay = %d/%#v queue=%d body=%s", portReplay.StatusCode, portReplay.Header, queue.count(), portReplayBody)
 	}
-	invalidUpdate, invalidUpdateBody := send(http.MethodPatch, "/api/v1/apps/api", `{"volumes":[{"source":"/srv/moduleos/data","target":"/data/"}]}`, `"1"`)
+	invalidUpdatePayload, err := json.Marshal(map[string]any{"volumes": []swarm.VolumeConfig{{Source: mountSource, Target: "/data/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidUpdate, invalidUpdateBody := send(http.MethodPatch, "/api/v1/apps/api", string(invalidUpdatePayload), `"1"`)
 	if invalidUpdate.StatusCode != fiber.StatusUnprocessableEntity || queue.count() != 1 {
 		t.Fatalf("invalid update = %d queue=%d body=%s", invalidUpdate.StatusCode, queue.count(), invalidUpdateBody)
 	}
 	unchanged, err := st.GetApplication(t.Context(), "api")
-	if err != nil || unchanged.DesiredGeneration != 1 || unchanged.Volumes != `[{"source":"/srv/moduleos/data","target":"/data","read_only":true}]` {
+	expectedVolumes, marshalErr := json.Marshal([]swarm.VolumeConfig{{Source: resolvedMountSource, Target: "/data", ReadOnly: true}})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if err != nil || unchanged.DesiredGeneration != 1 || unchanged.Volumes != string(expectedVolumes) {
 		t.Fatalf("invalid update mutated application = %#v/%v", unchanged, err)
 	}
 

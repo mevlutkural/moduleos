@@ -165,7 +165,13 @@ func TestServiceConfigurationAndAccessors(t *testing.T) {
 
 func TestCreateAppValidationDefaultsAndQueue(t *testing.T) {
 	service, st, _, queue := newEdgeService(t)
-	service.WithRuntimeLimits(2, []string{"/srv/moduleos"}, time.Minute)
+	allowedRoot := t.TempDir()
+	mountSource := filepath.Join(allowedRoot, "data")
+	if err := os.Mkdir(mountSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsideRoot := t.TempDir()
+	service.WithRuntimeLimits(2, []string{allowedRoot}, time.Minute)
 
 	tests := []struct {
 		name    string
@@ -179,11 +185,11 @@ func TestCreateAppValidationDefaultsAndQueue(t *testing.T) {
 		{name: "ingress port overflow", request: CreateAppRequest{Name: "bad-ingress-port", Image: "nginx:1.27", IngressContainerPort: 65536}},
 		{name: "environment NUL", request: CreateAppRequest{Name: "bad-environment", Image: "nginx:1.27", EnvVars: map[string]string{"TOKEN": "a\x00b"}}},
 		{name: "relative mount", request: CreateAppRequest{Name: "relative-mount", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "relative", Target: "/data"}}}},
-		{name: "noncanonical mount source", request: CreateAppRequest{Name: "noncanonical-source", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data/../data", Target: "/data"}}}},
-		{name: "noncanonical mount target", request: CreateAppRequest{Name: "noncanonical-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data/"}}}},
-		{name: "root mount target", request: CreateAppRequest{Name: "root-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/"}}}},
-		{name: "mount path NUL", request: CreateAppRequest{Name: "nul-mount", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data\x00suffix"}}}},
-		{name: "outside allowed root", request: CreateAppRequest{Name: "outside-root", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/other", Target: "/data"}}}},
+		{name: "noncanonical mount source", request: CreateAppRequest{Name: "noncanonical-source", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: mountSource + "/../data", Target: "/data"}}}},
+		{name: "noncanonical mount target", request: CreateAppRequest{Name: "noncanonical-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: mountSource, Target: "/data/"}}}},
+		{name: "root mount target", request: CreateAppRequest{Name: "root-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: mountSource, Target: "/"}}}},
+		{name: "mount path NUL", request: CreateAppRequest{Name: "nul-mount", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: mountSource, Target: "/data\x00suffix"}}}},
+		{name: "outside allowed root", request: CreateAppRequest{Name: "outside-root", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: outsideRoot, Target: "/data"}}}},
 		{name: "sensitive mount", request: CreateAppRequest{Name: "docker-socket", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/var/run/docker.sock", Target: "/socket"}}}},
 	}
 	for _, test := range tests {
@@ -198,7 +204,7 @@ func TestCreateAppValidationDefaultsAndQueue(t *testing.T) {
 		Name:     "valid-app",
 		Image:    "nginx:1.27",
 		EnvVars:  map[string]string{"Z": "last", "A": "first"},
-		Volumes:  []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data"}},
+		Volumes:  []swarm.VolumeConfig{{Source: mountSource, Target: "/data"}},
 		Replicas: 0,
 	})
 	if created.Replicas != 1 || created.ResumeReplicas != 1 || created.SourceType != store.SourceTypeImage ||
@@ -268,6 +274,7 @@ func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
 	}{
 		{name: "existing destination", source: escapeLink},
 		{name: "missing suffix", source: filepath.Join(escapeLink, "future")},
+		{name: "missing source", source: filepath.Join(allowedRoot, "missing")},
 		{name: "dangling symlink", source: danglingLink},
 		{name: "suffix below dangling symlink", source: filepath.Join(danglingLink, "future")},
 	} {
@@ -366,6 +373,9 @@ func TestConfiguredDockerSocketIsDeniedInsideAllowedRoot(t *testing.T) {
 		t.Fatalf("application with configured Docker socket was enqueued: %#v", queue.snapshot())
 	}
 	safeSibling := filepath.Join(allowedRoot, "application-data")
+	if err := os.Mkdir(safeSibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	created := mustCreateApp(t, service, CreateAppRequest{
 		Name: "safe-sibling", Image: "nginx:1.27",
 		Volumes: []swarm.VolumeConfig{{Source: safeSibling, Target: "/data"}},
@@ -610,15 +620,21 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 
 func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 	service, st, _, queue := newEdgeService(t)
-	service.WithRuntimeLimits(20, []string{"/srv/moduleos"}, time.Minute)
+	allowedRoot := t.TempDir()
+	mountSource := filepath.Join(allowedRoot, "data")
+	if err := os.Mkdir(mountSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsideRoot := t.TempDir()
+	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute)
 	created := mustCreateApp(t, service, CreateAppRequest{Name: "validation-app", Image: "nginx:1.27"})
 
 	emptyImage := "   "
-	outsideVolumes := []swarm.VolumeConfig{{Source: "/srv/outside", Target: "/data"}}
-	noncanonicalSource := []swarm.VolumeConfig{{Source: "/srv/moduleos/data/../data", Target: "/data"}}
-	noncanonicalTarget := []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data/"}}
-	rootTarget := []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/"}}
-	nulTarget := []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data\x00suffix"}}
+	outsideVolumes := []swarm.VolumeConfig{{Source: outsideRoot, Target: "/data"}}
+	noncanonicalSource := []swarm.VolumeConfig{{Source: mountSource + "/../data", Target: "/data"}}
+	noncanonicalTarget := []swarm.VolumeConfig{{Source: mountSource, Target: "/data/"}}
+	rootTarget := []swarm.VolumeConfig{{Source: mountSource, Target: "/"}}
+	nulTarget := []swarm.VolumeConfig{{Source: mountSource, Target: "/data\x00suffix"}}
 	nulEnvironment := map[string]string{"TOKEN": "a\x00b"}
 	badPorts := []swarm.PortConfig{{ContainerPort: 0}}
 	ingressPortOverflow := uint32(65536)
@@ -653,13 +669,19 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 
 func TestDesiredSpecRevalidatesPersistedMountPolicy(t *testing.T) {
 	service, st, _, _ := newEdgeService(t)
-	service.WithRuntimeLimits(20, []string{"/srv/moduleos"}, time.Minute)
+	allowedRoot := t.TempDir()
+	mountSource := filepath.Join(allowedRoot, "data")
+	if err := os.Mkdir(mountSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsideRoot := t.TempDir()
+	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute)
 	created := mustCreateApp(t, service, CreateAppRequest{
 		Name: "mount-policy", Image: "nginx:1.27",
-		Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data"}},
+		Volumes: []swarm.VolumeConfig{{Source: mountSource, Target: "/data"}},
 	})
 
-	created.Volumes = `[{"source":"/srv/outside","target":"/data","read_only":false}]`
+	created.Volumes = encodeVolumes([]swarm.VolumeConfig{{Source: outsideRoot, Target: "/data"}})
 	if err := st.UpdateApplication(t.Context(), created); err != nil {
 		t.Fatal(err)
 	}
@@ -1127,7 +1149,12 @@ func TestCancelledMutationsPersistNothing(t *testing.T) {
 
 func TestBuildDesiredSpecIncludesCanonicalNetworksAndRouting(t *testing.T) {
 	service, st, _, _ := newEdgeService(t)
-	service.WithRuntimeLimits(5, []string{"/srv/moduleos"}, time.Minute).WithIngressNetwork("edge-ingress")
+	allowedRoot := t.TempDir()
+	mountSource := filepath.Join(allowedRoot, "api")
+	if err := os.Mkdir(mountSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service.WithRuntimeLimits(5, []string{allowedRoot}, time.Minute).WithIngressNetwork("edge-ingress")
 
 	targetProject := mustCreateProject(t, service, "Target", "target")
 	sourceProject := mustCreateProject(t, service, "Source", "source")
@@ -1138,7 +1165,7 @@ func TestBuildDesiredSpecIncludesCanonicalNetworksAndRouting(t *testing.T) {
 		Replicas:             2,
 		EnvVars:              map[string]string{"B": "2", "A": "1"},
 		Ports:                []swarm.PortConfig{{ContainerPort: 8080, PublishedPort: 18080}},
-		Volumes:              []swarm.VolumeConfig{{Source: "/srv/moduleos/api", Target: "/data", ReadOnly: true}},
+		Volumes:              []swarm.VolumeConfig{{Source: mountSource, Target: "/data", ReadOnly: true}},
 		Expose:               true,
 		IngressContainerPort: 8080,
 	})
@@ -1164,7 +1191,11 @@ func TestBuildDesiredSpecIncludesCanonicalNetworksAndRouting(t *testing.T) {
 	if len(spec.Ports) != 1 || spec.Ports[0].ContainerPort != 8080 || spec.Ports[0].PublishedPort != 18080 {
 		t.Fatalf("ports mismatch: %#v", spec.Ports)
 	}
-	if len(spec.Volumes) != 1 || spec.Volumes[0].Source != "/srv/moduleos/api" ||
+	resolvedMountSource, err := filepath.EvalSymlinks(mountSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.Volumes) != 1 || spec.Volumes[0].Source != resolvedMountSource ||
 		spec.Volumes[0].Target != "/data" || !spec.Volumes[0].ReadOnly {
 		t.Fatalf("volumes mismatch: %#v", spec.Volumes)
 	}

@@ -296,7 +296,7 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nullCollections.Ports != "[]" || nullCollections.Volumes != "[]" {
+	if nullCollections.EnvVars != "{}" || nullCollections.Ports != "[]" || nullCollections.Volumes != "[]" {
 		t.Fatalf("legacy null collections were not normalized: %#v", nullCollections)
 	}
 	project, err := upgraded.GetProject(ctx, "legacy-project")

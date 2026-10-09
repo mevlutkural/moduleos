@@ -32,7 +32,7 @@ INSERT INTO applications (
         '20000000-0000-0000-0000-000000000004',
         '10000000-0000-0000-0000-000000000001',
         'legacy-null-collections', 'image', 'alpine:3.22', 'created', 1,
-        '{}', 'null', 'null', 0, '', '2025-04-02 03:04:05', '2025-04-03 04:05:06'
+        'null', 'null', 'null', 0, '', '2025-04-02 03:04:05', '2025-04-03 04:05:06'
     );
 
 INSERT INTO deployments (
