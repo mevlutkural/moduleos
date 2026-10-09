@@ -334,6 +334,27 @@ func TestResolvedDockerSocketIsDeniedWithoutAllowedRoots(t *testing.T) {
 	}
 }
 
+func TestResolvedAllowedMountRootCannotBeSensitive(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	rootLink := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(string(filepath.Separator), rootLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	service.WithRuntimeLimits(20, []string{rootLink}, time.Minute)
+	if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+		Name: "root-link", Image: "nginx:1.27",
+		Volumes: []swarm.VolumeConfig{{Source: t.TempDir(), Target: "/data"}},
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("resolved root allowed-mount error = %v, want ErrInvalidData", err)
+	}
+	if _, err := st.GetApplication(t.Context(), "root-link"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("application with resolved root allowed-mount was persisted: %v", err)
+	}
+	if len(queue.snapshot()) != 0 {
+		t.Fatalf("application with resolved root allowed-mount was enqueued: %#v", queue.snapshot())
+	}
+}
+
 func TestCreateAdmissionIsSerializedAndLimitCannotBeExceeded(t *testing.T) {
 	baseService, st, mock, _ := newEdgeService(t)
 	probe := &admissionProbeStore{Store: st}

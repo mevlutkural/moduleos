@@ -727,6 +727,9 @@ func (s *Service) canonicalizeMounts(volumes []swarm.VolumeConfig) ([]swarm.Volu
 			if err != nil {
 				return nil, fmt.Errorf("%w: allowed mount root cannot be resolved", store.ErrInvalidData)
 			}
+			if sensitiveMountSource(resolvedRoot) {
+				return nil, fmt.Errorf("%w: allowed mount root is denied", store.ErrInvalidData)
+			}
 			relative, err := filepath.Rel(resolvedRoot, source)
 			if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 				allowed = true
