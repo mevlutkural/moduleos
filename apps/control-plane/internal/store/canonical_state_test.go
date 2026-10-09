@@ -299,6 +299,13 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if nullCollections.EnvVars != "{}" || nullCollections.Ports != "[]" || nullCollections.Volumes != "[]" {
 		t.Fatalf("legacy null collections were not normalized: %#v", nullCollections)
 	}
+	portDefaults, err := upgraded.GetApplication(ctx, "legacy-port-defaults")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if portDefaults.Ports != `[{"container_port":8080,"published_port":0,"protocol":"tcp","publish_mode":"ingress"}]` {
+		t.Fatalf("legacy port defaults were not normalized: %#v", portDefaults)
+	}
 	project, err := upgraded.GetProject(ctx, "legacy-project")
 	if err != nil {
 		t.Fatal(err)

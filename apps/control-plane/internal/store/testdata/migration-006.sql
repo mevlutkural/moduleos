@@ -33,6 +33,14 @@ INSERT INTO applications (
         '10000000-0000-0000-0000-000000000001',
         'legacy-null-collections', 'image', 'alpine:3.22', 'created', 1,
         'null', 'null', 'null', 0, '', '2025-04-02 03:04:05', '2025-04-03 04:05:06'
+    ),
+    (
+        '20000000-0000-0000-0000-000000000005',
+        '10000000-0000-0000-0000-000000000001',
+        'legacy-port-defaults', 'image', 'caddy:2.10', 'created', 1,
+        '{}',
+        '[{"container_port":8080,"published_port":0,"protocol":"","publish_mode":""}]',
+        '[]', 0, '', '2025-05-02 03:04:05', '2025-05-03 04:05:06'
     );
 
 INSERT INTO deployments (
