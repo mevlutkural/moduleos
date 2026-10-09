@@ -60,7 +60,7 @@ func (h *ApplicationHandler) Create(c fiber.Ctx) error {
 		ProjectSlug:          request.ProjectSlug.Value,
 		Image:                request.Image,
 		Replicas:             replicas,
-		EnvVars:              request.EnvVars.Value,
+		EnvVars:              applicationEnvironment(request.EnvVars.Value),
 		Ports:                applicationPorts(request.Ports.Value),
 		Volumes:              applicationVolumes(request.Volumes.Value),
 		Expose:               request.Expose.Value,
@@ -133,7 +133,7 @@ func (h *ApplicationHandler) Update(c fiber.Ctx) error {
 
 	serviceRequest := app.UpdateAppRequest{AppName: name, ExpectedGeneration: expected}
 	if request.EnvVars.Present {
-		serviceRequest.EnvVars = request.EnvVars.Value
+		serviceRequest.EnvVars = applicationEnvironment(request.EnvVars.Value)
 	}
 	if request.Ports.Present {
 		ports := applicationPorts(request.Ports.Value)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -823,6 +824,11 @@ func resolveMountPath(path string) (string, error) {
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			return "", err
+		}
+		if _, lstatErr := os.Lstat(current); lstatErr == nil {
+			return "", fmt.Errorf("path contains a dangling symlink")
+		} else if !errors.Is(lstatErr, fs.ErrNotExist) {
+			return "", lstatErr
 		}
 		parent := filepath.Dir(current)
 		if parent == current {

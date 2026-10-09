@@ -50,24 +50,26 @@ type ApplicationVolumeInput struct {
 	ReadOnly optionalValue[bool] `json:"read_only,omitempty"`
 }
 
+type applicationEnvironmentInput map[string]optionalValue[string]
+
 type CreateApplicationRequest struct {
-	Name                 string                                  `json:"name"`
-	ProjectSlug          optionalValue[string]                   `json:"project_slug,omitempty"`
-	Image                string                                  `json:"image"`
-	Replicas             optionalValue[int]                      `json:"replicas,omitempty"`
-	EnvVars              optionalValue[map[string]string]        `json:"env_vars,omitempty"`
-	Ports                optionalValue[[]ApplicationPortInput]   `json:"ports,omitempty"`
-	Volumes              optionalValue[[]ApplicationVolumeInput] `json:"volumes,omitempty"`
-	Expose               optionalValue[bool]                     `json:"expose,omitempty"`
-	IngressContainerPort optionalValue[uint32]                   `json:"ingress_container_port,omitempty"`
+	Name                 string                                     `json:"name"`
+	ProjectSlug          optionalValue[string]                      `json:"project_slug,omitempty"`
+	Image                string                                     `json:"image"`
+	Replicas             optionalValue[int]                         `json:"replicas,omitempty"`
+	EnvVars              optionalValue[applicationEnvironmentInput] `json:"env_vars,omitempty"`
+	Ports                optionalValue[[]ApplicationPortInput]      `json:"ports,omitempty"`
+	Volumes              optionalValue[[]ApplicationVolumeInput]    `json:"volumes,omitempty"`
+	Expose               optionalValue[bool]                        `json:"expose,omitempty"`
+	IngressContainerPort optionalValue[uint32]                      `json:"ingress_container_port,omitempty"`
 }
 
 type UpdateApplicationRequest struct {
-	EnvVars              optionalValue[map[string]string]        `json:"env_vars,omitempty"`
-	Ports                optionalValue[[]ApplicationPortInput]   `json:"ports,omitempty"`
-	Volumes              optionalValue[[]ApplicationVolumeInput] `json:"volumes,omitempty"`
-	Expose               optionalValue[bool]                     `json:"expose,omitempty"`
-	IngressContainerPort optionalValue[uint32]                   `json:"ingress_container_port,omitempty"`
+	EnvVars              optionalValue[applicationEnvironmentInput] `json:"env_vars,omitempty"`
+	Ports                optionalValue[[]ApplicationPortInput]      `json:"ports,omitempty"`
+	Volumes              optionalValue[[]ApplicationVolumeInput]    `json:"volumes,omitempty"`
+	Expose               optionalValue[bool]                        `json:"expose,omitempty"`
+	IngressContainerPort optionalValue[uint32]                      `json:"ingress_container_port,omitempty"`
 }
 
 type ScaleApplicationRequest struct {
@@ -379,13 +381,21 @@ func validApplicationPortInputs(values []ApplicationPortInput) bool {
 	return true
 }
 
-func validApplicationEnvironmentInputs(values map[string]string) bool {
+func validApplicationEnvironmentInputs(values applicationEnvironmentInput) bool {
 	for key, value := range values {
-		if !validEnvironmentKey(key) || !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') {
+		if !validEnvironmentKey(key) || !value.Present || value.Null || !utf8.ValidString(value.Value) || strings.ContainsRune(value.Value, '\x00') {
 			return false
 		}
 	}
 	return true
+}
+
+func applicationEnvironment(values applicationEnvironmentInput) map[string]string {
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value.Value
+	}
+	return result
 }
 
 func validApplicationVolumeInputs(values []ApplicationVolumeInput) bool {

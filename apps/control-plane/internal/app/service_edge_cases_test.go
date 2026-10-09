@@ -250,10 +250,14 @@ func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
 	}
 	insideLink := filepath.Join(allowedRoot, "inside-link")
 	escapeLink := filepath.Join(allowedRoot, "escape-link")
+	danglingLink := filepath.Join(allowedRoot, "dangling-link")
 	if err := os.Symlink(inside, insideLink); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	if err := os.Symlink(outside, escapeLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "missing"), danglingLink); err != nil {
 		t.Fatal(err)
 	}
 	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute)
@@ -264,6 +268,8 @@ func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
 	}{
 		{name: "existing destination", source: escapeLink},
 		{name: "missing suffix", source: filepath.Join(escapeLink, "future")},
+		{name: "dangling symlink", source: danglingLink},
+		{name: "suffix below dangling symlink", source: filepath.Join(danglingLink, "future")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := service.CreateApp(t.Context(), CreateAppRequest{

@@ -267,6 +267,7 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 		"uppercase name":           map[string]any{"name": "API", "image": "nginx:1.27"},
 		"null project":             map[string]any{"name": "api", "image": "nginx:1.27", "project_slug": nil},
 		"null environment":         map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": nil},
+		"null environment value":   map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": map[string]any{"TOKEN": nil}},
 		"environment NUL":          map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": map[string]any{"TOKEN": "a\x00b"}},
 		"expose without ingress":   map[string]any{"name": "api", "image": "nginx:1.27", "expose": true},
 		"expose with zero ingress": map[string]any{"name": "api", "image": "nginx:1.27", "expose": true, "ingress_container_port": 0},
