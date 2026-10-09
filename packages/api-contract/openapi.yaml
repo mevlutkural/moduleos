@@ -832,16 +832,27 @@ components:
         published_port: {type: integer, minimum: 0, maximum: 65535, default: 0}
         protocol: {type: string, enum: [tcp, udp], default: tcp}
         publish_mode: {type: string, enum: [ingress, host], default: ingress}
-    ContainerImageReference:
+    ContainerImageReferenceSyntax:
       description: Docker-compatible normalized container image name with an optional tag and SHA-256 content digest.
       type: string
       minLength: 1
-      maxLength: 255
       anyOf:
         - maxLength: 63
         - pattern: '[g-zG-Z._/@:-]'
       pattern: '^(?:(?:(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])(?:\.(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]))*|\[(?:[A-Fa-f0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$'
       example: "ghcr.io/mevlutkural/moduleos:v0.1.0"
+    ContainerImageReference:
+      description: Desired image reference accepted from an API client.
+      example: "ghcr.io/mevlutkural/moduleos:v0.1.0"
+      allOf:
+        - {$ref: "#/components/schemas/ContainerImageReferenceSyntax"}
+        - {maxLength: 255}
+    PersistedContainerImageReference:
+      description: Persisted desired or observed image reference, including a SHA-256 digest appended during resolution or rollback.
+      example: "ghcr.io/mevlutkural/moduleos:v0.1.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      allOf:
+        - {$ref: "#/components/schemas/ContainerImageReferenceSyntax"}
+        - {maxLength: 327}
     CanonicalMountPath:
       description: Canonical absolute non-root POSIX path without NUL bytes, empty segments, or dot segments.
       type: string
@@ -986,8 +997,8 @@ components:
         project_id: {type: string, format: uuid, example: 00000000-0000-0000-0000-000000000001}
         name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", example: api}
         source_type: {type: string, const: image, example: image}
-        image: {$ref: "#/components/schemas/ContainerImageReference"}
-        observed_image: {$ref: "#/components/schemas/ContainerImageReference"}
+        image: {$ref: "#/components/schemas/PersistedContainerImageReference"}
+        observed_image: {$ref: "#/components/schemas/PersistedContainerImageReference"}
         status: {$ref: "#/components/schemas/ApplicationStatus"}
         replicas: {type: integer, minimum: 0, example: 2}
         desired_run_state: {$ref: "#/components/schemas/DesiredRunState"}

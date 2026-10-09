@@ -219,7 +219,8 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	scale := document.Components.Schemas["ScaleApplicationRequest"]
 	volume := document.Components.Schemas["ApplicationVolumeInput"]
 	image := document.Components.Schemas["ContainerImageReference"]
-	if create == nil || create.Value == nil || update == nil || update.Value == nil || scale == nil || scale.Value == nil || volume == nil || volume.Value == nil || image == nil || image.Value == nil {
+	persistedImage := document.Components.Schemas["PersistedContainerImageReference"]
+	if create == nil || create.Value == nil || update == nil || update.Value == nil || scale == nil || scale.Value == nil || volume == nil || volume.Value == nil || image == nil || image.Value == nil || persistedImage == nil || persistedImage.Value == nil {
 		t.Fatal("application request schemas are unresolved")
 	}
 	for name, schema := range map[string]*openapi3.SchemaRef{"create": create, "update": update} {
@@ -239,10 +240,22 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	validate := func(schema *openapi3.SchemaRef, value any) error {
 		return schema.Value.VisitJSON(value, openapi3.EnableJSONSchema2020())
 	}
-	for _, value := range []string{"nginx", "ghcr.io/mevlutkural/moduleos:v0.1.0", "registry.example.com:5000/team/api@sha256:" + strings.Repeat("a", 64)} {
+	longNamePrefix := "registry.example.com/"
+	longName := longNamePrefix + strings.Repeat("g", 255-len(longNamePrefix))
+	longObserved := longName + "@sha256:" + strings.Repeat("a", 64)
+	for _, value := range []string{"nginx", "ghcr.io/mevlutkural/moduleos:v0.1.0", "registry.example.com:5000/team/api@sha256:" + strings.Repeat("a", 64), longName} {
 		if err := validate(image, value); err != nil {
 			t.Errorf("valid image reference %q rejected: %v", value, err)
 		}
+	}
+	if err := validate(image, longObserved); err == nil {
+		t.Error("runtime-expanded image reference accepted as desired input")
+	}
+	if err := validate(persistedImage, longObserved); err != nil {
+		t.Errorf("runtime-expanded persisted image reference rejected: %v", err)
+	}
+	if err := validate(persistedImage, longName+":x@sha256:"+strings.Repeat("a", 64)); err == nil {
+		t.Error("observed image beyond generated-reference ceiling accepted")
 	}
 	for _, value := range []string{"bad image", "example.com/UPPERCASE", "nginx:", "nginx@sha256:short", "nginx@sha256:" + strings.Repeat("a", 32), "nginx@sha512:" + strings.Repeat("a", 128), strings.Repeat("a", 64), strings.Repeat("repo", 64)} {
 		if err := validate(image, value); err == nil {

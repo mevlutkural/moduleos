@@ -361,6 +361,9 @@ func (s *Service) SetRunState(ctx context.Context, name string, state store.Desi
 	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
 		return nil, err
 	}
+	if current.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("%w: application is being deleted", store.ErrConflict)
+	}
 	if state == store.DesiredRunStateRunning && current.ResumeReplicas > s.maxReplicas {
 		return nil, fmt.Errorf("%w: resumed replicas exceed configured maximum", store.ErrConflict)
 	}
@@ -411,6 +414,9 @@ func (s *Service) ScaleAppIntent(ctx context.Context, name string, replicas int,
 	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
 		return nil, err
 	}
+	if current.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("%w: application is being deleted", store.ErrConflict)
+	}
 	if current.Replicas == replicas {
 		return current, nil
 	}
@@ -452,6 +458,9 @@ func (s *Service) UpdateApp(ctx context.Context, req UpdateAppRequest) (*store.A
 	}
 	if err := checkExpectedGeneration(current.DesiredGeneration, req.ExpectedGeneration); err != nil {
 		return nil, err
+	}
+	if current.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("%w: application is being deleted", store.ErrConflict)
 	}
 	if req.EnvVars != nil {
 		value := encodeEnvVars(req.EnvVars)

@@ -160,10 +160,14 @@ func TestNewApplicationHandlerRejectsMissingDependencies(t *testing.T) {
 }
 
 func TestApplicationImageReferenceBoundary(t *testing.T) {
+	longNamePrefix := "registry.example.com/"
+	longName := longNamePrefix + strings.Repeat("g", maximumDesiredImageReferenceLength-len(longNamePrefix))
+	longObserved := longName + "@sha256:" + strings.Repeat("a", 64)
 	for _, value := range []string{
 		"nginx",
 		"ghcr.io/mevlutkural/moduleos:v0.1.0",
 		"registry.example.com:5000/team/api@sha256:" + strings.Repeat("a", 64),
+		longName,
 	} {
 		if !validImageReference(value) {
 			t.Errorf("valid image reference %q rejected", value)
@@ -182,6 +186,18 @@ func TestApplicationImageReferenceBoundary(t *testing.T) {
 		if validImageReference(value) {
 			t.Errorf("invalid image reference %q accepted", value)
 		}
+	}
+	if !validOptionalPersistedImageReference(longObserved) {
+		t.Errorf("resolved image reference with appended digest rejected")
+	}
+	application := validApplication()
+	application.Image = longObserved
+	application.ObservedImage = longObserved
+	if _, err := mapApplicationResponse(application); err != nil {
+		t.Fatalf("application with runtime-resolved image rejected: %v", err)
+	}
+	if validOptionalPersistedImageReference(longName + ":x@sha256:" + strings.Repeat("a", 64)) {
+		t.Error("observed image beyond generated-reference ceiling accepted")
 	}
 }
 

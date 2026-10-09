@@ -20,6 +20,8 @@ const (
 	maximumApplicationPorts              = 20
 	maximumApplicationVolumes            = 20
 	maximumApplicationPortNumber         = 65535
+	maximumDesiredImageReferenceLength   = 255
+	maximumPersistedImageReferenceLength = maximumDesiredImageReferenceLength + len("@sha256:") + 64
 )
 
 type optionalValue[T any] struct {
@@ -135,7 +137,7 @@ type ApplicationOperationResponse struct {
 func mapApplicationResponse(application *store.Application) (ApplicationResponse, error) {
 	if application == nil || !canonicalUUID(application.ID) || !canonicalUUID(application.ProjectID) ||
 		!publicApplicationName.MatchString(application.Name) || application.SourceType != store.SourceTypeImage ||
-		!validImageReference(application.Image) || !validOptionalImageReference(application.ObservedImage) ||
+		!validPersistedImageReference(application.Image) || !validOptionalPersistedImageReference(application.ObservedImage) ||
 		!knownApplicationStatus(application.Status) || !knownDesiredRunState(application.DesiredRunState) ||
 		!knownObservedState(application.ObservedState) || application.Replicas < 0 ||
 		application.IngressContainerPort > maximumApplicationPortNumber ||
@@ -212,7 +214,11 @@ func mapApplicationCollection(applications []*store.Application) (ApplicationCol
 }
 
 func validImageReference(value string) bool {
-	if !utf8.ValidString(value) || strings.TrimSpace(value) != value || value == "" || len(value) > 255 || longLowerHexIdentifier(value) {
+	return validImageReferenceWithin(value, maximumDesiredImageReferenceLength)
+}
+
+func validImageReferenceWithin(value string, maximumLength int) bool {
+	if !utf8.ValidString(value) || strings.TrimSpace(value) != value || value == "" || len(value) > maximumLength || longLowerHexIdentifier(value) {
 		return false
 	}
 	if separator := strings.LastIndexByte(value, '@'); separator >= 0 {
@@ -243,8 +249,12 @@ func lowerHex(value string) bool {
 	return true
 }
 
-func validOptionalImageReference(value string) bool {
-	return value == "" || validImageReference(value)
+func validPersistedImageReference(value string) bool {
+	return validImageReferenceWithin(value, maximumPersistedImageReferenceLength)
+}
+
+func validOptionalPersistedImageReference(value string) bool {
+	return value == "" || validPersistedImageReference(value)
 }
 
 func validOptionalTime(value *time.Time) bool {

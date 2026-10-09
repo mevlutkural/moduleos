@@ -855,6 +855,28 @@ func TestRunStateScaleAndDeletionIntentSemantics(t *testing.T) {
 		t.Fatalf("deletion intent = %#v", deleting)
 	}
 	queue.reset()
+	sameImage := deleting.Image
+	for name, mutate := range map[string]func() error{
+		"update": func() error {
+			_, err := service.UpdateApp(t.Context(), UpdateAppRequest{AppName: deleting.Name, ExpectedGeneration: deleting.DesiredGeneration, Image: &sameImage})
+			return err
+		},
+		"run state": func() error {
+			_, err := service.SetRunState(t.Context(), deleting.Name, deleting.DesiredRunState, deleting.DesiredGeneration)
+			return err
+		},
+		"scale": func() error {
+			_, err := service.ScaleAppIntent(t.Context(), deleting.Name, deleting.Replicas, deleting.DesiredGeneration)
+			return err
+		},
+	} {
+		if err := mutate(); !errors.Is(err, store.ErrConflict) {
+			t.Errorf("deleting application %s no-op error = %v, want ErrConflict", name, err)
+		}
+	}
+	if len(queue.snapshot()) != 0 {
+		t.Fatalf("rejected deleting-application mutations enqueued work: %#v", queue.snapshot())
+	}
 	staleDelete, err := service.DeleteAppIntent(t.Context(), created.Name, scaled.DesiredGeneration)
 	if !errors.Is(err, store.ErrGenerationConflict) || staleDelete != nil || len(queue.snapshot()) != 0 {
 		t.Fatalf("stale delete replay = %#v err=%v queue=%#v", staleDelete, err, queue.snapshot())
