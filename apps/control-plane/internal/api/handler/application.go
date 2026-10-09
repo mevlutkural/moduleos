@@ -294,6 +294,8 @@ func validateCreateApplicationRequest(request CreateApplicationRequest) map[stri
 	}
 	if len(request.Volumes.Value) > maximumApplicationVolumes {
 		fields["volumes"] = "must contain at most 20 entries"
+	} else if request.Volumes.Present && !request.Volumes.Null && !validApplicationVolumeInputs(request.Volumes.Value) {
+		fields["volumes"] = "must contain unique canonical absolute source and target paths"
 	}
 	return fields
 }
@@ -326,6 +328,8 @@ func validateUpdateApplicationRequest(request UpdateApplicationRequest) map[stri
 	}
 	if len(request.Volumes.Value) > maximumApplicationVolumes {
 		fields["volumes"] = "must contain at most 20 entries"
+	} else if request.Volumes.Present && !request.Volumes.Null && !validApplicationVolumeInputs(request.Volumes.Value) {
+		fields["volumes"] = "must contain unique canonical absolute source and target paths"
 	}
 	return fields
 }

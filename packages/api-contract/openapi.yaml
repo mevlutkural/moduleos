@@ -830,7 +830,10 @@ components:
         protocol: {type: string, enum: [tcp, udp], default: tcp}
         publish_mode: {type: string, enum: [ingress, host], default: ingress}
     ApplicationVolumeInput:
-      description: Validated bind mount accepted as private desired state.
+      description: >-
+        Validated bind mount accepted as private desired state. Source and target
+        must be canonical absolute paths without redundant separators, trailing
+        separators, dot segments, or parent traversal; targets must be unique.
       example: {source: /srv/moduleos/data, target: /data, read_only: true}
       type: object
       additionalProperties: false

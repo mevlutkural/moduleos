@@ -700,6 +700,10 @@ func isValidNameChar(c rune) bool {
 
 func (s *Service) validateMountRoots(volumes []swarm.VolumeConfig) error {
 	for _, volume := range volumes {
+		if !filepath.IsAbs(volume.Source) || !filepath.IsAbs(volume.Target) ||
+			filepath.Clean(volume.Source) != volume.Source || filepath.Clean(volume.Target) != volume.Target {
+			return fmt.Errorf("%w: mount source and target must be canonical absolute paths", store.ErrInvalidData)
+		}
 		source := filepath.Clean(volume.Source)
 		if source == "/" || source == "/var/run/docker.sock" || source == "/proc" || strings.HasPrefix(source, "/proc/") || source == "/sys" || strings.HasPrefix(source, "/sys/") || source == "/dev" || strings.HasPrefix(source, "/dev/") || source == "/etc" || strings.HasPrefix(source, "/etc/") {
 			return fmt.Errorf("%w: mount source is denied", store.ErrInvalidData)

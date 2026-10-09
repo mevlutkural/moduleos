@@ -171,6 +171,8 @@ func TestCreateAppValidationDefaultsAndQueue(t *testing.T) {
 		{name: "unsupported source", request: CreateAppRequest{Name: "tar-source", Image: "bundle.tar", SourceType: store.SourceTypeTar}},
 		{name: "exposure without port", request: CreateAppRequest{Name: "bad-expose", Image: "nginx:1.27", Expose: true}},
 		{name: "relative mount", request: CreateAppRequest{Name: "relative-mount", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "relative", Target: "/data"}}}},
+		{name: "noncanonical mount source", request: CreateAppRequest{Name: "noncanonical-source", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data/../data", Target: "/data"}}}},
+		{name: "noncanonical mount target", request: CreateAppRequest{Name: "noncanonical-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data/"}}}},
 		{name: "outside allowed root", request: CreateAppRequest{Name: "outside-root", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/other", Target: "/data"}}}},
 		{name: "sensitive mount", request: CreateAppRequest{Name: "docker-socket", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/var/run/docker.sock", Target: "/socket"}}}},
 	}
@@ -422,18 +424,22 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 }
 
 func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
-	service, _, _, _ := newEdgeService(t)
+	service, st, _, queue := newEdgeService(t)
 	service.WithRuntimeLimits(20, []string{"/srv/moduleos"}, time.Minute)
 	created := mustCreateApp(t, service, CreateAppRequest{Name: "validation-app", Image: "nginx:1.27"})
 
 	emptyImage := "   "
 	outsideVolumes := []swarm.VolumeConfig{{Source: "/srv/outside", Target: "/data"}}
+	noncanonicalSource := []swarm.VolumeConfig{{Source: "/srv/moduleos/data/../data", Target: "/data"}}
+	noncanonicalTarget := []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data/"}}
 	badPorts := []swarm.PortConfig{{ContainerPort: 0}}
 	expose := true
 	requests := []UpdateAppRequest{
 		{AppName: created.Name, ExpectedGeneration: -1},
 		{AppName: created.Name, ExpectedGeneration: -1, Image: &emptyImage},
 		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &outsideVolumes},
+		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &noncanonicalSource},
+		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &noncanonicalTarget},
 		{AppName: created.Name, ExpectedGeneration: -1, Ports: &badPorts},
 		{AppName: created.Name, ExpectedGeneration: -1, Expose: &expose},
 	}
@@ -441,6 +447,10 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 		if _, err := service.UpdateApp(t.Context(), request); !errors.Is(err, store.ErrInvalidData) {
 			t.Fatalf("invalid patch %d error = %v, want ErrInvalidData", index, err)
 		}
+	}
+	persisted, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil || persisted.DesiredGeneration != created.DesiredGeneration || persisted.Volumes != created.Volumes || len(queue.snapshot()) != 1 {
+		t.Fatalf("invalid patches mutated state: app=%#v err=%v queue=%#v", persisted, err, queue.snapshot())
 	}
 	newImage := "nginx:2.0"
 	if _, err := service.UpdateApp(t.Context(), UpdateAppRequest{AppName: "missing", ExpectedGeneration: -1, Image: &newImage}); !errors.Is(err, store.ErrNotFound) {

@@ -237,6 +237,45 @@ func TestApplicationCreateDefaultsAndRejectsInvalidRequests(t *testing.T) {
 	}
 }
 
+func TestApplicationVolumeValidationPrecedesServiceMutation(t *testing.T) {
+	serviceCalls := 0
+	service := &applicationServiceStub{
+		create: func(context.Context, controlapp.CreateAppRequest) (*store.Application, error) {
+			serviceCalls++
+			return validApplication(), nil
+		},
+		update: func(context.Context, controlapp.UpdateAppRequest) (*store.Application, error) {
+			serviceCalls++
+			return validApplication(), nil
+		},
+	}
+	server := newApplicationServer(t, service, nil)
+	tests := []struct {
+		name, method, path, body, etag string
+	}{
+		{name: "create parent traversal", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data/../data","target":"/data"}]}`},
+		{name: "create trailing separator", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data/","target":"/data"}]}`},
+		{name: "create relative source", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"srv/data","target":"/data"}]}`},
+		{name: "create duplicate target", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/one","target":"/data"},{"source":"/srv/two","target":"/data"}]}`},
+		{name: "update noncanonical target", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data/"}]}`, etag: `"1"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := applicationRequest(t, server, test.method, test.path, test.body, test.etag)
+			if response.StatusCode != fiber.StatusUnprocessableEntity {
+				t.Fatalf("status = %d", response.StatusCode)
+			}
+			var envelope apiresponse.ErrorResponse
+			if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil || envelope.Error.Fields["volumes"] == "" {
+				t.Fatalf("error = %#v / %v", envelope, err)
+			}
+		})
+	}
+	if serviceCalls != 0 {
+		t.Fatalf("service calls = %d, want zero", serviceCalls)
+	}
+}
+
 func TestApplicationListAndGet(t *testing.T) {
 	server := newApplicationServer(t, &applicationServiceStub{}, nil)
 	list := applicationRequest(t, server, http.MethodGet, "/apps", "", "")

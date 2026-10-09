@@ -343,3 +343,21 @@ func applicationVolumes(values []ApplicationVolumeInput) []swarm.VolumeConfig {
 	}
 	return result
 }
+
+func validApplicationVolumeInputs(values []ApplicationVolumeInput) bool {
+	seenTargets := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !canonicalAbsolutePath(value.Source) || !canonicalAbsolutePath(value.Target) {
+			return false
+		}
+		if _, exists := seenTargets[value.Target]; exists {
+			return false
+		}
+		seenTargets[value.Target] = struct{}{}
+	}
+	return true
+}
+
+func canonicalAbsolutePath(value string) bool {
+	return utf8.ValidString(value) && filepath.IsAbs(value) && filepath.Clean(value) == value
+}

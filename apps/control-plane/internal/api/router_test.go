@@ -969,6 +969,14 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 		return response, validateOpenAPIResponse(t, contractRouter, request, response)
 	}
 
+	invalidCreate, invalidCreateBody := send(http.MethodPost, "/api/v1/apps", `{"name":"invalid-volume","image":"nginx:1.27","volumes":[{"source":"/srv/moduleos/data/../data","target":"/data"}]}`, "")
+	if invalidCreate.StatusCode != fiber.StatusUnprocessableEntity || queue.count() != 0 {
+		t.Fatalf("invalid create = %d queue=%d body=%s", invalidCreate.StatusCode, queue.count(), invalidCreateBody)
+	}
+	if _, err := st.GetApplication(t.Context(), "invalid-volume"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("invalid create persisted application: %v", err)
+	}
+
 	created, createdBody := send(http.MethodPost, "/api/v1/apps", `{"name":"api","image":"nginx:1.27","replicas":2,"env_vars":{"SECRET":"private"},"ports":[{"container_port":8080}],"volumes":[{"source":"/srv/moduleos/data","target":"/data","read_only":true}]}`, "")
 	if created.StatusCode != fiber.StatusCreated || created.Header.Get(fiber.HeaderETag) != `"1"` || created.Header.Get(fiber.HeaderLocation) != "/api/v1/apps/api" || queue.count() != 1 {
 		t.Fatalf("create = %d/%#v queue=%d body=%s", created.StatusCode, created.Header, queue.count(), createdBody)
@@ -986,6 +994,14 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 	got, gotBody := send(http.MethodGet, "/api/v1/apps/api", "", "")
 	if got.StatusCode != fiber.StatusOK || got.Header.Get(fiber.HeaderETag) != `"1"` {
 		t.Fatalf("get = %d/%#v/%s", got.StatusCode, got.Header, gotBody)
+	}
+	invalidUpdate, invalidUpdateBody := send(http.MethodPatch, "/api/v1/apps/api", `{"volumes":[{"source":"/srv/moduleos/data","target":"/data/"}]}`, `"1"`)
+	if invalidUpdate.StatusCode != fiber.StatusUnprocessableEntity || queue.count() != 1 {
+		t.Fatalf("invalid update = %d queue=%d body=%s", invalidUpdate.StatusCode, queue.count(), invalidUpdateBody)
+	}
+	unchanged, err := st.GetApplication(t.Context(), "api")
+	if err != nil || unchanged.DesiredGeneration != 1 || unchanged.Volumes != `[{"source":"/srv/moduleos/data","target":"/data","read_only":true}]` {
+		t.Fatalf("invalid update mutated application = %#v/%v", unchanged, err)
 	}
 
 	updated, updatedBody := send(http.MethodPatch, "/api/v1/apps/api", `{"env_vars":{"MODE":"production"},"ports":[],"volumes":[]}`, `"1"`)
