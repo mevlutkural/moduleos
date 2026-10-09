@@ -366,6 +366,11 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 	queue.reset()
 
 	sameImage := created.Image
+	if result, err := service.UpdateApp(t.Context(), UpdateAppRequest{
+		AppName: created.Name, ExpectedGeneration: 0, Image: &sameImage,
+	}); !errors.Is(err, store.ErrGenerationConflict) || result != nil || len(queue.snapshot()) != 0 {
+		t.Fatalf("zero generation no-op = %#v, %v; queue=%#v", result, err, queue.snapshot())
+	}
 	replayed, err := service.UpdateApp(t.Context(), UpdateAppRequest{
 		AppName: created.Name, ExpectedGeneration: created.DesiredGeneration, Image: &sameImage,
 	})
@@ -390,11 +395,18 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 	replayed, err = service.UpdateApp(t.Context(), UpdateAppRequest{
 		AppName: created.Name, ExpectedGeneration: created.DesiredGeneration, EnvVars: environment,
 	})
-	if err != nil {
-		t.Fatalf("idempotent stale replay failed: %v", err)
+	if !errors.Is(err, store.ErrGenerationConflict) || replayed != nil {
+		t.Fatalf("stale no-op patch = %#v, %v; want generation conflict", replayed, err)
 	}
-	if replayed.DesiredGeneration != updated.DesiredGeneration || len(queue.snapshot()) != 1 {
-		t.Fatalf("replay advanced state or queued work: app=%#v queue=%#v", replayed, queue.snapshot())
+	if len(queue.snapshot()) != 1 {
+		t.Fatalf("stale no-op patch queued work: queue=%#v", queue.snapshot())
+	}
+
+	replayed, err = service.UpdateApp(t.Context(), UpdateAppRequest{
+		AppName: created.Name, ExpectedGeneration: updated.DesiredGeneration, EnvVars: environment,
+	})
+	if err != nil || replayed.DesiredGeneration != updated.DesiredGeneration || len(queue.snapshot()) != 1 {
+		t.Fatalf("current-generation no-op patch = %#v, %v; queue=%#v", replayed, err, queue.snapshot())
 	}
 
 	newImage := "nginx:2.0"
@@ -419,11 +431,11 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 	badPorts := []swarm.PortConfig{{ContainerPort: 0}}
 	expose := true
 	requests := []UpdateAppRequest{
-		{AppName: created.Name},
-		{AppName: created.Name, Image: &emptyImage},
-		{AppName: created.Name, Volumes: &outsideVolumes},
-		{AppName: created.Name, Ports: &badPorts},
-		{AppName: created.Name, Expose: &expose},
+		{AppName: created.Name, ExpectedGeneration: -1},
+		{AppName: created.Name, ExpectedGeneration: -1, Image: &emptyImage},
+		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &outsideVolumes},
+		{AppName: created.Name, ExpectedGeneration: -1, Ports: &badPorts},
+		{AppName: created.Name, ExpectedGeneration: -1, Expose: &expose},
 	}
 	for index, request := range requests {
 		if _, err := service.UpdateApp(t.Context(), request); !errors.Is(err, store.ErrInvalidData) {
@@ -431,7 +443,7 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 		}
 	}
 	newImage := "nginx:2.0"
-	if _, err := service.UpdateApp(t.Context(), UpdateAppRequest{AppName: "missing", Image: &newImage}); !errors.Is(err, store.ErrNotFound) {
+	if _, err := service.UpdateApp(t.Context(), UpdateAppRequest{AppName: "missing", ExpectedGeneration: -1, Image: &newImage}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("missing application patch error = %v", err)
 	}
 }
@@ -480,8 +492,12 @@ func TestRunStateScaleAndDeletionIntentSemantics(t *testing.T) {
 		t.Fatalf("stop intent = %#v queue=%#v", stopped, queue.snapshot())
 	}
 	replayedStop, err := service.SetRunState(t.Context(), created.Name, store.DesiredRunStateStopped, created.DesiredGeneration)
+	if !errors.Is(err, store.ErrGenerationConflict) || replayedStop != nil || len(queue.snapshot()) != 1 {
+		t.Fatalf("stale stop replay = %#v err=%v queue=%#v", replayedStop, err, queue.snapshot())
+	}
+	replayedStop, err = service.SetRunState(t.Context(), created.Name, store.DesiredRunStateStopped, stopped.DesiredGeneration)
 	if err != nil || replayedStop.DesiredGeneration != stopped.DesiredGeneration || len(queue.snapshot()) != 1 {
-		t.Fatalf("stop replay = %#v err=%v queue=%#v", replayedStop, err, queue.snapshot())
+		t.Fatalf("current-generation stop replay = %#v err=%v queue=%#v", replayedStop, err, queue.snapshot())
 	}
 
 	running, err := service.SetRunState(t.Context(), created.Name, store.DesiredRunStateRunning, stopped.DesiredGeneration)
@@ -498,9 +514,14 @@ func TestRunStateScaleAndDeletionIntentSemantics(t *testing.T) {
 	if scaled.Replicas != 3 || scaled.DesiredGeneration != running.DesiredGeneration+1 {
 		t.Fatalf("scale intent = %#v", scaled)
 	}
+	queueAfterScale := len(queue.snapshot())
 	replayedScale, err := service.ScaleAppIntent(t.Context(), created.Name, 3, running.DesiredGeneration)
-	if err != nil || replayedScale.DesiredGeneration != scaled.DesiredGeneration {
-		t.Fatalf("scale replay = %#v err=%v", replayedScale, err)
+	if !errors.Is(err, store.ErrGenerationConflict) || replayedScale != nil || len(queue.snapshot()) != queueAfterScale {
+		t.Fatalf("stale scale replay = %#v err=%v queue=%#v", replayedScale, err, queue.snapshot())
+	}
+	replayedScale, err = service.ScaleAppIntent(t.Context(), created.Name, 3, scaled.DesiredGeneration)
+	if err != nil || replayedScale.DesiredGeneration != scaled.DesiredGeneration || len(queue.snapshot()) != queueAfterScale {
+		t.Fatalf("current-generation scale replay = %#v err=%v queue=%#v", replayedScale, err, queue.snapshot())
 	}
 	if _, err := service.ScaleAppIntent(t.Context(), created.Name, -1, -1); !errors.Is(err, store.ErrInvalidData) {
 		t.Fatalf("negative scale error = %v", err)
@@ -519,10 +540,15 @@ func TestRunStateScaleAndDeletionIntentSemantics(t *testing.T) {
 	if deleting.DeletionTimestamp == nil || deleting.DesiredGeneration != scaled.DesiredGeneration+1 {
 		t.Fatalf("deletion intent = %#v", deleting)
 	}
+	queue.reset()
+	staleDelete, err := service.DeleteAppIntent(t.Context(), created.Name, scaled.DesiredGeneration)
+	if !errors.Is(err, store.ErrGenerationConflict) || staleDelete != nil || len(queue.snapshot()) != 0 {
+		t.Fatalf("stale delete replay = %#v err=%v queue=%#v", staleDelete, err, queue.snapshot())
+	}
 	replayedDelete, err := service.DeleteAppIntent(t.Context(), created.Name, deleting.DesiredGeneration)
 	if err != nil || replayedDelete.DesiredGeneration != deleting.DesiredGeneration || replayedDelete.DeletionTimestamp == nil ||
-		!replayedDelete.DeletionTimestamp.Equal(*deleting.DeletionTimestamp) {
-		t.Fatalf("delete replay = %#v err=%v", replayedDelete, err)
+		!replayedDelete.DeletionTimestamp.Equal(*deleting.DeletionTimestamp) || len(queue.snapshot()) != 0 {
+		t.Fatalf("current-generation delete replay = %#v err=%v queue=%#v", replayedDelete, err, queue.snapshot())
 	}
 	persisted, err := st.GetApplication(t.Context(), created.Name)
 	if err != nil || persisted.DeletionTimestamp == nil {
@@ -852,7 +878,7 @@ func TestCancelledMutationsPersistNothing(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	newImage := "nginx:2.0"
-	if _, err := service.UpdateApp(cancelled, UpdateAppRequest{AppName: application.Name, Image: &newImage}); !errors.Is(err, context.Canceled) {
+	if _, err := service.UpdateApp(cancelled, UpdateAppRequest{AppName: application.Name, ExpectedGeneration: -1, Image: &newImage}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled update error = %v", err)
 	}
 	if _, err := service.DeployApp(cancelled, DeployAppRequest{AppName: application.Name, Image: newImage}); !errors.Is(err, context.Canceled) {

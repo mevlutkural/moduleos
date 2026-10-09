@@ -753,8 +753,9 @@ func TestRedeployOfMutableTagForcesNewTaskTemplate(t *testing.T) {
 		t.Fatalf("digest drift changed deployment artifact to %q", persisted.ResolvedImage)
 	}
 	if _, err := service.UpdateApp(ctx, app.UpdateAppRequest{
-		AppName: created.Name,
-		EnvVars: map[string]string{"MODE": "safe"},
+		AppName:            created.Name,
+		ExpectedGeneration: -1,
+		EnvVars:            map[string]string{"MODE": "safe"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -820,8 +821,9 @@ func TestNewerUnresolvedDeploymentPreventsOlderArtifactFallback(t *testing.T) {
 	}
 
 	if _, err := service.UpdateApp(ctx, app.UpdateAppRequest{
-		AppName: created.Name,
-		EnvVars: map[string]string{"MODE": "safe"},
+		AppName:            created.Name,
+		ExpectedGeneration: -1,
+		EnvVars:            map[string]string{"MODE": "safe"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -857,7 +859,7 @@ func TestInterveningImageUpdatePreventsStaleArtifactFallback(t *testing.T) {
 	}
 
 	otherImage := "redis:7"
-	if _, err := service.UpdateApp(ctx, app.UpdateAppRequest{AppName: created.Name, Image: &otherImage}); err != nil {
+	if _, err := service.UpdateApp(ctx, app.UpdateAppRequest{AppName: created.Name, ExpectedGeneration: -1, Image: &otherImage}); err != nil {
 		t.Fatal(err)
 	}
 	rec = reconciler.New(mock, app.NewService(st, mock, "moduleos.local", logger), logger)
@@ -870,7 +872,7 @@ func TestInterveningImageUpdatePreventsStaleArtifactFallback(t *testing.T) {
 	}
 
 	originalSource := "registry.example/api"
-	if _, err := service.UpdateApp(ctx, app.UpdateAppRequest{AppName: created.Name, Image: &originalSource}); err != nil {
+	if _, err := service.UpdateApp(ctx, app.UpdateAppRequest{AppName: created.Name, ExpectedGeneration: -1, Image: &originalSource}); err != nil {
 		t.Fatal(err)
 	}
 	capture := &imageCaptureClient{Client: mock}
