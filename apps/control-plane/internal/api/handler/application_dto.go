@@ -284,7 +284,8 @@ func decodeCanonicalVolumes(raw string) ([]ApplicationVolumeResponse, error) {
 	for _, value := range values {
 		if !utf8.ValidString(value.Source) || !utf8.ValidString(value.Target) ||
 			!filepath.IsAbs(value.Source) || !filepath.IsAbs(value.Target) ||
-			filepath.Clean(value.Source) != value.Source || filepath.Clean(value.Target) != value.Target {
+			filepath.Clean(value.Source) != value.Source || filepath.Clean(value.Target) != value.Target ||
+			value.Target == string(filepath.Separator) {
 			return nil, errInvalidPublicState
 		}
 		if _, exists := seenTargets[value.Target]; exists {
@@ -349,7 +350,7 @@ func applicationVolumes(values []ApplicationVolumeInput) []swarm.VolumeConfig {
 func validApplicationVolumeInputs(values []ApplicationVolumeInput) bool {
 	seenTargets := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		if !canonicalAbsolutePath(value.Source) || !canonicalAbsolutePath(value.Target) {
+		if !canonicalAbsolutePath(value.Source) || !canonicalAbsolutePath(value.Target) || value.Target == string(filepath.Separator) {
 			return false
 		}
 		if _, exists := seenTargets[value.Target]; exists {

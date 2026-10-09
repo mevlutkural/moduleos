@@ -259,6 +259,7 @@ func TestApplicationValidationPrecedesServiceMutation(t *testing.T) {
 		{name: "create trailing separator", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data/","target":"/data"}]}`, field: "volumes"},
 		{name: "create relative source", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"srv/data","target":"/data"}]}`, field: "volumes"},
 		{name: "create duplicate target", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/one","target":"/data"},{"source":"/srv/two","target":"/data"}]}`, field: "volumes"},
+		{name: "create root target", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data","target":"/"}]}`, field: "volumes"},
 		{name: "update noncanonical target", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data/"}]}`, etag: `"1"`, field: "volumes"},
 		{name: "create ingress port overflow", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","ingress_container_port":65536}`, field: "ingress_container_port"},
 		{name: "update ingress port overflow", method: http.MethodPatch, path: "/apps/api", body: `{"ingress_container_port":65536}`, etag: `"1"`, field: "ingress_container_port"},
@@ -463,6 +464,9 @@ func TestApplicationMapperFailsClosedForCorruptState(t *testing.T) {
 		},
 		func(value *store.Application) {
 			value.Volumes = `[{"source":"relative","target":"/data","read_only":false}]`
+		},
+		func(value *store.Application) {
+			value.Volumes = `[{"source":"/srv/moduleos/data","target":"/","read_only":false}]`
 		},
 		func(value *store.Application) { value.Expose = true },
 		func(value *store.Application) { value.IngressContainerPort = 65536 },

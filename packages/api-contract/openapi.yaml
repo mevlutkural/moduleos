@@ -834,7 +834,8 @@ components:
       description: >-
         Validated bind mount accepted as private desired state. Source and target
         must be canonical absolute paths without redundant separators, trailing
-        separators, dot segments, or parent traversal; targets must be unique.
+        separators, dot segments, or parent traversal; targets must be unique
+        and cannot be the filesystem root.
       example: {source: /srv/moduleos/data, target: /data, read_only: true}
       type: object
       additionalProperties: false

@@ -263,6 +263,9 @@ func TestBuildDesiredServiceSpecRejectsInvalidInput(t *testing.T) {
 		"relative mount": func(in *DesiredServiceInput) {
 			in.Volumes = []VolumeConfig{{Source: "relative", Target: "/data"}}
 		},
+		"root mount target": func(in *DesiredServiceInput) {
+			in.Volumes = []VolumeConfig{{Source: "/srv/data", Target: "/"}}
+		},
 		"duplicate published port": func(in *DesiredServiceInput) {
 			in.Ports = []PortConfig{{ContainerPort: 80, PublishedPort: 8080}, {ContainerPort: 81, PublishedPort: 8080}}
 		},

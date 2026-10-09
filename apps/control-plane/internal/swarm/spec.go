@@ -334,6 +334,9 @@ func normalizeVolumes(volumes []VolumeConfig) ([]VolumeConfig, error) {
 		if !filepath.IsAbs(volume.Source) || !filepath.IsAbs(volume.Target) {
 			return nil, fmt.Errorf("%w: mount source and target must be absolute", ErrInvalidSpec)
 		}
+		if filepath.Clean(volume.Target) == string(filepath.Separator) {
+			return nil, fmt.Errorf("%w: mount target cannot be root", ErrInvalidSpec)
+		}
 		source := filepath.Clean(volume.Source)
 		if source == "/" || source == "/var/run/docker.sock" || source == "/proc" || strings.HasPrefix(source, "/proc/") || source == "/sys" || strings.HasPrefix(source, "/sys/") || source == "/dev" || strings.HasPrefix(source, "/dev/") || source == "/etc" || strings.HasPrefix(source, "/etc/") {
 			return nil, fmt.Errorf("%w: sensitive mount source is denied", ErrInvalidSpec)

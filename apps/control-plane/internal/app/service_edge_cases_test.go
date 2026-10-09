@@ -174,6 +174,7 @@ func TestCreateAppValidationDefaultsAndQueue(t *testing.T) {
 		{name: "relative mount", request: CreateAppRequest{Name: "relative-mount", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "relative", Target: "/data"}}}},
 		{name: "noncanonical mount source", request: CreateAppRequest{Name: "noncanonical-source", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data/../data", Target: "/data"}}}},
 		{name: "noncanonical mount target", request: CreateAppRequest{Name: "noncanonical-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data/"}}}},
+		{name: "root mount target", request: CreateAppRequest{Name: "root-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/"}}}},
 		{name: "outside allowed root", request: CreateAppRequest{Name: "outside-root", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/other", Target: "/data"}}}},
 		{name: "sensitive mount", request: CreateAppRequest{Name: "docker-socket", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/var/run/docker.sock", Target: "/socket"}}}},
 	}
@@ -444,6 +445,7 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 	outsideVolumes := []swarm.VolumeConfig{{Source: "/srv/outside", Target: "/data"}}
 	noncanonicalSource := []swarm.VolumeConfig{{Source: "/srv/moduleos/data/../data", Target: "/data"}}
 	noncanonicalTarget := []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data/"}}
+	rootTarget := []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/"}}
 	badPorts := []swarm.PortConfig{{ContainerPort: 0}}
 	ingressPortOverflow := uint32(65536)
 	expose := true
@@ -453,6 +455,7 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &outsideVolumes},
 		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &noncanonicalSource},
 		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &noncanonicalTarget},
+		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &rootTarget},
 		{AppName: created.Name, ExpectedGeneration: -1, Ports: &badPorts},
 		{AppName: created.Name, ExpectedGeneration: -1, IngressContainerPort: &ingressPortOverflow},
 		{AppName: created.Name, ExpectedGeneration: -1, Expose: &expose},
