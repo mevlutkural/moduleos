@@ -532,8 +532,8 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 	service, st, _, queue := newEdgeService(t)
 	created := mustCreateApp(t, service, CreateAppRequest{Name: "patch-app", Image: "nginx:1.27"})
 	queue.reset()
-	if created.EnvVars != "{}" {
-		t.Fatalf("omitted environment persisted as %q", created.EnvVars)
+	if created.EnvVars != "{}" || created.Ports != "[]" || created.Volumes != "[]" {
+		t.Fatalf("omitted collections persisted as env=%q ports=%q volumes=%q", created.EnvVars, created.Ports, created.Volumes)
 	}
 
 	emptyEnvironment := map[string]string{}
@@ -542,6 +542,14 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 	})
 	if err != nil || replayed.DesiredGeneration != created.DesiredGeneration || len(queue.snapshot()) != 0 {
 		t.Fatalf("empty environment replay = %#v, %v; queue=%#v", replayed, err, queue.snapshot())
+	}
+	emptyPorts := []swarm.PortConfig{}
+	emptyVolumes := []swarm.VolumeConfig{}
+	replayed, err = service.UpdateApp(t.Context(), UpdateAppRequest{
+		AppName: created.Name, ExpectedGeneration: created.DesiredGeneration, Ports: &emptyPorts, Volumes: &emptyVolumes,
+	})
+	if err != nil || replayed.DesiredGeneration != created.DesiredGeneration || len(queue.snapshot()) != 0 {
+		t.Fatalf("empty collection replay = %#v, %v; queue=%#v", replayed, err, queue.snapshot())
 	}
 
 	sameImage := created.Image
@@ -1239,6 +1247,9 @@ func TestValidationAndEncodingHelpers(t *testing.T) {
 	if _, err := decodePorts("not-json"); !errors.Is(err, store.ErrInvalidData) {
 		t.Fatalf("invalid ports error = %v", err)
 	}
+	if encoded := encodePorts(nil); encoded != "[]" {
+		t.Fatalf("nil ports encoded as %q", encoded)
+	}
 	volumes := []swarm.VolumeConfig{{Source: "/srv/z", Target: "/z"}, {Source: "/srv/a", Target: "/a"}}
 	encodedVolumes := encodeVolumes(volumes)
 	decodedVolumes, err := decodeVolumes(encodedVolumes)
@@ -1247,6 +1258,9 @@ func TestValidationAndEncodingHelpers(t *testing.T) {
 	}
 	if _, err := decodeVolumes("not-json"); !errors.Is(err, store.ErrInvalidData) {
 		t.Fatalf("invalid volumes error = %v", err)
+	}
+	if encoded := encodeVolumes(nil); encoded != "[]" {
+		t.Fatalf("nil volumes encoded as %q", encoded)
 	}
 	if decoded := decodeEnvVars("B=2\nA=1"); len(decoded) != 2 || decoded[0] != "B=2" {
 		t.Fatalf("legacy environment decode = %#v", decoded)

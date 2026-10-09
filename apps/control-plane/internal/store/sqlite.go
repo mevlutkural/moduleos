@@ -406,6 +406,9 @@ func normalizeNewApplication(app *Application) {
 
 func (s *SQLiteStore) CreateApplication(ctx context.Context, app *Application) error {
 	normalizeNewApplication(app)
+	if err := validateApplicationConfig(app); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO applications
 			(id, project_id, name, source_type, image, observed_image, status,
@@ -489,6 +492,9 @@ func (s *SQLiteStore) listApplications(ctx context.Context, query string, args .
 }
 
 func (s *SQLiteStore) UpdateApplication(ctx context.Context, app *Application) error {
+	if err := validateApplicationConfig(app); err != nil {
+		return err
+	}
 	app.UpdatedAt = time.Now()
 
 	result, err := s.db.ExecContext(ctx, `
@@ -637,10 +643,17 @@ func validateApplicationConfig(app *Application) error {
 	if app.Replicas < 0 || app.ResumeReplicas < 0 {
 		return fmt.Errorf("%w: replica values cannot be negative", ErrInvalidData)
 	}
-	for field, raw := range map[string]string{"env_vars": app.EnvVars, "ports": app.Ports, "volumes": app.Volumes} {
-		if !json.Valid([]byte(raw)) {
-			return fmt.Errorf("%w: %s must contain valid JSON", ErrInvalidData, field)
-		}
+	var environment map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(app.EnvVars), &environment); err != nil || environment == nil {
+		return fmt.Errorf("%w: env_vars must contain a JSON object", ErrInvalidData)
+	}
+	var ports []json.RawMessage
+	if err := json.Unmarshal([]byte(app.Ports), &ports); err != nil || ports == nil {
+		return fmt.Errorf("%w: ports must contain a JSON array", ErrInvalidData)
+	}
+	var volumes []json.RawMessage
+	if err := json.Unmarshal([]byte(app.Volumes), &volumes); err != nil || volumes == nil {
+		return fmt.Errorf("%w: volumes must contain a JSON array", ErrInvalidData)
 	}
 	return nil
 }

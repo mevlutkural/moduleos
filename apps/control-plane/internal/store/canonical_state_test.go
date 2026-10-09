@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,7 +62,18 @@ func TestCanonicalStateRoundTripAndConstraints(t *testing.T) {
 	invalid := canonicalTestApp("invalid-json")
 	invalid.EnvVars = "KEY=value"
 	if err := st.CreateApplication(ctx, invalid); err == nil {
-		t.Fatal("invalid JSON must be rejected by the database")
+		t.Fatal("invalid JSON must be rejected")
+	}
+	for index, mutate := range []func(*Application){
+		func(value *Application) { value.EnvVars = "null" },
+		func(value *Application) { value.Ports = "null" },
+		func(value *Application) { value.Volumes = "null" },
+	} {
+		invalid = canonicalTestApp(fmt.Sprintf("null-collection-%d", index))
+		mutate(invalid)
+		if err := st.CreateApplication(ctx, invalid); err == nil {
+			t.Fatalf("null collection %d must be rejected", index)
+		}
 	}
 
 	invalid = canonicalTestApp("invalid-project")
@@ -280,6 +292,13 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if stopped.DesiredRunState != DesiredRunStateStopped || stopped.ObservedState != ObservedStateStopped || stopped.ResumeReplicas != 1 {
 		t.Fatalf("stopped legacy state changed: %#v", stopped)
 	}
+	nullCollections, err := upgraded.GetApplication(ctx, "legacy-null-collections")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nullCollections.Ports != "[]" || nullCollections.Volumes != "[]" {
+		t.Fatalf("legacy null collections were not normalized: %#v", nullCollections)
+	}
 	project, err := upgraded.GetProject(ctx, "legacy-project")
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +345,7 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if err := upgraded.db.QueryRowContext(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&migrationVersion, &migrationDirty); err != nil {
 		t.Fatal(err)
 	}
-	if migrationVersion != "10" || migrationDirty {
+	if migrationVersion != "11" || migrationDirty {
 		t.Fatalf("migration state version=%s dirty=%v", migrationVersion, migrationDirty)
 	}
 	var integrity string

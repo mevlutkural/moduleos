@@ -244,7 +244,7 @@ func decodeCanonicalEnvironment(raw string) (map[string]RedactedValue, error) {
 
 func decodeCanonicalPorts(raw string) ([]ApplicationPortResponse, error) {
 	var values []swarm.PortConfig
-	if err := decodeCanonicalJSON(raw, &values); err != nil || len(values) > maximumApplicationPorts {
+	if err := decodeCanonicalJSON(raw, &values); err != nil || values == nil || len(values) > maximumApplicationPorts {
 		return nil, errInvalidPublicState
 	}
 	result := make([]ApplicationPortResponse, 0, len(values))
@@ -278,7 +278,7 @@ func decodeCanonicalPorts(raw string) ([]ApplicationPortResponse, error) {
 
 func decodeCanonicalVolumes(raw string) ([]ApplicationVolumeResponse, error) {
 	var values []swarm.VolumeConfig
-	if err := decodeCanonicalJSON(raw, &values); err != nil || len(values) > maximumApplicationVolumes {
+	if err := decodeCanonicalJSON(raw, &values); err != nil || values == nil || len(values) > maximumApplicationVolumes {
 		return nil, errInvalidPublicState
 	}
 	result := make([]ApplicationVolumeResponse, 0, len(values))

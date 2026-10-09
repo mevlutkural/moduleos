@@ -487,9 +487,11 @@ func TestApplicationMapperFailsClosedForCorruptState(t *testing.T) {
 		func(value *store.Application) {
 			value.Ports = `[{"container_port":0,"published_port":0,"protocol":"","publish_mode":""}]`
 		},
+		func(value *store.Application) { value.Ports = `null` },
 		func(value *store.Application) {
 			value.Volumes = `[{"source":"relative","target":"/data","read_only":false}]`
 		},
+		func(value *store.Application) { value.Volumes = `null` },
 		func(value *store.Application) {
 			value.Volumes = `[{"source":"/srv/moduleos/data","target":"/","read_only":false}]`
 		},
