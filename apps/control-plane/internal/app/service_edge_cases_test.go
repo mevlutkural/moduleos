@@ -367,6 +367,17 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 	service, st, _, queue := newEdgeService(t)
 	created := mustCreateApp(t, service, CreateAppRequest{Name: "patch-app", Image: "nginx:1.27"})
 	queue.reset()
+	if created.EnvVars != "{}" {
+		t.Fatalf("omitted environment persisted as %q", created.EnvVars)
+	}
+
+	emptyEnvironment := map[string]string{}
+	replayed, err := service.UpdateApp(t.Context(), UpdateAppRequest{
+		AppName: created.Name, ExpectedGeneration: created.DesiredGeneration, EnvVars: emptyEnvironment,
+	})
+	if err != nil || replayed.DesiredGeneration != created.DesiredGeneration || len(queue.snapshot()) != 0 {
+		t.Fatalf("empty environment replay = %#v, %v; queue=%#v", replayed, err, queue.snapshot())
+	}
 
 	sameImage := created.Image
 	if result, err := service.UpdateApp(t.Context(), UpdateAppRequest{
@@ -374,7 +385,7 @@ func TestUpdateAppIsIdempotentAndCASProtected(t *testing.T) {
 	}); !errors.Is(err, store.ErrGenerationConflict) || result != nil || len(queue.snapshot()) != 0 {
 		t.Fatalf("zero generation no-op = %#v, %v; queue=%#v", result, err, queue.snapshot())
 	}
-	replayed, err := service.UpdateApp(t.Context(), UpdateAppRequest{
+	replayed, err = service.UpdateApp(t.Context(), UpdateAppRequest{
 		AppName: created.Name, ExpectedGeneration: created.DesiredGeneration, Image: &sameImage,
 	})
 	if err != nil {

@@ -770,6 +770,9 @@ func applicationConfigEqual(left, right *store.Application) bool {
 }
 
 func encodeEnvVars(envVars map[string]string) string {
+	if envVars == nil {
+		return "{}"
+	}
 	encoded, err := json.Marshal(envVars)
 	if err != nil {
 		return "{}"

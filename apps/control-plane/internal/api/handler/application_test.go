@@ -217,6 +217,8 @@ func TestApplicationCreateDefaultsAndRejectsInvalidRequests(t *testing.T) {
 		{name: "unknown", body: `{"name":"api","image":"nginx:1.27","unknown":true}`, status: fiber.StatusBadRequest},
 		{name: "invalid name", body: `{"name":"Bad Name","image":"nginx:1.27"}`, status: fiber.StatusUnprocessableEntity},
 		{name: "invalid project", body: `{"name":"api","project_slug":"Bad","image":"nginx:1.27"}`, status: fiber.StatusUnprocessableEntity},
+		{name: "empty project", body: `{"name":"api","project_slug":"","image":"nginx:1.27"}`, status: fiber.StatusUnprocessableEntity},
+		{name: "null project", body: `{"name":"api","project_slug":null,"image":"nginx:1.27"}`, status: fiber.StatusUnprocessableEntity},
 		{name: "invalid image", body: `{"name":"api","image":" bad image "}`, status: fiber.StatusUnprocessableEntity},
 		{name: "negative replicas", body: `{"name":"api","image":"nginx:1.27","replicas":-1}`, status: fiber.StatusUnprocessableEntity},
 		{name: "zero replicas", body: `{"name":"api","image":"nginx:1.27","replicas":0}`, status: fiber.StatusUnprocessableEntity},
@@ -454,6 +456,7 @@ func TestApplicationMapperFailsClosedForCorruptState(t *testing.T) {
 		func(value *store.Application) { value.ReconcileErrorCode = "Bad Code" },
 		func(value *store.Application) { zero := time.Time{}; value.LastTransitionAt = &zero },
 		func(value *store.Application) { value.EnvVars = `{"BAD-KEY":"value"}` },
+		func(value *store.Application) { value.EnvVars = `null` },
 		func(value *store.Application) { value.EnvVars = `{ "A":"1"}` },
 		func(value *store.Application) {
 			value.Ports = `[{"container_port":0,"published_port":0,"protocol":"","publish_mode":""}]`

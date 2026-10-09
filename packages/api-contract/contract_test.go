@@ -230,6 +230,7 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 		"zero replicas":    map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 0},
 		"replica overflow": map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 1001},
 		"uppercase name":   map[string]any{"name": "API", "image": "nginx:1.27"},
+		"null project":     map[string]any{"name": "api", "image": "nginx:1.27", "project_slug": nil},
 		"null environment": map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": nil},
 	} {
 		if err := create.Value.VisitJSON(value); err == nil {

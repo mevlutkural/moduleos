@@ -57,7 +57,7 @@ func (h *ApplicationHandler) Create(c fiber.Ctx) error {
 	}
 	created, err := h.service.CreateApp(c.RequestCtx(), app.CreateAppRequest{
 		Name:                 request.Name,
-		ProjectSlug:          request.ProjectSlug,
+		ProjectSlug:          request.ProjectSlug.Value,
 		Image:                request.Image,
 		Replicas:             replicas,
 		EnvVars:              request.EnvVars.Value,
@@ -260,8 +260,10 @@ func validateCreateApplicationRequest(request CreateApplicationRequest) map[stri
 	if _, ok := validApplicationName(request.Name); !ok {
 		fields["name"] = "must be a canonical application name"
 	}
-	if request.ProjectSlug != "" {
-		if _, ok := validProjectSlug(request.ProjectSlug); !ok {
+	if request.ProjectSlug.Null {
+		fields["project_slug"] = "must be a string"
+	} else if request.ProjectSlug.Present {
+		if _, ok := validProjectSlug(request.ProjectSlug.Value); !ok {
 			fields["project_slug"] = "must be a canonical project slug"
 		}
 	}

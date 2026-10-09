@@ -52,7 +52,7 @@ type ApplicationVolumeInput struct {
 
 type CreateApplicationRequest struct {
 	Name                 string                                  `json:"name"`
-	ProjectSlug          string                                  `json:"project_slug,omitempty"`
+	ProjectSlug          optionalValue[string]                   `json:"project_slug,omitempty"`
 	Image                string                                  `json:"image"`
 	Replicas             optionalValue[int]                      `json:"replicas,omitempty"`
 	EnvVars              optionalValue[map[string]string]        `json:"env_vars,omitempty"`
@@ -227,7 +227,7 @@ func validOptionalTime(value *time.Time) bool {
 
 func decodeCanonicalEnvironment(raw string) (map[string]RedactedValue, error) {
 	values := make(map[string]string)
-	if err := decodeCanonicalJSON(raw, &values); err != nil || len(values) > maximumApplicationEnvironmentEntries {
+	if err := decodeCanonicalJSON(raw, &values); err != nil || values == nil || len(values) > maximumApplicationEnvironmentEntries {
 		return nil, errInvalidPublicState
 	}
 	result := make(map[string]RedactedValue, len(values))
