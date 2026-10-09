@@ -285,10 +285,14 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	if err := validate(update, map[string]any{"env_vars": map[string]any{}}); err != nil {
 		t.Fatalf("empty replacement rejected: %v", err)
 	}
+	if err := validate(update, map[string]any{"expose": true, "ingress_container_port": 1}); err != nil {
+		t.Fatalf("valid exposed update rejected: %v", err)
+	}
 	for name, value := range map[string]any{
-		"empty patch": map[string]any{},
-		"image patch": map[string]any{"image": "nginx:2"},
-		"null patch":  map[string]any{"env_vars": nil},
+		"empty patch":              map[string]any{},
+		"image patch":              map[string]any{"image": "nginx:2"},
+		"null patch":               map[string]any{"env_vars": nil},
+		"exposed update zero port": map[string]any{"expose": true, "ingress_container_port": 0},
 	} {
 		if err := validate(update, value); err == nil {
 			t.Errorf("%s was accepted", name)

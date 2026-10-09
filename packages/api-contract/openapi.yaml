@@ -898,6 +898,11 @@ components:
       type: object
       additionalProperties: false
       minProperties: 1
+      anyOf:
+        - properties:
+            expose: {type: boolean, enum: [false]}
+        - properties:
+            ingress_container_port: {type: integer, minimum: 1, maximum: 65535}
       properties:
         env_vars:
           type: object

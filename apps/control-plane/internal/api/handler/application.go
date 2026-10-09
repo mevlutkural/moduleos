@@ -289,6 +289,9 @@ func validateCreateApplicationRequest(request CreateApplicationRequest) map[stri
 		fields["ingress_container_port"] = "must be an integer"
 	} else if request.IngressContainerPort.Present && request.IngressContainerPort.Value > maximumApplicationPortNumber {
 		fields["ingress_container_port"] = "must be between 0 and 65535"
+	} else if request.Expose.Present && !request.Expose.Null && request.Expose.Value &&
+		(!request.IngressContainerPort.Present || request.IngressContainerPort.Value == 0) {
+		fields["ingress_container_port"] = "must be positive when exposure is enabled"
 	}
 	if len(request.EnvVars.Value) > maximumApplicationEnvironmentEntries {
 		fields["env_vars"] = "must contain at most 200 entries"
@@ -329,6 +332,9 @@ func validateUpdateApplicationRequest(request UpdateApplicationRequest) map[stri
 		fields["ingress_container_port"] = "must be an integer"
 	} else if request.IngressContainerPort.Present && request.IngressContainerPort.Value > maximumApplicationPortNumber {
 		fields["ingress_container_port"] = "must be between 0 and 65535"
+	} else if request.Expose.Present && !request.Expose.Null && request.Expose.Value &&
+		request.IngressContainerPort.Present && request.IngressContainerPort.Value == 0 {
+		fields["ingress_container_port"] = "must be positive when exposure is enabled"
 	}
 	if len(request.EnvVars.Value) > maximumApplicationEnvironmentEntries {
 		fields["env_vars"] = "must contain at most 200 entries"
