@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,7 +18,7 @@ import (
 )
 
 type Service struct {
-	resourceMu        sync.Locker
+	resourceMu        mutationLocker
 	store             store.Store
 	swarm             swarm.Client
 	baseDomain        string
@@ -31,6 +30,41 @@ type Service struct {
 	maxApplications   int
 	maxProjects       int
 	deploymentTimeout time.Duration
+}
+
+type mutationLocker interface {
+	Lock(context.Context) error
+	Unlock()
+}
+
+type contextMutex struct {
+	token chan struct{}
+}
+
+func newContextMutex() *contextMutex {
+	mutex := &contextMutex{token: make(chan struct{}, 1)}
+	mutex.token <- struct{}{}
+	return mutex
+}
+
+func (m *contextMutex) Lock(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-m.token:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *contextMutex) Unlock() {
+	select {
+	case m.token <- struct{}{}:
+	default:
+		panic("app: unlock of unlocked resource mutex")
+	}
 }
 
 const (
@@ -51,7 +85,7 @@ func NewService(st store.Store, sw swarm.Client, baseDomain string, log *slog.Lo
 		log = slog.Default()
 	}
 	return &Service{
-		resourceMu:        &sync.Mutex{},
+		resourceMu:        newContextMutex(),
 		store:             st,
 		swarm:             sw,
 		baseDomain:        baseDomain,
@@ -103,6 +137,13 @@ func (s *Service) enqueue(name string) {
 	}
 }
 
+func (s *Service) lockResources(ctx context.Context) error {
+	if err := s.resourceMu.Lock(ctx); err != nil {
+		return fmt.Errorf("acquire resource mutation lock: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) Store() store.Store {
 	return s.store
 }
@@ -145,7 +186,9 @@ func (s *Service) CreateApp(ctx context.Context, req CreateAppRequest) (*store.A
 		return nil, fmt.Errorf("%w: replicas cannot be negative", store.ErrInvalidData)
 	}
 
-	s.resourceMu.Lock()
+	if err := s.lockResources(ctx); err != nil {
+		return nil, err
+	}
 	defer s.resourceMu.Unlock()
 
 	if _, err := s.store.GetApplication(ctx, req.Name); err == nil {
@@ -248,7 +291,9 @@ func (s *Service) DeleteApp(ctx context.Context, name string) error {
 }
 
 func (s *Service) DeleteAppIntent(ctx context.Context, name string, expectedGeneration int64) (*store.Application, error) {
-	s.resourceMu.Lock()
+	if err := s.lockResources(ctx); err != nil {
+		return nil, err
+	}
 	defer s.resourceMu.Unlock()
 
 	current, err := s.store.GetApplication(ctx, name)
@@ -277,7 +322,9 @@ func (s *Service) DeleteAppIntent(ctx context.Context, name string, expectedGene
 }
 
 func (s *Service) SetRunState(ctx context.Context, name string, state store.DesiredRunState, expectedGeneration int64) (*store.Application, error) {
-	s.resourceMu.Lock()
+	if err := s.lockResources(ctx); err != nil {
+		return nil, err
+	}
 	defer s.resourceMu.Unlock()
 
 	current, err := s.store.GetApplication(ctx, name)
@@ -322,7 +369,9 @@ func (s *Service) ScaleAppIntent(ctx context.Context, name string, replicas int,
 	if replicas < 0 || replicas > s.maxReplicas {
 		return nil, fmt.Errorf("%w: replica count must be between 0 and %d", store.ErrInvalidData, s.maxReplicas)
 	}
-	s.resourceMu.Lock()
+	if err := s.lockResources(ctx); err != nil {
+		return nil, err
+	}
 	defer s.resourceMu.Unlock()
 
 	current, err := s.store.GetApplication(ctx, name)
@@ -361,7 +410,9 @@ func (s *Service) UpdateApp(ctx context.Context, req UpdateAppRequest) (*store.A
 	if req.EnvVars == nil && req.Ports == nil && req.Volumes == nil && req.Expose == nil && req.IngressContainerPort == nil && req.Image == nil {
 		return nil, fmt.Errorf("%w: patch contains no mutable fields", store.ErrInvalidData)
 	}
-	s.resourceMu.Lock()
+	if err := s.lockResources(ctx); err != nil {
+		return nil, err
+	}
 	defer s.resourceMu.Unlock()
 
 	mutation := store.ApplicationMutation{}
@@ -471,7 +522,9 @@ func (s *Service) DeployApp(ctx context.Context, req DeployAppRequest) (*store.D
 }
 
 func (s *Service) createDeploymentIntent(ctx context.Context, req DeployAppRequest, rollbackSource *string) (*store.Deployment, error) {
-	s.resourceMu.Lock()
+	if err := s.lockResources(ctx); err != nil {
+		return nil, err
+	}
 	defer s.resourceMu.Unlock()
 
 	app, err := s.store.GetApplication(ctx, req.AppName)
