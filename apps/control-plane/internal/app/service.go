@@ -53,6 +53,10 @@ func (m *contextMutex) Lock(ctx context.Context) error {
 	}
 	select {
 	case <-m.token:
+		if err := ctx.Err(); err != nil {
+			m.Unlock()
+			return err
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

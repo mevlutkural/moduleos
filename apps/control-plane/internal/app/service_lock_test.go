@@ -82,6 +82,23 @@ type failOnceUpdateStore struct {
 	err  error
 }
 
+type canceledAfterTokenContext struct {
+	context.Context
+	checks int
+}
+
+func (c *canceledAfterTokenContext) Done() <-chan struct{} {
+	return nil
+}
+
+func (c *canceledAfterTokenContext) Err() error {
+	c.checks++
+	if c.checks == 1 {
+		return nil
+	}
+	return context.Canceled
+}
+
 func (s *failOnceUpdateStore) UpdateApplicationIntent(ctx context.Context, name string, expectedGeneration int64, mutation store.ApplicationMutation) (*store.Application, error) {
 	failed := false
 	s.once.Do(func() { failed = true })
@@ -405,6 +422,21 @@ func TestApplicationAndProjectMutationsRejectPreCanceledAdmission(t *testing.T) 
 	if scaled.Replicas != 2 || scaled.DesiredGeneration != application.DesiredGeneration+1 {
 		t.Fatalf("fresh mutation after pre-canceled admission = %#v", scaled)
 	}
+}
+
+func TestContextMutexReturnsTokenWhenCancellationWinsAfterAcquisition(t *testing.T) {
+	mutex := newContextMutex()
+	tracingContext := &canceledAfterTokenContext{Context: context.Background()}
+	if err := mutex.Lock(tracingContext); !errors.Is(err, context.Canceled) {
+		t.Fatalf("lock error = %v, want context cancellation", err)
+	}
+	if tracingContext.checks != 2 {
+		t.Fatalf("context checks = %d, want pre- and post-acquisition checks", tracingContext.checks)
+	}
+	if err := mutex.Lock(t.Context()); err != nil {
+		t.Fatalf("token was not returned after post-acquisition cancellation: %v", err)
+	}
+	mutex.Unlock()
 }
 
 func requireLockSignal(t *testing.T, ctx context.Context, signal <-chan struct{}, description string) {
