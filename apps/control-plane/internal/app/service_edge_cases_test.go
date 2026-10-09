@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -231,6 +233,88 @@ func TestCreateAppCollectionLimits(t *testing.T) {
 		if _, err := service.CreateApp(t.Context(), request); !errors.Is(err, store.ErrInvalidData) {
 			t.Fatalf("CreateApp(%s) error = %v, want ErrInvalidData", request.Name, err)
 		}
+	}
+}
+
+func TestMountSymlinksCannotEscapeAllowedRoots(t *testing.T) {
+	service, st, _, queue := newEdgeService(t)
+	allowedRoot := t.TempDir()
+	inside := filepath.Join(allowedRoot, "inside")
+	outside := t.TempDir()
+	if err := os.Mkdir(inside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	insideLink := filepath.Join(allowedRoot, "inside-link")
+	escapeLink := filepath.Join(allowedRoot, "escape-link")
+	if err := os.Symlink(inside, insideLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(outside, escapeLink); err != nil {
+		t.Fatal(err)
+	}
+	service.WithRuntimeLimits(20, []string{allowedRoot}, time.Minute)
+
+	for _, test := range []struct {
+		name   string
+		source string
+	}{
+		{name: "existing destination", source: escapeLink},
+		{name: "missing suffix", source: filepath.Join(escapeLink, "future")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := service.CreateApp(t.Context(), CreateAppRequest{
+				Name: "escape-create", Image: "nginx:1.27",
+				Volumes: []swarm.VolumeConfig{{Source: test.source, Target: "/data"}},
+			}); !errors.Is(err, store.ErrInvalidData) {
+				t.Fatalf("symlink escape create error = %v, want ErrInvalidData", err)
+			}
+			if _, err := st.GetApplication(t.Context(), "escape-create"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("rejected symlink escape was persisted: %v", err)
+			}
+		})
+	}
+
+	requestVolumes := []swarm.VolumeConfig{{Source: insideLink, Target: "/data"}}
+	created := mustCreateApp(t, service, CreateAppRequest{
+		Name: "inside-link", Image: "nginx:1.27", Volumes: requestVolumes,
+	})
+	if requestVolumes[0].Source != insideLink {
+		t.Fatalf("caller's mount input was mutated: %#v", requestVolumes)
+	}
+	resolvedInside, err := filepath.EvalSymlinks(inside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistedVolumes, err := decodeVolumes(created.Volumes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persistedVolumes) != 1 || persistedVolumes[0].Source != resolvedInside {
+		t.Fatalf("persisted mount source = %#v, want resolved source %q", persistedVolumes, resolvedInside)
+	}
+
+	queue.reset()
+	generation := created.DesiredGeneration
+	escapeVolumes := []swarm.VolumeConfig{{Source: escapeLink, Target: "/data"}}
+	if _, err := service.UpdateApp(t.Context(), UpdateAppRequest{
+		AppName: created.Name, ExpectedGeneration: generation, Volumes: &escapeVolumes,
+	}); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("symlink escape update error = %v, want ErrInvalidData", err)
+	}
+	unchanged, err := st.GetApplication(t.Context(), created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.DesiredGeneration != generation || len(queue.snapshot()) != 0 {
+		t.Fatalf("rejected update mutated intent: app=%#v queue=%#v", unchanged, queue.snapshot())
+	}
+
+	unchanged.Volumes = encodeVolumes(escapeVolumes)
+	if err := st.UpdateApplication(t.Context(), unchanged); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.BuildDesiredServiceSpec(t.Context(), unchanged); !errors.Is(err, store.ErrInvalidData) {
+		t.Fatalf("persisted symlink escape desired spec error = %v, want ErrInvalidData", err)
 	}
 }
 
