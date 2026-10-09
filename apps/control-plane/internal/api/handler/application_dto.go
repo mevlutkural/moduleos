@@ -232,7 +232,7 @@ func decodeCanonicalEnvironment(raw string) (map[string]RedactedValue, error) {
 	}
 	result := make(map[string]RedactedValue, len(values))
 	for key, value := range values {
-		if !validEnvironmentKey(key) || !utf8.ValidString(value) {
+		if !validEnvironmentKey(key) || !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') {
 			return nil, errInvalidPublicState
 		}
 		result[key] = RedactedValue{Redacted: true}
@@ -283,6 +283,7 @@ func decodeCanonicalVolumes(raw string) ([]ApplicationVolumeResponse, error) {
 	seenTargets := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		if !utf8.ValidString(value.Source) || !utf8.ValidString(value.Target) ||
+			strings.ContainsRune(value.Source, '\x00') || strings.ContainsRune(value.Target, '\x00') ||
 			!filepath.IsAbs(value.Source) || !filepath.IsAbs(value.Target) ||
 			filepath.Clean(value.Source) != value.Source || filepath.Clean(value.Target) != value.Target ||
 			value.Target == string(filepath.Separator) {
@@ -347,6 +348,15 @@ func applicationVolumes(values []ApplicationVolumeInput) []swarm.VolumeConfig {
 	return result
 }
 
+func validApplicationEnvironmentInputs(values map[string]string) bool {
+	for key, value := range values {
+		if !validEnvironmentKey(key) || !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') {
+			return false
+		}
+	}
+	return true
+}
+
 func validApplicationVolumeInputs(values []ApplicationVolumeInput) bool {
 	seenTargets := make(map[string]struct{}, len(values))
 	for _, value := range values {
@@ -362,5 +372,5 @@ func validApplicationVolumeInputs(values []ApplicationVolumeInput) bool {
 }
 
 func canonicalAbsolutePath(value string) bool {
-	return utf8.ValidString(value) && filepath.IsAbs(value) && filepath.Clean(value) == value
+	return utf8.ValidString(value) && !strings.ContainsRune(value, '\x00') && filepath.IsAbs(value) && filepath.Clean(value) == value
 }

@@ -292,6 +292,8 @@ func validateCreateApplicationRequest(request CreateApplicationRequest) map[stri
 	}
 	if len(request.EnvVars.Value) > maximumApplicationEnvironmentEntries {
 		fields["env_vars"] = "must contain at most 200 entries"
+	} else if request.EnvVars.Present && !request.EnvVars.Null && !validApplicationEnvironmentInputs(request.EnvVars.Value) {
+		fields["env_vars"] = "must contain valid keys and NUL-free values"
 	}
 	if len(request.Ports.Value) > maximumApplicationPorts {
 		fields["ports"] = "must contain at most 20 entries"
@@ -328,6 +330,8 @@ func validateUpdateApplicationRequest(request UpdateApplicationRequest) map[stri
 	}
 	if len(request.EnvVars.Value) > maximumApplicationEnvironmentEntries {
 		fields["env_vars"] = "must contain at most 200 entries"
+	} else if request.EnvVars.Present && !request.EnvVars.Null && !validApplicationEnvironmentInputs(request.EnvVars.Value) {
+		fields["env_vars"] = "must contain valid keys and NUL-free values"
 	}
 	if len(request.Ports.Value) > maximumApplicationPorts {
 		fields["ports"] = "must contain at most 20 entries"

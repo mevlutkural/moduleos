@@ -264,6 +264,9 @@ func ownershipLabels(input DesiredServiceInput) map[string]string {
 func validateEnvironment(environment []string) error {
 	seen := make(map[string]struct{}, len(environment))
 	for _, item := range environment {
+		if strings.ContainsRune(item, '\x00') {
+			return fmt.Errorf("%w: environment entry contains NUL", ErrInvalidSpec)
+		}
 		key, _, ok := strings.Cut(item, "=")
 		if !ok || !validEnvironmentKey(key) {
 			return fmt.Errorf("%w: invalid environment entry", ErrInvalidSpec)
@@ -331,6 +334,9 @@ func normalizeVolumes(volumes []VolumeConfig) ([]VolumeConfig, error) {
 	result := append([]VolumeConfig(nil), volumes...)
 	seenTargets := make(map[string]struct{}, len(result))
 	for _, volume := range result {
+		if strings.ContainsRune(volume.Source, '\x00') || strings.ContainsRune(volume.Target, '\x00') {
+			return nil, fmt.Errorf("%w: mount paths cannot contain NUL", ErrInvalidSpec)
+		}
 		if !filepath.IsAbs(volume.Source) || !filepath.IsAbs(volume.Target) {
 			return nil, fmt.Errorf("%w: mount source and target must be absolute", ErrInvalidSpec)
 		}

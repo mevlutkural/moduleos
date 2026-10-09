@@ -841,8 +841,8 @@ components:
       additionalProperties: false
       required: [source, target]
       properties:
-        source: {type: string, minLength: 1, pattern: "^/"}
-        target: {type: string, minLength: 1, pattern: "^/"}
+        source: {type: string, minLength: 1, pattern: '^/[^\x00]*$'}
+        target: {type: string, minLength: 2, pattern: '^/[^\x00]+$'}
         read_only: {type: boolean, default: false}
     CreateApplicationRequest:
       description: Complete desired state for a new image-based application.
@@ -863,7 +863,7 @@ components:
         env_vars:
           type: object
           maxProperties: 200
-          additionalProperties: {type: string}
+          additionalProperties: {type: string, pattern: '^[^\x00]*$'}
           example: {MODE: production}
         ports:
           type: array
@@ -886,7 +886,7 @@ components:
         env_vars:
           type: object
           maxProperties: 200
-          additionalProperties: {type: string}
+          additionalProperties: {type: string, pattern: '^[^\x00]*$'}
           example: {MODE: production}
         ports:
           type: array

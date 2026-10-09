@@ -272,7 +272,14 @@ func TestBuildDesiredServiceSpecRejectsInvalidInput(t *testing.T) {
 		"invalid protocol": func(in *DesiredServiceInput) {
 			in.Ports = []PortConfig{{ContainerPort: 53, PublishedPort: 53, Protocol: "sctp"}}
 		},
-		"duplicate env": func(in *DesiredServiceInput) { in.Environment = []string{"A=1", "A=2"} },
+		"duplicate env":   func(in *DesiredServiceInput) { in.Environment = []string{"A=1", "A=2"} },
+		"environment NUL": func(in *DesiredServiceInput) { in.Environment = []string{"TOKEN=a\x00b"} },
+		"mount source NUL": func(in *DesiredServiceInput) {
+			in.Volumes = []VolumeConfig{{Source: "/srv/data\x00suffix", Target: "/data"}}
+		},
+		"mount target NUL": func(in *DesiredServiceInput) {
+			in.Volumes = []VolumeConfig{{Source: "/srv/data", Target: "/data\x00suffix"}}
+		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

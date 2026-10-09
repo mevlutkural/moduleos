@@ -260,6 +260,8 @@ func TestApplicationValidationPrecedesServiceMutation(t *testing.T) {
 		{name: "create relative source", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"srv/data","target":"/data"}]}`, field: "volumes"},
 		{name: "create duplicate target", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/one","target":"/data"},{"source":"/srv/two","target":"/data"}]}`, field: "volumes"},
 		{name: "create root target", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data","target":"/"}]}`, field: "volumes"},
+		{name: "create environment NUL", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","env_vars":{"TOKEN":"a\u0000b"}}`, field: "env_vars"},
+		{name: "update mount NUL", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data\u0000suffix"}]}`, etag: `"1"`, field: "volumes"},
 		{name: "update noncanonical target", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data/"}]}`, etag: `"1"`, field: "volumes"},
 		{name: "create ingress port overflow", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","ingress_container_port":65536}`, field: "ingress_container_port"},
 		{name: "update ingress port overflow", method: http.MethodPatch, path: "/apps/api", body: `{"ingress_container_port":65536}`, etag: `"1"`, field: "ingress_container_port"},
@@ -458,6 +460,7 @@ func TestApplicationMapperFailsClosedForCorruptState(t *testing.T) {
 		func(value *store.Application) { zero := time.Time{}; value.LastTransitionAt = &zero },
 		func(value *store.Application) { value.EnvVars = `{"BAD-KEY":"value"}` },
 		func(value *store.Application) { value.EnvVars = `null` },
+		func(value *store.Application) { value.EnvVars = `{"TOKEN":"a\u0000b"}` },
 		func(value *store.Application) { value.EnvVars = `{ "A":"1"}` },
 		func(value *store.Application) {
 			value.Ports = `[{"container_port":0,"published_port":0,"protocol":"","publish_mode":""}]`
@@ -467,6 +470,9 @@ func TestApplicationMapperFailsClosedForCorruptState(t *testing.T) {
 		},
 		func(value *store.Application) {
 			value.Volumes = `[{"source":"/srv/moduleos/data","target":"/","read_only":false}]`
+		},
+		func(value *store.Application) {
+			value.Volumes = `[{"source":"/srv/moduleos/data","target":"/data\u0000suffix","read_only":false}]`
 		},
 		func(value *store.Application) { value.Expose = true },
 		func(value *store.Application) { value.IngressContainerPort = 65536 },

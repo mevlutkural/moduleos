@@ -171,10 +171,12 @@ func TestCreateAppValidationDefaultsAndQueue(t *testing.T) {
 		{name: "unsupported source", request: CreateAppRequest{Name: "tar-source", Image: "bundle.tar", SourceType: store.SourceTypeTar}},
 		{name: "exposure without port", request: CreateAppRequest{Name: "bad-expose", Image: "nginx:1.27", Expose: true}},
 		{name: "ingress port overflow", request: CreateAppRequest{Name: "bad-ingress-port", Image: "nginx:1.27", IngressContainerPort: 65536}},
+		{name: "environment NUL", request: CreateAppRequest{Name: "bad-environment", Image: "nginx:1.27", EnvVars: map[string]string{"TOKEN": "a\x00b"}}},
 		{name: "relative mount", request: CreateAppRequest{Name: "relative-mount", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "relative", Target: "/data"}}}},
 		{name: "noncanonical mount source", request: CreateAppRequest{Name: "noncanonical-source", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data/../data", Target: "/data"}}}},
 		{name: "noncanonical mount target", request: CreateAppRequest{Name: "noncanonical-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data/"}}}},
 		{name: "root mount target", request: CreateAppRequest{Name: "root-target", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/"}}}},
+		{name: "mount path NUL", request: CreateAppRequest{Name: "nul-mount", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data\x00suffix"}}}},
 		{name: "outside allowed root", request: CreateAppRequest{Name: "outside-root", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/srv/other", Target: "/data"}}}},
 		{name: "sensitive mount", request: CreateAppRequest{Name: "docker-socket", Image: "nginx:1.27", Volumes: []swarm.VolumeConfig{{Source: "/var/run/docker.sock", Target: "/socket"}}}},
 	}
@@ -446,6 +448,8 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 	noncanonicalSource := []swarm.VolumeConfig{{Source: "/srv/moduleos/data/../data", Target: "/data"}}
 	noncanonicalTarget := []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data/"}}
 	rootTarget := []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/"}}
+	nulTarget := []swarm.VolumeConfig{{Source: "/srv/moduleos/data", Target: "/data\x00suffix"}}
+	nulEnvironment := map[string]string{"TOKEN": "a\x00b"}
 	badPorts := []swarm.PortConfig{{ContainerPort: 0}}
 	ingressPortOverflow := uint32(65536)
 	expose := true
@@ -456,6 +460,8 @@ func TestUpdateAppRejectsInvalidPatches(t *testing.T) {
 		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &noncanonicalSource},
 		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &noncanonicalTarget},
 		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &rootTarget},
+		{AppName: created.Name, ExpectedGeneration: -1, Volumes: &nulTarget},
+		{AppName: created.Name, ExpectedGeneration: -1, EnvVars: nulEnvironment},
 		{AppName: created.Name, ExpectedGeneration: -1, Ports: &badPorts},
 		{AppName: created.Name, ExpectedGeneration: -1, IngressContainerPort: &ingressPortOverflow},
 		{AppName: created.Name, ExpectedGeneration: -1, Expose: &expose},

@@ -232,6 +232,13 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 		"uppercase name":   map[string]any{"name": "API", "image": "nginx:1.27"},
 		"null project":     map[string]any{"name": "api", "image": "nginx:1.27", "project_slug": nil},
 		"null environment": map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": nil},
+		"environment NUL":  map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": map[string]any{"TOKEN": "a\x00b"}},
+		"root mount target": map[string]any{"name": "api", "image": "nginx:1.27", "volumes": []any{
+			map[string]any{"source": "/srv/data", "target": "/"},
+		}},
+		"mount NUL": map[string]any{"name": "api", "image": "nginx:1.27", "volumes": []any{
+			map[string]any{"source": "/srv/data", "target": "/data\x00suffix"},
+		}},
 	} {
 		if err := create.Value.VisitJSON(value); err == nil {
 			t.Errorf("%s was accepted", name)
