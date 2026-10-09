@@ -19,7 +19,7 @@ import (
 )
 
 type Service struct {
-	resourceMu        sync.Mutex
+	resourceMu        sync.Locker
 	store             store.Store
 	swarm             swarm.Client
 	baseDomain        string
@@ -51,6 +51,7 @@ func NewService(st store.Store, sw swarm.Client, baseDomain string, log *slog.Lo
 		log = slog.Default()
 	}
 	return &Service{
+		resourceMu:        &sync.Mutex{},
 		store:             st,
 		swarm:             sw,
 		baseDomain:        baseDomain,
@@ -254,6 +255,12 @@ func (s *Service) DeleteAppIntent(ctx context.Context, name string, expectedGene
 	if err != nil {
 		return nil, fmt.Errorf("application not found: %w", err)
 	}
+	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
+		return nil, err
+	}
+	if current.DeletionTimestamp != nil {
+		return current, nil
+	}
 	links, err := s.store.ListProjectLinksByApp(ctx, current.ID)
 	if err != nil {
 		return nil, fmt.Errorf("list application links: %w", err)
@@ -270,9 +277,15 @@ func (s *Service) DeleteAppIntent(ctx context.Context, name string, expectedGene
 }
 
 func (s *Service) SetRunState(ctx context.Context, name string, state store.DesiredRunState, expectedGeneration int64) (*store.Application, error) {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
+
 	current, err := s.store.GetApplication(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("application not found: %w", err)
+	}
+	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
+		return nil, err
 	}
 	if current.DesiredRunState == state {
 		return current, nil
@@ -309,9 +322,15 @@ func (s *Service) ScaleAppIntent(ctx context.Context, name string, replicas int,
 	if replicas < 0 || replicas > s.maxReplicas {
 		return nil, fmt.Errorf("%w: replica count must be between 0 and %d", store.ErrInvalidData, s.maxReplicas)
 	}
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
+
 	current, err := s.store.GetApplication(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("application not found: %w", err)
+	}
+	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
+		return nil, err
 	}
 	if current.Replicas == replicas {
 		return current, nil
@@ -328,7 +347,7 @@ func (s *Service) ScaleAppIntent(ctx context.Context, name string, replicas int,
 // Only non-nil pointer fields are applied (partial update).
 type UpdateAppRequest struct {
 	AppName              string
-	ExpectedGeneration   int64
+	ExpectedGeneration   int64             // -1 explicitly disables the generation precondition
 	EnvVars              map[string]string // nil means no update
 	Ports                *[]swarm.PortConfig
 	Volumes              *[]swarm.VolumeConfig
@@ -339,16 +358,19 @@ type UpdateAppRequest struct {
 
 // UpdateApp atomically updates desired configuration and schedules convergence.
 func (s *Service) UpdateApp(ctx context.Context, req UpdateAppRequest) (*store.Application, error) {
-	if req.ExpectedGeneration == 0 {
-		req.ExpectedGeneration = -1
-	}
 	if req.EnvVars == nil && req.Ports == nil && req.Volumes == nil && req.Expose == nil && req.IngressContainerPort == nil && req.Image == nil {
 		return nil, fmt.Errorf("%w: patch contains no mutable fields", store.ErrInvalidData)
 	}
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
+
 	mutation := store.ApplicationMutation{}
 	current, err := s.store.GetApplication(ctx, req.AppName)
 	if err != nil {
 		return nil, fmt.Errorf("application not found: %w", err)
+	}
+	if err := checkExpectedGeneration(current.DesiredGeneration, req.ExpectedGeneration); err != nil {
+		return nil, err
 	}
 	if req.EnvVars != nil {
 		value := encodeEnvVars(req.EnvVars)
@@ -449,6 +471,9 @@ func (s *Service) DeployApp(ctx context.Context, req DeployAppRequest) (*store.D
 }
 
 func (s *Service) createDeploymentIntent(ctx context.Context, req DeployAppRequest, rollbackSource *string) (*store.Deployment, error) {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
+
 	app, err := s.store.GetApplication(ctx, req.AppName)
 	if err != nil {
 		return nil, fmt.Errorf("application not found: %w", err)
@@ -489,6 +514,13 @@ func (s *Service) createDeploymentIntent(ctx context.Context, req DeployAppReque
 	s.enqueue(req.AppName)
 	s.log.Info("deployment intent created", "app", req.AppName, "deployment_id", deployment.ID, "generation", deployment.TargetGeneration)
 	return deployment, nil
+}
+
+func checkExpectedGeneration(current, expected int64) error {
+	if expected >= 0 && current != expected {
+		return fmt.Errorf("%w: expected %d, current %d", store.ErrGenerationConflict, expected, current)
+	}
+	return nil
 }
 
 // ListDeployments returns the deploy history for an application.
