@@ -1015,7 +1015,8 @@ func TestValidationAndEncodingHelpers(t *testing.T) {
 	ports := []swarm.PortConfig{{ContainerPort: 8080, PublishedPort: 18080}, {ContainerPort: 80, PublishedPort: 10080}}
 	encodedPorts := encodePorts(ports)
 	decodedPorts, err := decodePorts(encodedPorts)
-	if err != nil || len(decodedPorts) != 2 || decodedPorts[0].ContainerPort != 80 || ports[0].ContainerPort != 8080 {
+	if err != nil || len(decodedPorts) != 2 || decodedPorts[0].ContainerPort != 80 || decodedPorts[0].Protocol != "tcp" || decodedPorts[0].PublishMode != "ingress" ||
+		ports[0].ContainerPort != 8080 || ports[0].Protocol != "" || ports[0].PublishMode != "" {
 		t.Fatalf("ports round trip=%#v err=%v original=%#v", decodedPorts, err, ports)
 	}
 	if _, err := decodePorts("not-json"); !errors.Is(err, store.ErrInvalidData) {

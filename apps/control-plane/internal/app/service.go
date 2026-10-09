@@ -821,11 +821,27 @@ func decodeVolumes(raw string) ([]swarm.VolumeConfig, error) {
 
 func encodePorts(ports []swarm.PortConfig) string {
 	ordered := append([]swarm.PortConfig(nil), ports...)
-	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].ContainerPort == ordered[j].ContainerPort {
-			return ordered[i].PublishedPort < ordered[j].PublishedPort
+	for index := range ordered {
+		if ordered[index].Protocol == "" {
+			ordered[index].Protocol = "tcp"
 		}
-		return ordered[i].ContainerPort < ordered[j].ContainerPort
+		if ordered[index].PublishMode == "" {
+			ordered[index].PublishMode = "ingress"
+		}
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		left := ordered[i]
+		right := ordered[j]
+		if left.ContainerPort != right.ContainerPort {
+			return left.ContainerPort < right.ContainerPort
+		}
+		if left.PublishedPort != right.PublishedPort {
+			return left.PublishedPort < right.PublishedPort
+		}
+		if left.Protocol != right.Protocol {
+			return left.Protocol < right.Protocol
+		}
+		return left.PublishMode < right.PublishMode
 	})
 	encoded, err := json.Marshal(ordered)
 	if err != nil {

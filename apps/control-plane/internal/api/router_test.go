@@ -995,6 +995,10 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 	if got.StatusCode != fiber.StatusOK || got.Header.Get(fiber.HeaderETag) != `"1"` {
 		t.Fatalf("get = %d/%#v/%s", got.StatusCode, got.Header, gotBody)
 	}
+	portReplay, portReplayBody := send(http.MethodPatch, "/api/v1/apps/api", `{"ports":[{"container_port":8080,"published_port":0,"protocol":"tcp","publish_mode":"ingress"}]}`, `"1"`)
+	if portReplay.StatusCode != fiber.StatusAccepted || portReplay.Header.Get(fiber.HeaderETag) != `"1"` || queue.count() != 1 {
+		t.Fatalf("port replay = %d/%#v queue=%d body=%s", portReplay.StatusCode, portReplay.Header, queue.count(), portReplayBody)
+	}
 	invalidUpdate, invalidUpdateBody := send(http.MethodPatch, "/api/v1/apps/api", `{"volumes":[{"source":"/srv/moduleos/data","target":"/data/"}]}`, `"1"`)
 	if invalidUpdate.StatusCode != fiber.StatusUnprocessableEntity || queue.count() != 1 {
 		t.Fatalf("invalid update = %d queue=%d body=%s", invalidUpdate.StatusCode, queue.count(), invalidUpdateBody)

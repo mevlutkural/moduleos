@@ -851,7 +851,13 @@ components:
         name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", example: api}
         project_slug: {type: string, minLength: 1, maxLength: 48, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", default: root, example: root}
         image: {type: string, minLength: 1, maxLength: 512, example: "nginx:1.27"}
-        replicas: {type: integer, minimum: 1, maximum: 20, default: 1, example: 2}
+        replicas:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 1
+          example: 2
+          description: Initial desired replica count; the deployment-specific MAX_REPLICAS limit may be lower.
         env_vars:
           type: object
           maxProperties: 200
@@ -899,7 +905,12 @@ components:
       additionalProperties: false
       required: [replicas]
       properties:
-        replicas: {type: integer, minimum: 0, maximum: 20, example: 3}
+        replicas:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          example: 3
+          description: Desired scale target, including zero; the deployment-specific MAX_REPLICAS limit may be lower.
     RedactedValue:
       description: Marker proving that a configured value exists without exposing it.
       example: {redacted: true}

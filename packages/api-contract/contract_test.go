@@ -223,8 +223,12 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	if err := create.Value.VisitJSON(map[string]any{"name": "api", "image": "nginx:1.27"}); err != nil {
 		t.Fatalf("minimal create rejected: %v", err)
 	}
+	if err := create.Value.VisitJSON(map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 1000}); err != nil {
+		t.Fatalf("global replica ceiling rejected: %v", err)
+	}
 	for name, value := range map[string]any{
 		"zero replicas":    map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 0},
+		"replica overflow": map[string]any{"name": "api", "image": "nginx:1.27", "replicas": 1001},
 		"uppercase name":   map[string]any{"name": "API", "image": "nginx:1.27"},
 		"null environment": map[string]any{"name": "api", "image": "nginx:1.27", "env_vars": nil},
 	} {
@@ -247,8 +251,14 @@ func TestApplicationSchemasEnforceRuntimeBoundaries(t *testing.T) {
 	if err := scale.Value.VisitJSON(map[string]any{"replicas": 0}); err != nil {
 		t.Fatalf("scale-to-zero rejected: %v", err)
 	}
+	if err := scale.Value.VisitJSON(map[string]any{"replicas": 1000}); err != nil {
+		t.Fatalf("global scale ceiling rejected: %v", err)
+	}
 	if err := scale.Value.VisitJSON(map[string]any{"replicas": -1}); err == nil {
 		t.Fatal("negative scale was accepted")
+	}
+	if err := scale.Value.VisitJSON(map[string]any{"replicas": 1001}); err == nil {
+		t.Fatal("scale above global ceiling was accepted")
 	}
 
 	ifMatch := document.Components.Parameters["IfMatch"]
