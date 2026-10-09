@@ -38,6 +38,9 @@ type RouterOptions struct {
 	Logger             *slog.Logger
 	Store              handler.HealthStore
 	Runtime            handler.HealthRuntime
+	Projects           handler.ProjectService
+	Environment        string
+	APIKey             string
 	IngressNetwork     string
 	BodyLimit          int
 	ReadTimeout        time.Duration
@@ -66,6 +69,17 @@ func NewRouter(options RouterOptions) (*Router, error) {
 	concurrency, err := middleware.Concurrency(options.RequestConcurrency)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
+	}
+	projects, err := handler.NewProjectHandler(options.Projects, options.Logger)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
+	}
+	var authenticate fiber.Handler
+	if options.APIKey != "" {
+		authenticate, err = middleware.BearerAuth(options.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
+		}
 	}
 
 	app := fiber.New(fiber.Config{
@@ -102,6 +116,19 @@ func NewRouter(options RouterOptions) (*Router, error) {
 	v1.Get("/version", health.Version)
 	v1.Use(concurrency)
 	v1.Get("/ready", health.Ready)
+	protected := v1.Group("")
+	protected.Use(middleware.NoStore())
+	if authenticate != nil {
+		protected.Use(authenticate)
+	}
+	protected.Post("/projects", projects.Create)
+	protected.Get("/projects", projects.List)
+	protected.Get("/projects/:slug/apps", projects.ListApplications)
+	protected.Post("/projects/:slug/links", projects.CreateLink)
+	protected.Get("/projects/:slug/links", projects.ListLinks)
+	protected.Delete("/projects/:slug/links/:link_id", projects.DeleteLink)
+	protected.Get("/projects/:slug", projects.Get)
+	protected.Delete("/projects/:slug", projects.Delete)
 
 	return &Router{App: app, Health: health}, nil
 }
@@ -114,6 +141,10 @@ func validateRouterOptions(options RouterOptions) ([]string, error) {
 		return nil, fmt.Errorf("%w: health store is required", ErrInvalidRouterOptions)
 	case options.Runtime == nil:
 		return nil, fmt.Errorf("%w: health runtime is required", ErrInvalidRouterOptions)
+	case options.Environment != "development" && options.Environment != "production":
+		return nil, fmt.Errorf("%w: environment must be development or production", ErrInvalidRouterOptions)
+	case options.Environment == "production" && len(options.APIKey) < 32:
+		return nil, fmt.Errorf("%w: production API key must contain at least 32 bytes", ErrInvalidRouterOptions)
 	case strings.TrimSpace(options.IngressNetwork) == "":
 		return nil, fmt.Errorf("%w: ingress network is required", ErrInvalidRouterOptions)
 	case options.BodyLimit < minimumBodyLimit || options.BodyLimit > maximumBodyLimit:
