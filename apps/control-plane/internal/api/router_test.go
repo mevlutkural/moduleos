@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -101,15 +102,15 @@ func (*routerApplicationService) UpdateApp(context.Context, controlapp.UpdateApp
 	return nil, store.ErrNotFound
 }
 
-func (*routerApplicationService) DeleteAppIntent(context.Context, string, int64) (*store.Application, error) {
+func (*routerApplicationService) DeleteAppIntentIfMatch(context.Context, string, string, int64) (*store.Application, error) {
 	return nil, store.ErrNotFound
 }
 
-func (*routerApplicationService) SetRunState(context.Context, string, store.DesiredRunState, int64) (*store.Application, error) {
+func (*routerApplicationService) SetRunStateIfMatch(context.Context, string, store.DesiredRunState, string, int64) (*store.Application, error) {
 	return nil, store.ErrNotFound
 }
 
-func (*routerApplicationService) ScaleAppIntent(context.Context, string, int, int64) (*store.Application, error) {
+func (*routerApplicationService) ScaleAppIntentIfMatch(context.Context, string, int, string, int64) (*store.Application, error) {
 	return nil, store.ErrNotFound
 }
 
@@ -1004,7 +1005,9 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 		t.Fatal(err)
 	}
 	created, createdBody := send(http.MethodPost, "/api/v1/apps", string(createPayload), "")
-	if created.StatusCode != fiber.StatusCreated || created.Header.Get(fiber.HeaderETag) != `"1"` || created.Header.Get(fiber.HeaderLocation) != "/api/v1/apps/api" || queue.count() != 1 {
+	createdApp := decodeJSONBytes[handler.ApplicationResponse](t, createdBody)
+	tag := func(generation int64) string { return fmt.Sprintf(`"app:%s:%d"`, createdApp.ID, generation) }
+	if created.StatusCode != fiber.StatusCreated || created.Header.Get(fiber.HeaderETag) != tag(1) || created.Header.Get(fiber.HeaderLocation) != "/api/v1/apps/api" || queue.count() != 1 {
 		t.Fatalf("create = %d/%#v queue=%d body=%s", created.StatusCode, created.Header, queue.count(), createdBody)
 	}
 	for _, forbidden := range []string{"private", mountSource, "reconcile_error_message", "finalizer_state"} {
@@ -1018,18 +1021,18 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 		t.Fatalf("list = %d/%s", listed.StatusCode, listedBody)
 	}
 	got, gotBody := send(http.MethodGet, "/api/v1/apps/api", "", "")
-	if got.StatusCode != fiber.StatusOK || got.Header.Get(fiber.HeaderETag) != `"1"` {
+	if got.StatusCode != fiber.StatusOK || got.Header.Get(fiber.HeaderETag) != tag(1) {
 		t.Fatalf("get = %d/%#v/%s", got.StatusCode, got.Header, gotBody)
 	}
-	portReplay, portReplayBody := send(http.MethodPatch, "/api/v1/apps/api", `{"ports":[{"container_port":8080,"published_port":0,"protocol":"tcp","publish_mode":"ingress"}]}`, `"1"`)
-	if portReplay.StatusCode != fiber.StatusAccepted || portReplay.Header.Get(fiber.HeaderETag) != `"1"` || queue.count() != 1 {
+	portReplay, portReplayBody := send(http.MethodPatch, "/api/v1/apps/api", `{"ports":[{"container_port":8080,"published_port":0,"protocol":"tcp","publish_mode":"ingress"}]}`, tag(1))
+	if portReplay.StatusCode != fiber.StatusAccepted || portReplay.Header.Get(fiber.HeaderETag) != tag(1) || queue.count() != 1 {
 		t.Fatalf("port replay = %d/%#v queue=%d body=%s", portReplay.StatusCode, portReplay.Header, queue.count(), portReplayBody)
 	}
 	invalidUpdatePayload, err := json.Marshal(map[string]any{"volumes": []swarm.VolumeConfig{{Source: mountSource, Target: "/data/"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	invalidUpdate, invalidUpdateBody := send(http.MethodPatch, "/api/v1/apps/api", string(invalidUpdatePayload), `"1"`)
+	invalidUpdate, invalidUpdateBody := send(http.MethodPatch, "/api/v1/apps/api", string(invalidUpdatePayload), tag(1))
 	if invalidUpdate.StatusCode != fiber.StatusUnprocessableEntity || queue.count() != 1 {
 		t.Fatalf("invalid update = %d queue=%d body=%s", invalidUpdate.StatusCode, queue.count(), invalidUpdateBody)
 	}
@@ -1042,42 +1045,42 @@ func TestRouterApplicationLifecycleMatchesOpenAPIAndPersistsIntent(t *testing.T)
 		t.Fatalf("invalid update mutated application = %#v/%v", unchanged, err)
 	}
 
-	updated, updatedBody := send(http.MethodPatch, "/api/v1/apps/api", `{"env_vars":{"MODE":"production"},"ports":[],"volumes":[]}`, `"1"`)
-	if updated.StatusCode != fiber.StatusAccepted || updated.Header.Get(fiber.HeaderETag) != `"2"` || queue.count() != 2 {
+	updated, updatedBody := send(http.MethodPatch, "/api/v1/apps/api", `{"env_vars":{"MODE":"production"},"ports":[],"volumes":[]}`, tag(1))
+	if updated.StatusCode != fiber.StatusAccepted || updated.Header.Get(fiber.HeaderETag) != tag(2) || queue.count() != 2 {
 		t.Fatalf("update = %d/%#v queue=%d body=%s", updated.StatusCode, updated.Header, queue.count(), updatedBody)
 	}
-	stale, staleBody := send(http.MethodPatch, "/api/v1/apps/api", `{"env_vars":{"MODE":"production"}}`, `"1"`)
+	stale, staleBody := send(http.MethodPatch, "/api/v1/apps/api", `{"env_vars":{"MODE":"production"}}`, tag(1))
 	if stale.StatusCode != fiber.StatusPreconditionFailed || queue.count() != 2 || decodeJSONBytes[apiresponse.ErrorResponse](t, staleBody).Error.Code != "precondition_failed" {
 		t.Fatalf("stale = %d queue=%d body=%s", stale.StatusCode, queue.count(), staleBody)
 	}
-	replayed, replayedBody := send(http.MethodPatch, "/api/v1/apps/api", `{"env_vars":{"MODE":"production"}}`, `"2"`)
-	if replayed.StatusCode != fiber.StatusAccepted || replayed.Header.Get(fiber.HeaderETag) != `"2"` || queue.count() != 2 {
+	replayed, replayedBody := send(http.MethodPatch, "/api/v1/apps/api", `{"env_vars":{"MODE":"production"}}`, tag(2))
+	if replayed.StatusCode != fiber.StatusAccepted || replayed.Header.Get(fiber.HeaderETag) != tag(2) || queue.count() != 2 {
 		t.Fatalf("replay = %d/%#v queue=%d body=%s", replayed.StatusCode, replayed.Header, queue.count(), replayedBody)
 	}
 
-	scaled, scaledBody := send(http.MethodPost, "/api/v1/apps/api/scale", `{"replicas":3}`, `"2"`)
-	if scaled.StatusCode != fiber.StatusAccepted || scaled.Header.Get(fiber.HeaderETag) != `"3"` || queue.count() != 3 {
+	scaled, scaledBody := send(http.MethodPost, "/api/v1/apps/api/scale", `{"replicas":3}`, tag(2))
+	if scaled.StatusCode != fiber.StatusAccepted || scaled.Header.Get(fiber.HeaderETag) != tag(3) || queue.count() != 3 {
 		t.Fatalf("scale = %d/%#v queue=%d body=%s", scaled.StatusCode, scaled.Header, queue.count(), scaledBody)
 	}
-	stopped, stoppedBody := send(http.MethodPost, "/api/v1/apps/api/stop", "", `"3"`)
-	if stopped.StatusCode != fiber.StatusAccepted || stopped.Header.Get(fiber.HeaderETag) != `"4"` || queue.count() != 4 {
+	stopped, stoppedBody := send(http.MethodPost, "/api/v1/apps/api/stop", "", tag(3))
+	if stopped.StatusCode != fiber.StatusAccepted || stopped.Header.Get(fiber.HeaderETag) != tag(4) || queue.count() != 4 {
 		t.Fatalf("stop = %d/%#v queue=%d body=%s", stopped.StatusCode, stopped.Header, queue.count(), stoppedBody)
 	}
-	stopReplay, stopReplayBody := send(http.MethodPost, "/api/v1/apps/api/stop", "", `"4"`)
-	if stopReplay.StatusCode != fiber.StatusAccepted || stopReplay.Header.Get(fiber.HeaderETag) != `"4"` || queue.count() != 4 {
+	stopReplay, stopReplayBody := send(http.MethodPost, "/api/v1/apps/api/stop", "", tag(4))
+	if stopReplay.StatusCode != fiber.StatusAccepted || stopReplay.Header.Get(fiber.HeaderETag) != tag(4) || queue.count() != 4 {
 		t.Fatalf("stop replay = %d/%#v queue=%d body=%s", stopReplay.StatusCode, stopReplay.Header, queue.count(), stopReplayBody)
 	}
-	started, startedBody := send(http.MethodPost, "/api/v1/apps/api/start", "", `"4"`)
-	if started.StatusCode != fiber.StatusAccepted || started.Header.Get(fiber.HeaderETag) != `"5"` || queue.count() != 5 {
+	started, startedBody := send(http.MethodPost, "/api/v1/apps/api/start", "", tag(4))
+	if started.StatusCode != fiber.StatusAccepted || started.Header.Get(fiber.HeaderETag) != tag(5) || queue.count() != 5 {
 		t.Fatalf("start = %d/%#v queue=%d body=%s", started.StatusCode, started.Header, queue.count(), startedBody)
 	}
 
-	deleting, deletingBody := send(http.MethodDelete, "/api/v1/apps/api", "", `"5"`)
-	if deleting.StatusCode != fiber.StatusAccepted || deleting.Header.Get(fiber.HeaderETag) != `"6"` || queue.count() != 6 {
+	deleting, deletingBody := send(http.MethodDelete, "/api/v1/apps/api", "", tag(5))
+	if deleting.StatusCode != fiber.StatusAccepted || deleting.Header.Get(fiber.HeaderETag) != tag(6) || queue.count() != 6 {
 		t.Fatalf("delete = %d/%#v queue=%d body=%s", deleting.StatusCode, deleting.Header, queue.count(), deletingBody)
 	}
-	deleteReplay, deleteReplayBody := send(http.MethodDelete, "/api/v1/apps/api", "", `"6"`)
-	if deleteReplay.StatusCode != fiber.StatusAccepted || deleteReplay.Header.Get(fiber.HeaderETag) != `"6"` || queue.count() != 6 {
+	deleteReplay, deleteReplayBody := send(http.MethodDelete, "/api/v1/apps/api", "", tag(6))
+	if deleteReplay.StatusCode != fiber.StatusAccepted || deleteReplay.Header.Get(fiber.HeaderETag) != tag(6) || queue.count() != 6 {
 		t.Fatalf("delete replay = %d/%#v queue=%d body=%s", deleteReplay.StatusCode, deleteReplay.Header, queue.count(), deleteReplayBody)
 	}
 	persisted, err := st.GetApplication(t.Context(), "api")
@@ -1162,7 +1165,7 @@ func TestRouterConcurrentApplicationMutationHasOneWinner(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/api/v1/apps/race-app/scale", strings.NewReader(`{"replicas":2}`))
 			request.Header.Set(fiber.HeaderAuthorization, "Bearer test-key")
 			request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
-			request.Header.Set(fiber.HeaderIfMatch, `"1"`)
+			request.Header.Set(fiber.HeaderIfMatch, fmt.Sprintf(`"app:%s:1"`, created.ID))
 			response, requestErr := router.App.Test(request, fiber.TestConfig{Timeout: 0})
 			if requestErr != nil {
 				statuses <- 0
@@ -1180,6 +1183,75 @@ func TestRouterConcurrentApplicationMutationHasOneWinner(t *testing.T) {
 	persisted, err := st.GetApplication(t.Context(), created.Name)
 	if err != nil || persisted.DesiredGeneration != 2 || persisted.Replicas != 2 || queue.count() != 2 {
 		t.Fatalf("application = %#v err=%v queue=%d", persisted, err, queue.count())
+	}
+}
+
+func TestRouterRejectsOldApplicationETagAfterSameNameRecreation(t *testing.T) {
+	st, err := store.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	queue := &routerRecordingQueue{}
+	service := controlapp.NewService(st, swarmfake.New(), "moduleos.local", slog.New(slog.NewTextHandler(io.Discard, nil))).WithReconcileQueue(queue)
+	old, err := service.CreateApp(t.Context(), controlapp.CreateAppRequest{Name: "recreated", Image: "nginx:1.27"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTag := fmt.Sprintf(`"app:%s:1"`, old.ID)
+	deleting, err := service.DeleteAppIntent(t.Context(), old.Name, old.DesiredGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinalizeApplicationDeletion(t.Context(), old.ID, deleting.DesiredGeneration); err != nil {
+		t.Fatal(err)
+	}
+	current, err := service.CreateApp(t.Context(), controlapp.CreateAppRequest{Name: old.Name, Image: "nginx:1.27"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ID == old.ID || current.DesiredGeneration != old.DesiredGeneration {
+		t.Fatalf("invalid ABA fixture: old=%s/%d current=%s/%d", old.ID, old.DesiredGeneration, current.ID, current.DesiredGeneration)
+	}
+	options := validRouterOptions()
+	options.Store = st
+	options.Projects = service
+	options.Applications = service
+	options.APIKey = "test-key"
+	router, err := NewRouter(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractRouter := contractRouterForTest(t)
+	for _, test := range []struct{ method, path, body string }{
+		{http.MethodPatch, "/api/v1/apps/recreated", `{"env_vars":{"MODE":"prod"}}`},
+		{http.MethodPost, "/api/v1/apps/recreated/start", ""},
+		{http.MethodPost, "/api/v1/apps/recreated/stop", ""},
+		{http.MethodPost, "/api/v1/apps/recreated/scale", `{"replicas":2}`},
+		{http.MethodDelete, "/api/v1/apps/recreated", ""},
+	} {
+		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+		request.Header.Set(fiber.HeaderAuthorization, "Bearer test-key")
+		request.Header.Set(fiber.HeaderIfMatch, oldTag)
+		if test.body != "" {
+			request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+		}
+		response := sendRequest(t, router.App, request)
+		payload := validateOpenAPIResponse(t, contractRouter, request, response)
+		if response.StatusCode != fiber.StatusPreconditionFailed {
+			t.Fatalf("%s %s accepted old incarnation: %d %s", test.method, test.path, response.StatusCode, payload)
+		}
+	}
+	persisted, err := st.GetApplication(t.Context(), old.Name)
+	if err != nil || persisted.ID != current.ID || persisted.DesiredGeneration != 1 || persisted.DeletionTimestamp != nil || queue.count() != 3 {
+		t.Fatalf("new application changed: %#v err=%v queue=%d", persisted, err, queue.count())
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/apps/recreated/start", nil)
+	request.Header.Set(fiber.HeaderAuthorization, "Bearer test-key")
+	request.Header.Set(fiber.HeaderIfMatch, fmt.Sprintf(`"app:%s:1"`, current.ID))
+	response := sendRequest(t, router.App, request)
+	if response.StatusCode != fiber.StatusAccepted || queue.count() != 3 {
+		t.Fatalf("current no-op precondition failed: %d queue=%d", response.StatusCode, queue.count())
 	}
 }
 

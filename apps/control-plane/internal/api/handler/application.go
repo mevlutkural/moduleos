@@ -22,9 +22,9 @@ type ApplicationService interface {
 	ListApps(context.Context) ([]*store.Application, error)
 	GetApp(context.Context, string) (*store.Application, error)
 	UpdateApp(context.Context, app.UpdateAppRequest) (*store.Application, error)
-	DeleteAppIntent(context.Context, string, int64) (*store.Application, error)
-	SetRunState(context.Context, string, store.DesiredRunState, int64) (*store.Application, error)
-	ScaleAppIntent(context.Context, string, int, int64) (*store.Application, error)
+	DeleteAppIntentIfMatch(context.Context, string, string, int64) (*store.Application, error)
+	SetRunStateIfMatch(context.Context, string, store.DesiredRunState, string, int64) (*store.Application, error)
+	ScaleAppIntentIfMatch(context.Context, string, int, string, int64) (*store.Application, error)
 }
 
 type ApplicationHandler struct {
@@ -78,7 +78,7 @@ func (h *ApplicationHandler) Create(c fiber.Ctx) error {
 		return h.writeServiceError(c, "create_application_response", err)
 	}
 	c.Location("/api/v1/apps/" + response.Name)
-	setApplicationETag(c, response.DesiredGeneration)
+	setApplicationETag(c, created.ID, response.DesiredGeneration)
 	return c.Status(fiber.StatusCreated).JSON(response)
 }
 
@@ -110,7 +110,7 @@ func (h *ApplicationHandler) Get(c fiber.Ctx) error {
 	if err != nil {
 		return h.writeServiceError(c, "get_application_response", err)
 	}
-	setApplicationETag(c, response.DesiredGeneration)
+	setApplicationETag(c, application.ID, response.DesiredGeneration)
 	return c.JSON(response)
 }
 
@@ -119,7 +119,7 @@ func (h *ApplicationHandler) Update(c fiber.Ctx) error {
 	if !ok {
 		return writeInvalidPath(c, "name")
 	}
-	expected, err := readExpectedGeneration(c)
+	expectedID, expected, err := expectedApplicationETag(c)
 	if err != nil {
 		return writeExpectedGenerationError(c, err)
 	}
@@ -131,7 +131,7 @@ func (h *ApplicationHandler) Update(c fiber.Ctx) error {
 		return apiresponse.WriteError(c, fiber.StatusUnprocessableEntity, "validation_failed", "request validation failed", apiresponse.ErrorOptions{Fields: fields})
 	}
 
-	serviceRequest := app.UpdateAppRequest{AppName: name, ExpectedGeneration: expected}
+	serviceRequest := app.UpdateAppRequest{AppName: name, ExpectedID: expectedID, ExpectedGeneration: expected}
 	if request.EnvVars.Present {
 		serviceRequest.EnvVars = applicationEnvironment(request.EnvVars.Value)
 	}
@@ -154,32 +154,32 @@ func (h *ApplicationHandler) Update(c fiber.Ctx) error {
 	if err != nil {
 		return h.writeServiceError(c, "update_application", err)
 	}
-	if updated == nil || updated.Name != name {
+	if updated == nil || updated.Name != name || updated.ID != expectedID {
 		return h.writeServiceError(c, "update_application_response", errInvalidPublicState)
 	}
 	response, err := mapApplicationResponse(updated)
 	if err != nil {
 		return h.writeServiceError(c, "update_application_response", err)
 	}
-	setApplicationETag(c, response.DesiredGeneration)
+	setApplicationETag(c, updated.ID, response.DesiredGeneration)
 	return c.Status(fiber.StatusAccepted).JSON(response)
 }
 
 func (h *ApplicationHandler) Delete(c fiber.Ctx) error {
-	return h.mutateWithoutBody(c, "delete", func(ctx context.Context, name string, generation int64) (*store.Application, error) {
-		return h.service.DeleteAppIntent(ctx, name, generation)
+	return h.mutateWithoutBody(c, "delete", func(ctx context.Context, name, id string, generation int64) (*store.Application, error) {
+		return h.service.DeleteAppIntentIfMatch(ctx, name, id, generation)
 	})
 }
 
 func (h *ApplicationHandler) Start(c fiber.Ctx) error {
-	return h.mutateWithoutBody(c, "start", func(ctx context.Context, name string, generation int64) (*store.Application, error) {
-		return h.service.SetRunState(ctx, name, store.DesiredRunStateRunning, generation)
+	return h.mutateWithoutBody(c, "start", func(ctx context.Context, name, id string, generation int64) (*store.Application, error) {
+		return h.service.SetRunStateIfMatch(ctx, name, store.DesiredRunStateRunning, id, generation)
 	})
 }
 
 func (h *ApplicationHandler) Stop(c fiber.Ctx) error {
-	return h.mutateWithoutBody(c, "stop", func(ctx context.Context, name string, generation int64) (*store.Application, error) {
-		return h.service.SetRunState(ctx, name, store.DesiredRunStateStopped, generation)
+	return h.mutateWithoutBody(c, "stop", func(ctx context.Context, name, id string, generation int64) (*store.Application, error) {
+		return h.service.SetRunStateIfMatch(ctx, name, store.DesiredRunStateStopped, id, generation)
 	})
 }
 
@@ -188,7 +188,7 @@ func (h *ApplicationHandler) Scale(c fiber.Ctx) error {
 	if !ok {
 		return writeInvalidPath(c, "name")
 	}
-	expected, err := readExpectedGeneration(c)
+	expectedID, expected, err := expectedApplicationETag(c)
 	if err != nil {
 		return writeExpectedGenerationError(c, err)
 	}
@@ -202,14 +202,14 @@ func (h *ApplicationHandler) Scale(c fiber.Ctx) error {
 	if request.Replicas.Value < 0 {
 		return apiresponse.WriteError(c, fiber.StatusUnprocessableEntity, "validation_failed", "request validation failed", apiresponse.ErrorOptions{Fields: map[string]string{"replicas": "must be non-negative"}})
 	}
-	application, err := h.service.ScaleAppIntent(c.RequestCtx(), name, request.Replicas.Value, expected)
+	application, err := h.service.ScaleAppIntentIfMatch(c.RequestCtx(), name, request.Replicas.Value, expectedID, expected)
 	if err != nil {
 		return h.writeServiceError(c, "scale_application", err)
 	}
-	return writeApplicationOperation(c, "scale", name, application)
+	return writeApplicationOperation(c, "scale", name, expectedID, application)
 }
 
-func (h *ApplicationHandler) mutateWithoutBody(c fiber.Ctx, operation string, mutation func(context.Context, string, int64) (*store.Application, error)) error {
+func (h *ApplicationHandler) mutateWithoutBody(c fiber.Ctx, operation string, mutation func(context.Context, string, string, int64) (*store.Application, error)) error {
 	name, ok := validApplicationName(c.Params("name"))
 	if !ok {
 		return writeInvalidPath(c, "name")
@@ -217,29 +217,25 @@ func (h *ApplicationHandler) mutateWithoutBody(c fiber.Ctx, operation string, mu
 	if len(c.Body()) != 0 {
 		return apiresponse.WriteError(c, fiber.StatusBadRequest, "invalid_request", "request body must be empty", apiresponse.ErrorOptions{})
 	}
-	expected, err := readExpectedGeneration(c)
+	expectedID, expected, err := expectedApplicationETag(c)
 	if err != nil {
 		return writeExpectedGenerationError(c, err)
 	}
-	application, err := mutation(c.RequestCtx(), name, expected)
+	application, err := mutation(c.RequestCtx(), name, expectedID, expected)
 	if err != nil {
 		return h.writeServiceError(c, operation+"_application", err)
 	}
-	return writeApplicationOperation(c, operation, name, application)
+	return writeApplicationOperation(c, operation, name, expectedID, application)
 }
 
-func writeApplicationOperation(c fiber.Ctx, operation, expectedName string, application *store.Application) error {
-	if application == nil || application.Name != expectedName || !publicApplicationName.MatchString(application.Name) || application.DesiredGeneration < 1 {
+func writeApplicationOperation(c fiber.Ctx, operation, expectedName, expectedID string, application *store.Application) error {
+	if application == nil || application.Name != expectedName || application.ID != expectedID || !canonicalUUID(application.ID) || !publicApplicationName.MatchString(application.Name) || application.DesiredGeneration < 1 {
 		return fmt.Errorf("%w: invalid application operation result", errInvalidPublicState)
 	}
-	setApplicationETag(c, application.DesiredGeneration)
+	setApplicationETag(c, application.ID, application.DesiredGeneration)
 	return c.Status(fiber.StatusAccepted).JSON(ApplicationOperationResponse{
 		Operation: operation, Resource: application.Name, Status: "accepted", Generation: application.DesiredGeneration,
 	})
-}
-
-func readExpectedGeneration(c fiber.Ctx) (int64, error) {
-	return expectedGeneration(c)
 }
 
 func writeExpectedGenerationError(c fiber.Ctx, err error) error {
@@ -247,12 +243,12 @@ func writeExpectedGenerationError(c fiber.Ctx, err error) error {
 	case errors.Is(err, errMissingIfMatch):
 		return apiresponse.WriteError(c, fiber.StatusPreconditionRequired, "precondition_required", "If-Match header is required", apiresponse.ErrorOptions{})
 	default:
-		return apiresponse.WriteError(c, fiber.StatusBadRequest, "invalid_request", "If-Match header is malformed", apiresponse.ErrorOptions{Fields: map[string]string{"If-Match": "must contain one strong application generation ETag"}})
+		return apiresponse.WriteError(c, fiber.StatusBadRequest, "invalid_request", "If-Match header is malformed", apiresponse.ErrorOptions{Fields: map[string]string{"If-Match": "must contain one strong application identity and generation ETag"}})
 	}
 }
 
-func setApplicationETag(c fiber.Ctx, generation int64) {
-	c.Set(fiber.HeaderETag, generationETag(generation))
+func setApplicationETag(c fiber.Ctx, id string, generation int64) {
+	c.Set(fiber.HeaderETag, generationETag(id, generation))
 }
 
 func validateCreateApplicationRequest(request CreateApplicationRequest) map[string]string {

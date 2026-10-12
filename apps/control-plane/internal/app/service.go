@@ -315,6 +315,14 @@ func (s *Service) DeleteApp(ctx context.Context, name string) error {
 }
 
 func (s *Service) DeleteAppIntent(ctx context.Context, name string, expectedGeneration int64) (*store.Application, error) {
+	return s.deleteAppIntent(ctx, name, "", expectedGeneration)
+}
+
+func (s *Service) DeleteAppIntentIfMatch(ctx context.Context, name, expectedID string, expectedGeneration int64) (*store.Application, error) {
+	return s.deleteAppIntent(ctx, name, expectedID, expectedGeneration)
+}
+
+func (s *Service) deleteAppIntent(ctx context.Context, name, expectedID string, expectedGeneration int64) (*store.Application, error) {
 	if err := s.lockResources(ctx); err != nil {
 		return nil, err
 	}
@@ -324,7 +332,7 @@ func (s *Service) DeleteAppIntent(ctx context.Context, name string, expectedGene
 	if err != nil {
 		return nil, fmt.Errorf("application not found: %w", err)
 	}
-	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
+	if err := checkApplicationPrecondition(current, expectedID, expectedGeneration); err != nil {
 		return nil, err
 	}
 	if current.DeletionTimestamp != nil {
@@ -337,7 +345,12 @@ func (s *Service) DeleteAppIntent(ctx context.Context, name string, expectedGene
 	if len(links) > 0 {
 		return nil, fmt.Errorf("%w: application has active project links", store.ErrConflict)
 	}
-	application, err := s.store.CreateDeletionIntent(ctx, name, expectedGeneration)
+	var application *store.Application
+	if expectedID == "" {
+		application, err = s.store.CreateDeletionIntent(ctx, name, expectedGeneration)
+	} else {
+		application, err = s.store.CreateDeletionIntentForID(ctx, name, expectedID, expectedGeneration)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create deletion intent: %w", err)
 	}
@@ -346,6 +359,14 @@ func (s *Service) DeleteAppIntent(ctx context.Context, name string, expectedGene
 }
 
 func (s *Service) SetRunState(ctx context.Context, name string, state store.DesiredRunState, expectedGeneration int64) (*store.Application, error) {
+	return s.setRunState(ctx, name, state, "", expectedGeneration)
+}
+
+func (s *Service) SetRunStateIfMatch(ctx context.Context, name string, state store.DesiredRunState, expectedID string, expectedGeneration int64) (*store.Application, error) {
+	return s.setRunState(ctx, name, state, expectedID, expectedGeneration)
+}
+
+func (s *Service) setRunState(ctx context.Context, name string, state store.DesiredRunState, expectedID string, expectedGeneration int64) (*store.Application, error) {
 	if state != store.DesiredRunStateRunning && state != store.DesiredRunStateStopped {
 		return nil, fmt.Errorf("%w: invalid desired run state", store.ErrInvalidData)
 	}
@@ -358,7 +379,7 @@ func (s *Service) SetRunState(ctx context.Context, name string, state store.Desi
 	if err != nil {
 		return nil, fmt.Errorf("application not found: %w", err)
 	}
-	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
+	if err := checkApplicationPrecondition(current, expectedID, expectedGeneration); err != nil {
 		return nil, err
 	}
 	if current.DeletionTimestamp != nil {
@@ -370,7 +391,12 @@ func (s *Service) SetRunState(ctx context.Context, name string, state store.Desi
 	if current.DesiredRunState == state {
 		return current, nil
 	}
-	updated, err := s.store.UpdateApplicationIntent(ctx, name, expectedGeneration, store.ApplicationMutation{DesiredRunState: &state})
+	var updated *store.Application
+	if expectedID == "" {
+		updated, err = s.store.UpdateApplicationIntent(ctx, name, expectedGeneration, store.ApplicationMutation{DesiredRunState: &state})
+	} else {
+		updated, err = s.store.UpdateApplicationIntentForID(ctx, name, expectedID, expectedGeneration, store.ApplicationMutation{DesiredRunState: &state})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("update run state intent: %w", err)
 	}
@@ -399,6 +425,14 @@ func (s *Service) ScaleApp(ctx context.Context, name string, replicas int) error
 }
 
 func (s *Service) ScaleAppIntent(ctx context.Context, name string, replicas int, expectedGeneration int64) (*store.Application, error) {
+	return s.scaleAppIntent(ctx, name, replicas, "", expectedGeneration)
+}
+
+func (s *Service) ScaleAppIntentIfMatch(ctx context.Context, name string, replicas int, expectedID string, expectedGeneration int64) (*store.Application, error) {
+	return s.scaleAppIntent(ctx, name, replicas, expectedID, expectedGeneration)
+}
+
+func (s *Service) scaleAppIntent(ctx context.Context, name string, replicas int, expectedID string, expectedGeneration int64) (*store.Application, error) {
 	if replicas < 0 || replicas > s.maxReplicas {
 		return nil, fmt.Errorf("%w: replica count must be between 0 and %d", store.ErrInvalidData, s.maxReplicas)
 	}
@@ -411,7 +445,7 @@ func (s *Service) ScaleAppIntent(ctx context.Context, name string, replicas int,
 	if err != nil {
 		return nil, fmt.Errorf("application not found: %w", err)
 	}
-	if err := checkExpectedGeneration(current.DesiredGeneration, expectedGeneration); err != nil {
+	if err := checkApplicationPrecondition(current, expectedID, expectedGeneration); err != nil {
 		return nil, err
 	}
 	if current.DeletionTimestamp != nil {
@@ -420,7 +454,12 @@ func (s *Service) ScaleAppIntent(ctx context.Context, name string, replicas int,
 	if current.Replicas == replicas {
 		return current, nil
 	}
-	updated, err := s.store.UpdateApplicationIntent(ctx, name, expectedGeneration, store.ApplicationMutation{Replicas: &replicas})
+	var updated *store.Application
+	if expectedID == "" {
+		updated, err = s.store.UpdateApplicationIntent(ctx, name, expectedGeneration, store.ApplicationMutation{Replicas: &replicas})
+	} else {
+		updated, err = s.store.UpdateApplicationIntentForID(ctx, name, expectedID, expectedGeneration, store.ApplicationMutation{Replicas: &replicas})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("update scale intent: %w", err)
 	}
@@ -432,6 +471,7 @@ func (s *Service) ScaleAppIntent(ctx context.Context, name string, replicas int,
 // Only non-nil pointer fields are applied (partial update).
 type UpdateAppRequest struct {
 	AppName              string
+	ExpectedID           string
 	ExpectedGeneration   int64             // -1 explicitly disables the generation precondition
 	EnvVars              map[string]string // nil means no update
 	Ports                *[]swarm.PortConfig
@@ -456,7 +496,7 @@ func (s *Service) UpdateApp(ctx context.Context, req UpdateAppRequest) (*store.A
 	if err != nil {
 		return nil, fmt.Errorf("application not found: %w", err)
 	}
-	if err := checkExpectedGeneration(current.DesiredGeneration, req.ExpectedGeneration); err != nil {
+	if err := checkApplicationPrecondition(current, req.ExpectedID, req.ExpectedGeneration); err != nil {
 		return nil, err
 	}
 	if current.DeletionTimestamp != nil {
@@ -505,7 +545,12 @@ func (s *Service) UpdateApp(ctx context.Context, req UpdateAppRequest) (*store.A
 	if applicationConfigEqual(current, &candidate) {
 		return current, nil
 	}
-	updated, err := s.store.UpdateApplicationIntent(ctx, req.AppName, req.ExpectedGeneration, mutation)
+	var updated *store.Application
+	if req.ExpectedID == "" {
+		updated, err = s.store.UpdateApplicationIntent(ctx, req.AppName, req.ExpectedGeneration, mutation)
+	} else {
+		updated, err = s.store.UpdateApplicationIntentForID(ctx, req.AppName, req.ExpectedID, req.ExpectedGeneration, mutation)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("update application intent: %w", err)
 	}
@@ -614,6 +659,13 @@ func checkExpectedGeneration(current, expected int64) error {
 		return fmt.Errorf("%w: expected %d, current %d", store.ErrGenerationConflict, expected, current)
 	}
 	return nil
+}
+
+func checkApplicationPrecondition(current *store.Application, expectedID string, expectedGeneration int64) error {
+	if expectedID != "" && current.ID != expectedID {
+		return store.ErrGenerationConflict
+	}
+	return checkExpectedGeneration(current.DesiredGeneration, expectedGeneration)
 }
 
 // ListDeployments returns the deploy history for an application.

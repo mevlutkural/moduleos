@@ -549,6 +549,17 @@ func (s *SQLiteStore) DeleteApplication(ctx context.Context, name string) error 
 }
 
 func (s *SQLiteStore) UpdateApplicationIntent(ctx context.Context, name string, expectedGeneration int64, mutation ApplicationMutation) (*Application, error) {
+	return s.updateApplicationIntent(ctx, name, "", expectedGeneration, mutation)
+}
+
+func (s *SQLiteStore) UpdateApplicationIntentForID(ctx context.Context, name, expectedID string, expectedGeneration int64, mutation ApplicationMutation) (*Application, error) {
+	if expectedID == "" || expectedGeneration < 1 {
+		return nil, ErrInvalidData
+	}
+	return s.updateApplicationIntent(ctx, name, expectedID, expectedGeneration, mutation)
+}
+
+func (s *SQLiteStore) updateApplicationIntent(ctx context.Context, name, expectedID string, expectedGeneration int64, mutation ApplicationMutation) (*Application, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -564,6 +575,9 @@ func (s *SQLiteStore) UpdateApplicationIntent(ctx context.Context, name string, 
 	}
 	if expectedGeneration >= 0 && app.DesiredGeneration != expectedGeneration {
 		return nil, fmt.Errorf("%w: expected %d, current %d", ErrGenerationConflict, expectedGeneration, app.DesiredGeneration)
+	}
+	if expectedID != "" && app.ID != expectedID {
+		return nil, ErrGenerationConflict
 	}
 	if app.DeletionTimestamp != nil {
 		return nil, fmt.Errorf("%w: application is deleting", ErrConflict)
@@ -810,6 +824,17 @@ func markApplicationObserved(ctx context.Context, executor statementExecutor, ap
 }
 
 func (s *SQLiteStore) CreateDeletionIntent(ctx context.Context, name string, expectedGeneration int64) (*Application, error) {
+	return s.createDeletionIntent(ctx, name, "", expectedGeneration)
+}
+
+func (s *SQLiteStore) CreateDeletionIntentForID(ctx context.Context, name, expectedID string, expectedGeneration int64) (*Application, error) {
+	if expectedID == "" || expectedGeneration < 1 {
+		return nil, ErrInvalidData
+	}
+	return s.createDeletionIntent(ctx, name, expectedID, expectedGeneration)
+}
+
+func (s *SQLiteStore) createDeletionIntent(ctx context.Context, name, expectedID string, expectedGeneration int64) (*Application, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -824,6 +849,9 @@ func (s *SQLiteStore) CreateDeletionIntent(ctx context.Context, name string, exp
 		return nil, err
 	}
 	if expectedGeneration >= 0 && app.DesiredGeneration != expectedGeneration {
+		return nil, ErrGenerationConflict
+	}
+	if expectedID != "" && app.ID != expectedID {
 		return nil, ErrGenerationConflict
 	}
 	if app.DeletionTimestamp != nil {
