@@ -122,6 +122,40 @@ func TestApplicationIntentCASAndStaleObservation(t *testing.T) {
 	}
 }
 
+func TestApplicationIntentRejectsStaleIncarnation(t *testing.T) {
+	st, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	old := canonicalTestApp("recreated-app")
+	if err := st.CreateApplication(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteApplication(ctx, old.Name); err != nil {
+		t.Fatal(err)
+	}
+	current := canonicalTestApp(old.Name)
+	if err := st.CreateApplication(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.ID == old.ID || current.DesiredGeneration != old.DesiredGeneration {
+		t.Fatalf("invalid ABA fixture: old=%s/%d current=%s/%d", old.ID, old.DesiredGeneration, current.ID, current.DesiredGeneration)
+	}
+	replicas := 2
+	if _, err := st.UpdateApplicationIntentForID(ctx, old.Name, old.ID, old.DesiredGeneration, ApplicationMutation{Replicas: &replicas}); !errors.Is(err, ErrGenerationConflict) {
+		t.Fatalf("old application precondition must not mutate a new incarnation: %v", err)
+	}
+	if _, err := st.CreateDeletionIntentForID(ctx, old.Name, old.ID, old.DesiredGeneration); !errors.Is(err, ErrGenerationConflict) {
+		t.Fatalf("old application precondition must not delete a new incarnation: %v", err)
+	}
+	got, err := st.GetApplication(ctx, old.Name)
+	if err != nil || got.ID != current.ID || got.DesiredGeneration != 1 || got.Replicas != 1 || got.DeletionTimestamp != nil {
+		t.Fatalf("new incarnation changed after stale mutation: %#v, %v", got, err)
+	}
+}
+
 func TestApplicationAndDeploymentConvergenceIsAtomic(t *testing.T) {
 	st, err := NewSQLiteStore(":memory:")
 	if err != nil {

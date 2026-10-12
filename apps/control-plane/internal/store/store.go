@@ -31,10 +31,12 @@ type Store interface {
 	UpdateApplication(ctx context.Context, app *Application) error
 	DeleteApplication(ctx context.Context, name string) error
 	UpdateApplicationIntent(ctx context.Context, name string, expectedGeneration int64, mutation ApplicationMutation) (*Application, error)
+	UpdateApplicationIntentForID(ctx context.Context, name, expectedID string, expectedGeneration int64, mutation ApplicationMutation) (*Application, error)
 	CreateDeploymentIntent(ctx context.Context, name string, d *Deployment) (*Application, error)
 	MarkApplicationObserved(ctx context.Context, appID string, update ObservedApplicationUpdate) error
 	MarkApplicationConverged(ctx context.Context, appID string, update ObservedApplicationUpdate, deploymentID, resolvedImage string) error
 	CreateDeletionIntent(ctx context.Context, name string, expectedGeneration int64) (*Application, error)
+	CreateDeletionIntentForID(ctx context.Context, name, expectedID string, expectedGeneration int64) (*Application, error)
 	FinalizeApplicationDeletion(ctx context.Context, appID string, generation int64) error
 	PersistReconcileDiagnostics(ctx context.Context, appID string, generation int64, code, message string, retryable bool, attempt int) error
 

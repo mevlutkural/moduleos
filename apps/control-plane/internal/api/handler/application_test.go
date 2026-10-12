@@ -67,6 +67,10 @@ func (s *applicationServiceStub) DeleteAppIntent(ctx context.Context, name strin
 	return validApplication(), nil
 }
 
+func (s *applicationServiceStub) DeleteAppIntentIfMatch(ctx context.Context, name, id string, generation int64) (*store.Application, error) {
+	return s.DeleteAppIntent(ctx, name, generation)
+}
+
 func (s *applicationServiceStub) SetRunState(ctx context.Context, name string, state store.DesiredRunState, generation int64) (*store.Application, error) {
 	if s.run != nil {
 		return s.run(ctx, name, state, generation)
@@ -74,11 +78,19 @@ func (s *applicationServiceStub) SetRunState(ctx context.Context, name string, s
 	return validApplication(), nil
 }
 
+func (s *applicationServiceStub) SetRunStateIfMatch(ctx context.Context, name string, state store.DesiredRunState, id string, generation int64) (*store.Application, error) {
+	return s.SetRunState(ctx, name, state, generation)
+}
+
 func (s *applicationServiceStub) ScaleAppIntent(ctx context.Context, name string, replicas int, generation int64) (*store.Application, error) {
 	if s.scale != nil {
 		return s.scale(ctx, name, replicas, generation)
 	}
 	return validApplication(), nil
+}
+
+func (s *applicationServiceStub) ScaleAppIntentIfMatch(ctx context.Context, name string, replicas int, id string, generation int64) (*store.Application, error) {
+	return s.ScaleAppIntent(ctx, name, replicas, generation)
 }
 
 func validApplication() *store.Application {
@@ -216,7 +228,7 @@ func TestApplicationCreateMapsInputAndRedactsOutput(t *testing.T) {
 	server := newApplicationServer(t, service, nil)
 	body := `{"name":"api","project_slug":"root","image":"nginx:1.27","replicas":2,"env_vars":{"SECRET":"private"},"ports":[{"container_port":8080}],"volumes":[{"source":"/srv/moduleos/data","target":"/data","read_only":true}],"expose":true,"ingress_container_port":8080}`
 	response := applicationRequest(t, server, http.MethodPost, "/apps", body, "")
-	if !called || response.StatusCode != fiber.StatusCreated || response.Header.Get(fiber.HeaderLocation) != "/api/v1/apps/api" || response.Header.Get(fiber.HeaderETag) != `"1"` {
+	if !called || response.StatusCode != fiber.StatusCreated || response.Header.Get(fiber.HeaderLocation) != "/api/v1/apps/api" || response.Header.Get(fiber.HeaderETag) != generationETag(testApplicationID, 1) {
 		t.Fatalf("status/headers = %d %#v", response.StatusCode, response.Header)
 	}
 	encoded, err := io.ReadAll(response.Body)
@@ -312,14 +324,14 @@ func TestApplicationValidationPrecedesServiceMutation(t *testing.T) {
 		{name: "create null port protocol", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","ports":[{"container_port":8080,"protocol":null}]}`, field: "ports"},
 		{name: "create null publish mode", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","ports":[{"container_port":8080,"publish_mode":null}]}`, field: "ports"},
 		{name: "create null mount read only", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","volumes":[{"source":"/srv/data","target":"/data","read_only":null}]}`, field: "volumes"},
-		{name: "update mount NUL", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data\u0000suffix"}]}`, etag: `"1"`, field: "volumes"},
-		{name: "update null environment value", method: http.MethodPatch, path: "/apps/api", body: `{"env_vars":{"TOKEN":null}}`, etag: `"1"`, field: "env_vars"},
-		{name: "update exposed with zero ingress", method: http.MethodPatch, path: "/apps/api", body: `{"expose":true,"ingress_container_port":0}`, etag: `"1"`, field: "ingress_container_port"},
-		{name: "update null port protocol", method: http.MethodPatch, path: "/apps/api", body: `{"ports":[{"container_port":8080,"protocol":null}]}`, etag: `"1"`, field: "ports"},
-		{name: "update null mount read only", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data","read_only":null}]}`, etag: `"1"`, field: "volumes"},
-		{name: "update noncanonical target", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data/"}]}`, etag: `"1"`, field: "volumes"},
+		{name: "update mount NUL", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data\u0000suffix"}]}`, etag: generationETag(testApplicationID, 1), field: "volumes"},
+		{name: "update null environment value", method: http.MethodPatch, path: "/apps/api", body: `{"env_vars":{"TOKEN":null}}`, etag: generationETag(testApplicationID, 1), field: "env_vars"},
+		{name: "update exposed with zero ingress", method: http.MethodPatch, path: "/apps/api", body: `{"expose":true,"ingress_container_port":0}`, etag: generationETag(testApplicationID, 1), field: "ingress_container_port"},
+		{name: "update null port protocol", method: http.MethodPatch, path: "/apps/api", body: `{"ports":[{"container_port":8080,"protocol":null}]}`, etag: generationETag(testApplicationID, 1), field: "ports"},
+		{name: "update null mount read only", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data","read_only":null}]}`, etag: generationETag(testApplicationID, 1), field: "volumes"},
+		{name: "update noncanonical target", method: http.MethodPatch, path: "/apps/api", body: `{"volumes":[{"source":"/srv/data","target":"/data/"}]}`, etag: generationETag(testApplicationID, 1), field: "volumes"},
 		{name: "create ingress port overflow", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27","ingress_container_port":65536}`, field: "ingress_container_port"},
-		{name: "update ingress port overflow", method: http.MethodPatch, path: "/apps/api", body: `{"ingress_container_port":65536}`, etag: `"1"`, field: "ingress_container_port"},
+		{name: "update ingress port overflow", method: http.MethodPatch, path: "/apps/api", body: `{"ingress_container_port":65536}`, etag: generationETag(testApplicationID, 1), field: "ingress_container_port"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -349,7 +361,7 @@ func TestApplicationListAndGet(t *testing.T) {
 		t.Fatalf("collection = %#v, err = %v", collection, err)
 	}
 	get := applicationRequest(t, server, http.MethodGet, "/apps/api", "", "")
-	if get.StatusCode != fiber.StatusOK || get.Header.Get(fiber.HeaderETag) != `"1"` {
+	if get.StatusCode != fiber.StatusOK || get.Header.Get(fiber.HeaderETag) != generationETag(testApplicationID, 1) {
 		t.Fatalf("get = %d %#v", get.StatusCode, get.Header)
 	}
 	invalid := applicationRequest(t, server, http.MethodGet, "/apps/Bad", "", "")
@@ -394,7 +406,7 @@ func TestApplicationMutationsEnforcePreconditionsAndBodies(t *testing.T) {
 		{http.MethodPost, "/apps/api/scale", `{"replicas":0}`, "scale", fiber.StatusAccepted},
 		{http.MethodPatch, "/apps/api", `{"env_vars":{"MODE":"prod"},"ports":[],"volumes":[],"expose":false,"ingress_container_port":0}`, "", fiber.StatusAccepted},
 	} {
-		response := applicationRequest(t, server, test.method, test.path, test.body, `"1"`)
+		response := applicationRequest(t, server, test.method, test.path, test.body, generationETag(testApplicationID, 1))
 		if response.StatusCode != test.status || response.Header.Get(fiber.HeaderETag) == "" {
 			t.Fatalf("%s status/etag = %d/%q", test.path, response.StatusCode, response.Header.Get(fiber.HeaderETag))
 		}
@@ -409,13 +421,13 @@ func TestApplicationMutationsEnforcePreconditionsAndBodies(t *testing.T) {
 	}{
 		{"missing precondition", http.MethodDelete, "/apps/api", "", "", fiber.StatusPreconditionRequired},
 		{"malformed precondition", http.MethodDelete, "/apps/api", "", `W/"1"`, fiber.StatusBadRequest},
-		{"invalid path", http.MethodDelete, "/apps/Bad", "", `"1"`, fiber.StatusBadRequest},
-		{"nonempty start", http.MethodPost, "/apps/api/start", `{}`, `"1"`, fiber.StatusBadRequest},
-		{"empty patch", http.MethodPatch, "/apps/api", `{}`, `"1"`, fiber.StatusUnprocessableEntity},
-		{"null patch", http.MethodPatch, "/apps/api", `{"env_vars":null}`, `"1"`, fiber.StatusUnprocessableEntity},
-		{"missing scale", http.MethodPost, "/apps/api/scale", `{}`, `"1"`, fiber.StatusUnprocessableEntity},
-		{"null scale", http.MethodPost, "/apps/api/scale", `{"replicas":null}`, `"1"`, fiber.StatusUnprocessableEntity},
-		{"negative scale", http.MethodPost, "/apps/api/scale", `{"replicas":-1}`, `"1"`, fiber.StatusUnprocessableEntity},
+		{"invalid path", http.MethodDelete, "/apps/Bad", "", generationETag(testApplicationID, 1), fiber.StatusBadRequest},
+		{"nonempty start", http.MethodPost, "/apps/api/start", `{}`, generationETag(testApplicationID, 1), fiber.StatusBadRequest},
+		{"empty patch", http.MethodPatch, "/apps/api", `{}`, generationETag(testApplicationID, 1), fiber.StatusUnprocessableEntity},
+		{"null patch", http.MethodPatch, "/apps/api", `{"env_vars":null}`, generationETag(testApplicationID, 1), fiber.StatusUnprocessableEntity},
+		{"missing scale", http.MethodPost, "/apps/api/scale", `{}`, generationETag(testApplicationID, 1), fiber.StatusUnprocessableEntity},
+		{"null scale", http.MethodPost, "/apps/api/scale", `{"replicas":null}`, generationETag(testApplicationID, 1), fiber.StatusUnprocessableEntity},
+		{"negative scale", http.MethodPost, "/apps/api/scale", `{"replicas":-1}`, generationETag(testApplicationID, 1), fiber.StatusUnprocessableEntity},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			response := applicationRequest(t, server, test.method, test.path, test.body, test.tag)
@@ -475,7 +487,7 @@ func TestApplicationStartConflictUsesClientError(t *testing.T) {
 	server := newApplicationServer(t, &applicationServiceStub{run: func(context.Context, string, store.DesiredRunState, int64) (*store.Application, error) {
 		return nil, store.ErrConflict
 	}}, nil)
-	response := applicationRequest(t, server, http.MethodPost, "/apps/api/start", "", `"1"`)
+	response := applicationRequest(t, server, http.MethodPost, "/apps/api/start", "", generationETag(testApplicationID, 1))
 	if response.StatusCode != fiber.StatusConflict {
 		t.Fatalf("status = %d, want %d", response.StatusCode, fiber.StatusConflict)
 	}
@@ -488,14 +500,20 @@ func TestApplicationStartConflictUsesClientError(t *testing.T) {
 func TestApplicationHandlersRejectMismatchedServiceIdentity(t *testing.T) {
 	other := validApplication()
 	other.Name = "other"
+	otherIncarnation := validApplication()
+	otherIncarnation.ID = "20000000-0000-4000-8000-000000000002"
 	tests := []struct {
 		name, method, path, body, etag string
 		service                        *applicationServiceStub
 	}{
 		{name: "create", method: http.MethodPost, path: "/apps", body: `{"name":"api","image":"nginx:1.27"}`, service: &applicationServiceStub{create: func(context.Context, controlapp.CreateAppRequest) (*store.Application, error) { return other, nil }}},
 		{name: "get", method: http.MethodGet, path: "/apps/api", service: &applicationServiceStub{get: func(context.Context, string) (*store.Application, error) { return other, nil }}},
-		{name: "update", method: http.MethodPatch, path: "/apps/api", body: `{"env_vars":{}}`, etag: `"1"`, service: &applicationServiceStub{update: func(context.Context, controlapp.UpdateAppRequest) (*store.Application, error) { return other, nil }}},
-		{name: "operation", method: http.MethodDelete, path: "/apps/api", etag: `"1"`, service: &applicationServiceStub{delete: func(context.Context, string, int64) (*store.Application, error) { return other, nil }}},
+		{name: "update", method: http.MethodPatch, path: "/apps/api", body: `{"env_vars":{}}`, etag: generationETag(testApplicationID, 1), service: &applicationServiceStub{update: func(context.Context, controlapp.UpdateAppRequest) (*store.Application, error) { return other, nil }}},
+		{name: "operation", method: http.MethodDelete, path: "/apps/api", etag: generationETag(testApplicationID, 1), service: &applicationServiceStub{delete: func(context.Context, string, int64) (*store.Application, error) { return other, nil }}},
+		{name: "update incarnation", method: http.MethodPatch, path: "/apps/api", body: `{"env_vars":{}}`, etag: generationETag(testApplicationID, 1), service: &applicationServiceStub{update: func(context.Context, controlapp.UpdateAppRequest) (*store.Application, error) {
+			return otherIncarnation, nil
+		}}},
+		{name: "operation incarnation", method: http.MethodDelete, path: "/apps/api", etag: generationETag(testApplicationID, 1), service: &applicationServiceStub{delete: func(context.Context, string, int64) (*store.Application, error) { return otherIncarnation, nil }}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -580,7 +598,7 @@ func TestApplicationResponseFailureIsSafe(t *testing.T) {
 
 func TestWriteApplicationOperationRejectsInvalidResult(t *testing.T) {
 	server := newApplicationServer(t, &applicationServiceStub{delete: func(context.Context, string, int64) (*store.Application, error) { return nil, nil }}, nil)
-	response := applicationRequest(t, server, http.MethodDelete, "/apps/api", "", `"1"`)
+	response := applicationRequest(t, server, http.MethodDelete, "/apps/api", "", generationETag(testApplicationID, 1))
 	if response.StatusCode != fiber.StatusInternalServerError {
 		t.Fatalf("status = %d", response.StatusCode)
 	}
@@ -600,8 +618,8 @@ func TestApplicationOperationResponseUsesCanonicalName(t *testing.T) {
 	application.Name = "api"
 	application.DesiredGeneration = 4
 	server := newApplicationServer(t, &applicationServiceStub{delete: func(context.Context, string, int64) (*store.Application, error) { return application, nil }}, nil)
-	response := applicationRequest(t, server, http.MethodDelete, "/apps/api", "", `"1"`)
-	if response.Header.Get(fiber.HeaderETag) != `"4"` {
+	response := applicationRequest(t, server, http.MethodDelete, "/apps/api", "", generationETag(testApplicationID, 1))
+	if response.Header.Get(fiber.HeaderETag) != generationETag(testApplicationID, 4) {
 		t.Fatalf("ETag = %q", response.Header.Get(fiber.HeaderETag))
 	}
 	var operation ApplicationOperationResponse
