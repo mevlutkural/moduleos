@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -155,9 +156,24 @@ func TestDeploymentOrderSameTimestampAndOwnership(t *testing.T) {
 	if err != nil || len(first) != 3 || first[0].Sequence <= first[1].Sequence {
 		t.Fatalf("first page = %#v, %v", first, err)
 	}
+	if _, err := st.db.ExecContext(t.Context(), `DELETE FROM deployments WHERE id = ?`, first[1].Deployment.ID); err != nil {
+		t.Fatal(err)
+	}
 	second, err := st.ListDeploymentPage(t.Context(), application.ID, first[1].Sequence, 2)
 	if err != nil || len(second) != 1 || second[0].Deployment.ID == first[0].Deployment.ID {
 		t.Fatalf("second page = %#v, %v", second, err)
+	}
+	if _, err := st.db.ExecContext(t.Context(), `DELETE FROM deployment_order WHERE deployment_id = ?`,
+		second[0].Deployment.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(t.Context(), `INSERT INTO deployment_order (deployment_id, app_id) VALUES (?, ?)`,
+		second[0].Deployment.ID, uuid.NewString()); err == nil {
+		t.Fatal("order row with a foreign application bypassed ownership constraint")
+	}
+	if _, err := st.db.ExecContext(t.Context(), `INSERT INTO deployment_order (deployment_id, app_id) VALUES (?, ?)`,
+		second[0].Deployment.ID, application.ID); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := st.GetDeploymentForApp(t.Context(), uuid.NewString(), first[0].Deployment.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-app detail = %v", err)
@@ -278,6 +294,26 @@ func TestDeploymentCommandReplayAfterReopenAndRecreation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(t.TempDir(), "backup.db")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := NewSQLiteStore(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupReplay, err := restored.LookupDeploymentCommand(t.Context(), application.ID,
+		command.KeyDigest, command.Fingerprint, now.Add(time.Hour))
+	if err != nil || backupReplay == nil || backupReplay.DeploymentID != first.DeploymentID {
+		t.Fatalf("backup lost live retry ledger: %#v, %v", backupReplay, err)
+	}
+	if err := restored.Close(); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := NewSQLiteStore(path)

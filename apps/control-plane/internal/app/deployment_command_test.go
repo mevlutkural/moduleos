@@ -285,3 +285,78 @@ func TestAcceptDeploymentGenerationOverflowFailsWithoutIntent(t *testing.T) {
 		t.Fatalf("overflow created an intent: %#v, %v", page, err)
 	}
 }
+
+func TestAcceptDeploymentReplayWhileApplicationIsDeleting(t *testing.T) {
+	svc, st, _ := newTestService(t)
+	ctx := context.Background()
+	application := mustCreateTestApp(t, svc, ctx, app.CreateAppRequest{Name: "deleting-replay", Image: "nginx:1.0"})
+	request := app.DeploymentMutationRequest{
+		AppName: application.Name, ExpectedAppID: application.ID,
+		ExpectedGeneration: application.DesiredGeneration,
+		IdempotencyKey:     "01234567-89ab-cdef-0123-456789abcdef",
+		Operation:          store.DeploymentOperationDeploy, Image: "nginx:2.0",
+	}
+	first, err := svc.AcceptDeployment(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateDeletionIntent(ctx, application.Name, first.TargetGeneration); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := svc.AcceptDeployment(ctx, request)
+	if err != nil || !replay.Replayed || replay.DeploymentID != first.DeploymentID {
+		t.Fatalf("live key must replay during deletion: %#v, %v", replay, err)
+	}
+	request.IdempotencyKey = "11234567-89ab-cdef-0123-456789abcdef"
+	request.ExpectedGeneration = first.TargetGeneration + 1
+	if _, err := svc.AcceptDeployment(ctx, request); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("new command during deletion = %v", err)
+	}
+}
+
+func TestAcceptDeploymentCanRollbackSuccessfulRollback(t *testing.T) {
+	svc, st, _ := newTestService(t)
+	ctx := context.Background()
+	application := mustCreateTestApp(t, svc, ctx, app.CreateAppRequest{Name: "nested-rollback", Image: "nginx:1.0"})
+	image := "docker.io/library/nginx@sha256:" + strings.Repeat("a", 64)
+	target := &store.Deployment{
+		ID: uuid.NewString(), AppID: application.ID, SourceType: store.SourceTypeImage,
+		Image: "nginx:1.0", ResolvedImage: image,
+		Status: store.DeploymentStatusSuccess, TriggeredBy: store.TriggeredByAPI,
+		CreatedAt: time.Now().UTC(), TargetGeneration: application.DesiredGeneration,
+	}
+	if err := st.CreateDeployment(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	first, err := svc.AcceptDeployment(ctx, app.DeploymentMutationRequest{
+		AppName: application.Name, ExpectedAppID: application.ID,
+		ExpectedGeneration: application.DesiredGeneration,
+		IdempotencyKey:     "01234567-89ab-cdef-0123-456789abcdef",
+		Operation:          store.DeploymentOperationRollback, RollbackTargetID: target.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDeployment, err := st.GetDeployment(ctx, first.DeploymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDeployment.Status = store.DeploymentStatusSucceeded
+	firstDeployment.ResolvedImage = image
+	if err := st.UpdateDeployment(ctx, firstDeployment); err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.AcceptDeployment(ctx, app.DeploymentMutationRequest{
+		AppName: application.Name, ExpectedAppID: application.ID,
+		ExpectedGeneration: first.TargetGeneration,
+		IdempotencyKey:     "11234567-89ab-cdef-0123-456789abcdef",
+		Operation:          store.DeploymentOperationRollback, RollbackTargetID: first.DeploymentID,
+	})
+	if err != nil {
+		t.Fatalf("rollback of successful rollback: %v", err)
+	}
+	secondDeployment, err := st.GetDeployment(ctx, second.DeploymentID)
+	if err != nil || secondDeployment.RollbackSourceDeploymentID == nil || *secondDeployment.RollbackSourceDeploymentID != first.DeploymentID || secondDeployment.Image != image {
+		t.Fatalf("nested rollback intent = %#v, %v", secondDeployment, err)
+	}
+}
