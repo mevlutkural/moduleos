@@ -1,6 +1,9 @@
 package store
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type Store interface {
 	Ping(ctx context.Context) error
@@ -42,8 +45,12 @@ type Store interface {
 
 	// Deployment
 	CreateDeployment(ctx context.Context, d *Deployment) error
+	LookupDeploymentCommand(ctx context.Context, appID string, keyDigest, fingerprint [32]byte, now time.Time) (*DeploymentAcceptance, error)
+	AcceptDeploymentCommand(ctx context.Context, command DeploymentCommand) (*DeploymentAcceptance, error)
 	GetDeployment(ctx context.Context, id string) (*Deployment, error)
 	ListDeployments(ctx context.Context, appID string) ([]*Deployment, error)
+	ListDeploymentPage(ctx context.Context, appID string, beforeSequence int64, limit int) ([]DeploymentPageRow, error)
+	GetDeploymentForApp(ctx context.Context, appID, deploymentID string) (*Deployment, error)
 	UpdateDeployment(ctx context.Context, d *Deployment) error
 	MarkDeploymentState(ctx context.Context, id string, generation int64, status DeploymentStatus, code, message string) error
 	RecordDeploymentResolvedImage(ctx context.Context, id string, generation int64, resolvedImage string) error

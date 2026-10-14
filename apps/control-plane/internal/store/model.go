@@ -155,3 +155,8 @@ type Deployment struct {
 	ConvergenceDeadline        *time.Time       `db:"convergence_deadline" json:"convergence_deadline,omitempty"`
 	RollbackSourceDeploymentID *string          `db:"rollback_source_deployment_id" json:"rollback_source_deployment_id,omitempty"`
 }
+
+type DeploymentPageRow struct {
+	Deployment *Deployment
+	Sequence   int64
+}
