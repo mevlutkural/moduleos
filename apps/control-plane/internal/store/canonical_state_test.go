@@ -364,6 +364,15 @@ func TestUpgradeFromMigration006(t *testing.T) {
 		t.Fatalf("legacy project changed: %#v", project)
 	}
 	deployments, err := upgraded.ListDeployments(ctx, app.ID)
+	ordered, orderErr := upgraded.ListDeploymentPage(ctx, app.ID, 0, 10)
+	if orderErr != nil || len(ordered) != len(deployments) {
+		t.Fatalf("legacy deployment order backfill = %#v, %v", ordered, orderErr)
+	}
+	for i := 1; i < len(ordered); i++ {
+		if ordered[i-1].Sequence <= ordered[i].Sequence {
+			t.Fatalf("legacy backfill is not monotonic: %#v", ordered)
+		}
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +411,7 @@ func TestUpgradeFromMigration006(t *testing.T) {
 	if err := upgraded.db.QueryRowContext(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&migrationVersion, &migrationDirty); err != nil {
 		t.Fatal(err)
 	}
-	if migrationVersion != "11" || migrationDirty {
+	if migrationVersion != "12" || migrationDirty {
 		t.Fatalf("migration state version=%s dirty=%v", migrationVersion, migrationDirty)
 	}
 	var integrity string

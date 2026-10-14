@@ -27,7 +27,8 @@ var ErrInvalidTransition = errors.New("invalid state transition")
 var ErrInvalidData = errors.New("invalid persisted data")
 
 type SQLiteStore struct {
-	db *sql.DB
+	db               *sql.DB
+	deploymentCommit func(*sql.Tx) error
 }
 
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
@@ -745,16 +746,7 @@ func (s *SQLiteStore) CreateDeploymentIntent(ctx context.Context, name string, d
 	if err := terminalizeOvertakenDeploymentsTx(ctx, tx, app.ID, app.DesiredGeneration, app.ObservedGeneration, now); err != nil {
 		return nil, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO deployments
-		(id, app_id, source_type, image, resolved_image, status, triggered_by, error_message,
-		created_at, finished_at, target_generation, previous_observed_image,
-		error_code, started_at, convergence_deadline, rollback_source_deployment_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.ID, d.AppID, d.SourceType, d.Image, d.ResolvedImage, d.Status, d.TriggeredBy,
-		d.ErrorMessage, d.CreatedAt, d.FinishedAt, d.TargetGeneration,
-		d.PreviousObservedImage, d.ErrorCode, d.StartedAt, d.ConvergenceDeadline,
-		d.RollbackSourceDeploymentID)
-	if err != nil {
+	if err := insertDeploymentTx(ctx, tx, d); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -939,7 +931,19 @@ func scanDeployment(scanner rowScanner) (*Deployment, error) {
 }
 
 func (s *SQLiteStore) CreateDeployment(ctx context.Context, d *Deployment) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := insertDeploymentTx(ctx, tx, d); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertDeploymentTx(ctx context.Context, tx *sql.Tx, d *Deployment) error {
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO deployments
 			(id, app_id, source_type, image, resolved_image, status, triggered_by, error_message,
 			created_at, finished_at, target_generation, previous_observed_image,
@@ -951,7 +955,10 @@ func (s *SQLiteStore) CreateDeployment(ctx context.Context, d *Deployment) error
 		d.TargetGeneration, d.PreviousObservedImage, d.ErrorCode, d.StartedAt,
 		d.ConvergenceDeadline, d.RollbackSourceDeploymentID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *SQLiteStore) GetDeployment(ctx context.Context, id string) (*Deployment, error) {

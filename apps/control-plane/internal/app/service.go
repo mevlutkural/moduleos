@@ -32,6 +32,7 @@ type Service struct {
 	maxApplications   int
 	maxProjects       int
 	deploymentTimeout time.Duration
+	deploymentClock   func() time.Time
 }
 
 type mutationLocker interface {
@@ -102,6 +103,7 @@ func NewService(st store.Store, sw swarm.Client, baseDomain string, log *slog.Lo
 		maxApplications:   100,
 		maxProjects:       20,
 		deploymentTimeout: 5 * time.Minute,
+		deploymentClock:   time.Now,
 	}
 }
 
