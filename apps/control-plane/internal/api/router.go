@@ -40,6 +40,7 @@ type RouterOptions struct {
 	Runtime            handler.HealthRuntime
 	Projects           handler.ProjectService
 	Applications       handler.ApplicationService
+	Deployments        handler.DeploymentService
 	Environment        string
 	APIKey             string
 	IngressNetwork     string
@@ -76,6 +77,10 @@ func NewRouter(options RouterOptions) (*Router, error) {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
 	}
 	applications, err := handler.NewApplicationHandler(options.Applications, options.Logger)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
+	}
+	deployments, err := handler.NewDeploymentHandler(options.Deployments, options.Logger, time.Now)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
 	}
@@ -142,6 +147,10 @@ func NewRouter(options RouterOptions) (*Router, error) {
 	protected.Post("/apps/:name/start", applications.Start)
 	protected.Post("/apps/:name/stop", applications.Stop)
 	protected.Post("/apps/:name/scale", applications.Scale)
+	protected.Post("/apps/:name/deploy", deployments.Deploy)
+	protected.Get("/apps/:name/deployments", deployments.List)
+	protected.Get("/apps/:name/deployments/:id", deployments.Get)
+	protected.Post("/apps/:name/deployments/:id/rollback", deployments.Rollback)
 
 	return &Router{App: app, Health: health}, nil
 }
@@ -156,6 +165,8 @@ func validateRouterOptions(options RouterOptions) ([]string, error) {
 		return nil, fmt.Errorf("%w: health runtime is required", ErrInvalidRouterOptions)
 	case options.Applications == nil:
 		return nil, fmt.Errorf("%w: application service is required", ErrInvalidRouterOptions)
+	case options.Deployments == nil:
+		return nil, fmt.Errorf("%w: deployment service is required", ErrInvalidRouterOptions)
 	case options.Environment != "development" && options.Environment != "production":
 		return nil, fmt.Errorf("%w: environment must be development or production", ErrInvalidRouterOptions)
 	case options.Environment == "production" && len(options.APIKey) < 32:

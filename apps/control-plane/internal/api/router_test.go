@@ -69,6 +69,8 @@ type routerProjectService struct{}
 
 type routerApplicationService struct{}
 
+type routerDeploymentService struct{}
+
 type routerRecordingQueue struct {
 	mu    sync.Mutex
 	names []string
@@ -111,6 +113,18 @@ func (*routerApplicationService) SetRunStateIfMatch(context.Context, string, sto
 }
 
 func (*routerApplicationService) ScaleAppIntentIfMatch(context.Context, string, int, string, int64) (*store.Application, error) {
+	return nil, store.ErrNotFound
+}
+
+func (*routerDeploymentService) AcceptDeployment(context.Context, controlapp.DeploymentMutationRequest) (*store.DeploymentAcceptance, error) {
+	return nil, store.ErrNotFound
+}
+
+func (*routerDeploymentService) ListDeploymentPage(context.Context, string, int, string) (*controlapp.DeploymentPage, error) {
+	return nil, store.ErrNotFound
+}
+
+func (*routerDeploymentService) GetDeploymentForApp(context.Context, string, string) (*store.Deployment, error) {
 	return nil, store.ErrNotFound
 }
 
@@ -200,6 +214,7 @@ func validRouterOptions() RouterOptions {
 		Runtime:            &routerHealthRuntime{},
 		Projects:           &routerProjectService{},
 		Applications:       &routerApplicationService{},
+		Deployments:        &routerDeploymentService{},
 		Environment:        "development",
 		IngressNetwork:     "moduleos-ingress",
 		BodyLimit:          1024,
@@ -264,6 +279,7 @@ func TestNewRouterRejectsInvalidOptions(t *testing.T) {
 		{name: "runtime", mutate: func(options *RouterOptions) { options.Runtime = nil }},
 		{name: "projects", mutate: func(options *RouterOptions) { options.Projects = nil }},
 		{name: "applications", mutate: func(options *RouterOptions) { options.Applications = nil }},
+		{name: "deployments", mutate: func(options *RouterOptions) { options.Deployments = nil }},
 		{name: "environment", mutate: func(options *RouterOptions) { options.Environment = "staging" }},
 		{name: "production API key missing", mutate: func(options *RouterOptions) { options.Environment = "production" }},
 		{name: "production API key short", mutate: func(options *RouterOptions) {
@@ -368,7 +384,7 @@ func TestNormalizeOriginsTrimsCanonicalizesDeduplicatesAndSorts(t *testing.T) {
 	}
 }
 
-func TestRouterRegistersPhase6C1ContractRoutes(t *testing.T) {
+func TestRouterRegistersPhase6C2ContractRoutes(t *testing.T) {
 	router, err := NewRouter(validRouterOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -380,6 +396,8 @@ func TestRouterRegistersPhase6C1ContractRoutes(t *testing.T) {
 		"DELETE /api/v1/projects/:slug/links/:link_id",
 		"GET /api/v1/apps",
 		"GET /api/v1/apps/:name",
+		"GET /api/v1/apps/:name/deployments",
+		"GET /api/v1/apps/:name/deployments/:id",
 		"GET /api/v1/live",
 		"GET /api/v1/projects",
 		"GET /api/v1/projects/:slug",
@@ -389,6 +407,8 @@ func TestRouterRegistersPhase6C1ContractRoutes(t *testing.T) {
 		"GET /api/v1/version",
 		"PATCH /api/v1/apps/:name",
 		"POST /api/v1/apps",
+		"POST /api/v1/apps/:name/deploy",
+		"POST /api/v1/apps/:name/deployments/:id/rollback",
 		"POST /api/v1/apps/:name/scale",
 		"POST /api/v1/apps/:name/start",
 		"POST /api/v1/apps/:name/stop",
@@ -693,7 +713,7 @@ func TestRouterRoutesMatchOpenAPIContract(t *testing.T) {
 	for _, path := range document.Paths.InMatchingOrder() {
 		item := document.Paths.Find(path)
 		for method := range item.Operations() {
-			fiberPath := strings.NewReplacer("{slug}", ":slug", "{link_id}", ":link_id", "{name}", ":name").Replace(path)
+			fiberPath := strings.NewReplacer("{slug}", ":slug", "{link_id}", ":link_id", "{name}", ":name", "{id}", ":id").Replace(path)
 			contractRoutes = append(contractRoutes, strings.ToUpper(method)+" "+prefix+fiberPath)
 		}
 	}

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/store"
 )
+
+var ErrInvalidDeploymentCursor = errors.New("invalid deployment cursor")
 
 type DeploymentPage struct {
 	Deployments []*store.Deployment
@@ -81,24 +84,27 @@ func encodeDeploymentCursor(appID string, sequence int64) string {
 }
 
 func decodeDeploymentCursor(cursor, appID string) (int64, error) {
+	if !canonicalDeploymentUUID(appID) {
+		return 0, fmt.Errorf("%w: invalid application ID", store.ErrInvalidData)
+	}
 	if cursor == "" {
 		return 0, nil
 	}
 	if len(cursor) > 256 {
-		return 0, fmt.Errorf("%w: cursor too long", store.ErrInvalidData)
+		return 0, fmt.Errorf("%w: cursor too long", ErrInvalidDeploymentCursor)
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil || base64.RawURLEncoding.EncodeToString(payload) != cursor {
-		return 0, fmt.Errorf("%w: malformed cursor", store.ErrInvalidData)
+		return 0, fmt.Errorf("%w: malformed cursor", ErrInvalidDeploymentCursor)
 	}
 	prefix := "v1:" + appID + ":"
-	if !canonicalDeploymentUUID(appID) || !strings.HasPrefix(string(payload), prefix) {
-		return 0, fmt.Errorf("%w: cursor application or version mismatch", store.ErrInvalidData)
+	if !strings.HasPrefix(string(payload), prefix) {
+		return 0, fmt.Errorf("%w: cursor application or version mismatch", ErrInvalidDeploymentCursor)
 	}
 	value := strings.TrimPrefix(string(payload), prefix)
 	sequence, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || sequence <= 0 || strconv.FormatInt(sequence, 10) != value {
-		return 0, fmt.Errorf("%w: invalid cursor sequence", store.ErrInvalidData)
+		return 0, fmt.Errorf("%w: invalid cursor sequence", ErrInvalidDeploymentCursor)
 	}
 	return sequence, nil
 }
