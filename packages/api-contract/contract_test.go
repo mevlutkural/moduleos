@@ -9,7 +9,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 )
 
-func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
+func TestOpenAPIContractIsValidAndMatchesRuntimeRoutes(t *testing.T) {
 	loader := openapi3.NewLoader()
 	document, err := loader.LoadFromFile("openapi.yaml")
 	if err != nil {
@@ -26,28 +26,32 @@ func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
 	}
 
 	wantResponses := map[string][]string{
-		"POST /apps":                              {"201", "400", "401", "404", "409", "413", "415", "422", "500", "503"},
-		"GET /apps":                               {"200", "401", "500", "503"},
-		"GET /apps/{name}":                        {"200", "400", "401", "404", "500", "503"},
-		"PATCH /apps/{name}":                      {"202", "400", "401", "404", "409", "412", "413", "415", "422", "428", "500", "503"},
-		"DELETE /apps/{name}":                     {"202", "400", "401", "404", "409", "412", "428", "500", "503"},
-		"POST /apps/{name}/start":                 {"202", "400", "401", "404", "409", "412", "428", "500", "503"},
-		"POST /apps/{name}/stop":                  {"202", "400", "401", "404", "409", "412", "428", "500", "503"},
-		"POST /apps/{name}/scale":                 {"202", "400", "401", "404", "409", "412", "413", "415", "422", "428", "500", "503"},
-		"GET /live":                               {"200", "500"},
-		"GET /ready":                              {"200", "500", "503"},
-		"GET /version":                            {"200", "500"},
-		"POST /projects":                          {"201", "400", "401", "409", "413", "415", "422", "500", "503"},
-		"GET /projects":                           {"200", "401", "500", "503"},
-		"GET /projects/{slug}":                    {"200", "400", "401", "404", "500", "503"},
-		"DELETE /projects/{slug}":                 {"202", "400", "401", "404", "409", "500", "503"},
-		"GET /projects/{slug}/apps":               {"200", "400", "401", "404", "500", "503"},
-		"POST /projects/{slug}/links":             {"201", "400", "401", "404", "409", "413", "415", "422", "500", "503"},
-		"GET /projects/{slug}/links":              {"200", "400", "401", "404", "500", "503"},
-		"DELETE /projects/{slug}/links/{link_id}": {"202", "400", "401", "404", "500", "503"},
+		"POST /apps":                                  {"201", "400", "401", "404", "409", "413", "415", "422", "500", "503"},
+		"GET /apps":                                   {"200", "401", "500", "503"},
+		"GET /apps/{name}":                            {"200", "400", "401", "404", "500", "503"},
+		"PATCH /apps/{name}":                          {"202", "400", "401", "404", "409", "412", "413", "415", "422", "428", "500", "503"},
+		"DELETE /apps/{name}":                         {"202", "400", "401", "404", "409", "412", "428", "500", "503"},
+		"POST /apps/{name}/start":                     {"202", "400", "401", "404", "409", "412", "428", "500", "503"},
+		"POST /apps/{name}/stop":                      {"202", "400", "401", "404", "409", "412", "428", "500", "503"},
+		"POST /apps/{name}/scale":                     {"202", "400", "401", "404", "409", "412", "413", "415", "422", "428", "500", "503"},
+		"POST /apps/{name}/deploy":                    {"202", "400", "401", "404", "409", "412", "413", "415", "422", "428", "429", "500", "503"},
+		"GET /apps/{name}/deployments":                {"200", "400", "401", "404", "500", "503"},
+		"GET /apps/{name}/deployments/{id}":           {"200", "400", "401", "404", "500", "503"},
+		"POST /apps/{name}/deployments/{id}/rollback": {"202", "400", "401", "404", "409", "412", "413", "428", "429", "500", "503"},
+		"GET /live":                                   {"200", "500"},
+		"GET /ready":                                  {"200", "500", "503"},
+		"GET /version":                                {"200", "500"},
+		"POST /projects":                              {"201", "400", "401", "409", "413", "415", "422", "500", "503"},
+		"GET /projects":                               {"200", "401", "500", "503"},
+		"GET /projects/{slug}":                        {"200", "400", "401", "404", "500", "503"},
+		"DELETE /projects/{slug}":                     {"202", "400", "401", "404", "409", "500", "503"},
+		"GET /projects/{slug}/apps":                   {"200", "400", "401", "404", "500", "503"},
+		"POST /projects/{slug}/links":                 {"201", "400", "401", "404", "409", "413", "415", "422", "500", "503"},
+		"GET /projects/{slug}/links":                  {"200", "400", "401", "404", "500", "503"},
+		"DELETE /projects/{slug}/links/{link_id}":     {"202", "400", "401", "404", "500", "503"},
 	}
 	systemOperations := map[string]bool{"GET /live": true, "GET /ready": true, "GET /version": true}
-	bodyOperations := map[string]bool{"POST /apps": true, "PATCH /apps/{name}": true, "POST /apps/{name}/scale": true, "POST /projects": true, "POST /projects/{slug}/links": true}
+	bodyOperations := map[string]bool{"POST /apps": true, "PATCH /apps/{name}": true, "POST /apps/{name}/scale": true, "POST /apps/{name}/deploy": true, "POST /projects": true, "POST /projects/{slug}/links": true}
 	createOperations := map[string]bool{"POST /apps": true, "POST /projects": true, "POST /projects/{slug}/links": true}
 	var operations []string
 	operationIDs := make(map[string]struct{})
@@ -114,6 +118,19 @@ func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
 					t.Fatalf("%s response 201 is missing Location", operationKey)
 				}
 			}
+			if status := operation.Responses.Value("202"); status != nil && strings.Contains(operationKey, "/deploy") {
+				for _, header := range []string{"ETag", "Location"} {
+					if status.Value.Headers[header] == nil {
+						t.Fatalf("%s response 202 is missing %s", operationKey, header)
+					}
+				}
+			}
+			if capacity := operation.Responses.Value("429"); capacity != nil {
+				retryAfter := capacity.Value.Headers["Retry-After"]
+				if retryAfter == nil || retryAfter.Value == nil || !retryAfter.Value.Required {
+					t.Fatalf("%s response 429 must require Retry-After", operationKey)
+				}
+			}
 			if operationKey == "GET /ready" && operation.Responses.Value("503").Value.Headers["Retry-After"] == nil {
 				t.Fatal("GET /ready response 503 is missing optional Retry-After")
 			}
@@ -126,6 +143,8 @@ func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
 		"DELETE /projects/{slug}/links/{link_id}",
 		"GET /apps",
 		"GET /apps/{name}",
+		"GET /apps/{name}/deployments",
+		"GET /apps/{name}/deployments/{id}",
 		"GET /live",
 		"GET /projects",
 		"GET /projects/{slug}",
@@ -135,6 +154,8 @@ func TestOpenAPIContractIsValidAndScopedToMergedRoutes(t *testing.T) {
 		"GET /version",
 		"PATCH /apps/{name}",
 		"POST /apps",
+		"POST /apps/{name}/deploy",
+		"POST /apps/{name}/deployments/{id}/rollback",
 		"POST /apps/{name}/scale",
 		"POST /apps/{name}/start",
 		"POST /apps/{name}/stop",
@@ -161,6 +182,7 @@ func TestProjectSchemasKeepPersistenceAndSecretFieldsPrivate(t *testing.T) {
 		{schema: "ProjectLink", forbidden: []string{"source_project_id", "target_app_id", "deletion_timestamp"}},
 		{schema: "Application", forbidden: []string{"reconcile_error_message", "reconcile_attempt", "resume_replicas", "domain", "finalizer_state"}},
 		{schema: "ApplicationVolume", forbidden: []string{"source"}},
+		{schema: "Deployment", forbidden: []string{"app_id", "previous_observed_image", "error_message", "error_code", "convergence_deadline", "key_digest", "fingerprint"}},
 	}
 	for _, test := range tests {
 		schema := document.Components.Schemas[test.schema]

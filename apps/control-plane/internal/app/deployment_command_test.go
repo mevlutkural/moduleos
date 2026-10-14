@@ -174,10 +174,10 @@ func TestDeploymentHistoryCursorSurvivesNewInsertAndRejectsWrongApp(t *testing.T
 	if err != nil || len(first.Deployments) != 1 || first.NextCursor == "" {
 		t.Fatalf("first page = %#v, %v", first, err)
 	}
-	if _, err := svc.ListDeploymentPage(ctx, other.Name, 1, first.NextCursor); !errors.Is(err, store.ErrInvalidData) {
+	if _, err := svc.ListDeploymentPage(ctx, other.Name, 1, first.NextCursor); !errors.Is(err, app.ErrInvalidDeploymentCursor) {
 		t.Fatalf("foreign cursor = %v", err)
 	}
-	if _, err := svc.ListDeploymentPage(ctx, application.Name, 1, "@@"); !errors.Is(err, store.ErrInvalidData) {
+	if _, err := svc.ListDeploymentPage(ctx, application.Name, 1, "@@"); !errors.Is(err, app.ErrInvalidDeploymentCursor) {
 		t.Fatalf("malformed cursor = %v", err)
 	}
 	newer, err := svc.AcceptDeployment(ctx, app.DeploymentMutationRequest{

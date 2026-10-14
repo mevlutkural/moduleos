@@ -22,6 +22,8 @@ tags:
     description: Durable project boundaries and cross-project network-link intent.
   - name: Applications
     description: Durable application desired state and asynchronous lifecycle intent.
+  - name: Deployments
+    description: Durable image deployment intent, bounded history, and immutable rollback.
 security:
   - bearerAuth: []
 paths:
@@ -349,6 +351,129 @@ paths:
         "428": {$ref: "#/components/responses/PreconditionRequired"}
         "500": {$ref: "#/components/responses/InternalError"}
         "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /apps/{name}/deploy:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ApplicationName"
+      - $ref: "#/components/parameters/IfMatch"
+      - $ref: "#/components/parameters/IdempotencyKey"
+    post:
+      operationId: deployApplicationImage
+      tags: [Deployments]
+      summary: Accept a new image deployment
+      description: >-
+        Atomically records desired state and returns a pollable deployment.
+        202 does not mean a container is healthy. A matching key and request
+        within 24 hours returns the original acceptance, Location, and ETag;
+        replay does not extend the retention window. Use the same key after
+        a lost response or uncertain commit result.
+      requestBody:
+        description: A single image reference; no source-build or tar payload is accepted.
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DeployImageRequest"}
+            example: {image: "nginx:1.27"}
+      responses:
+        "202": {$ref: "#/components/responses/DeploymentAccepted"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
+        "413": {$ref: "#/components/responses/PayloadTooLarge"}
+        "415": {$ref: "#/components/responses/UnsupportedMediaType"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "429": {$ref: "#/components/responses/IdempotencyCapacity"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /apps/{name}/deployments:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ApplicationName"
+    get:
+      operationId: listApplicationDeployments
+      tags: [Deployments]
+      summary: Read one bounded deployment-history page
+      parameters:
+        - $ref: "#/components/parameters/DeploymentLimit"
+        - $ref: "#/components/parameters/DeploymentCursor"
+      responses:
+        "200":
+          description: Deployment history in descending durable creation order.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeploymentHistory"}
+              example: {deployments: [], limit: 25, next_cursor: null}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /apps/{name}/deployments/{id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ApplicationName"
+      - $ref: "#/components/parameters/DeploymentID"
+    get:
+      operationId: getApplicationDeployment
+      tags: [Deployments]
+      summary: Read one application-scoped deployment
+      description: Status may advance asynchronously; the response has no deployment ETag.
+      responses:
+        "200":
+          description: Current durable deployment state.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Deployment"}
+              example:
+                id: 30000000-0000-4000-8000-000000000001
+                source_type: image
+                image: "nginx:1.27"
+                status: pending
+                triggered_by: api
+                target_generation: 2
+                created_at: "2026-10-14T10:00:00Z"
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /apps/{name}/deployments/{id}/rollback:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ApplicationName"
+      - $ref: "#/components/parameters/DeploymentID"
+      - $ref: "#/components/parameters/IfMatch"
+      - $ref: "#/components/parameters/IdempotencyKey"
+    post:
+      operationId: rollbackApplicationDeployment
+      tags: [Deployments]
+      summary: Accept rollback to a successful immutable image
+      description: >-
+        Creates a new deployment intent from the selected deployment's
+        persisted immutable resolved image. The request body must be empty.
+        A matching key and request within 24 hours returns the original
+        acceptance, Location, and ETag.
+      responses:
+        "202": {$ref: "#/components/responses/DeploymentAccepted"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
+        "413": {$ref: "#/components/responses/PayloadTooLarge"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "429": {$ref: "#/components/responses/IdempotencyCapacity"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
   /projects:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -665,6 +790,40 @@ components:
         minLength: 44
         maxLength: 63
         pattern: '^"app:[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}:(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])"$'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        One random, per-application key. Reuse only to retry the same operation
+        and precondition; raw values are never persisted. Guaranteed replay
+        lasts at least 24 hours from first acceptance.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._:-]+$"
+    DeploymentID:
+      name: id
+      in: path
+      required: true
+      description: Canonical lowercase deployment UUID.
+      schema:
+        type: string
+        format: uuid
+        pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    DeploymentLimit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum entries in this page; defaults to 25.
+      schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+    DeploymentCursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque application-scoped cursor returned by the previous page.
+      schema: {type: string, minLength: 1, maxLength: 256, pattern: "^[A-Za-z0-9_-]+$"}
   securitySchemes:
     bearerAuth:
       type: http
@@ -795,6 +954,35 @@ components:
         application/json:
           schema: {$ref: "#/components/schemas/ApplicationOperation"}
           example: {operation: scale, resource: api, status: accepted, generation: 4}
+    DeploymentAccepted:
+      description: Durable deployment intent accepted; runtime convergence is asynchronous.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+        Location: {$ref: "#/components/headers/Location"}
+        ETag: {$ref: "#/components/headers/ApplicationETag"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/DeploymentAcceptance"}
+          example:
+            deployment_id: 30000000-0000-4000-8000-000000000001
+            application: api
+            target_generation: 2
+            status: accepted
+    IdempotencyCapacity:
+      description: Per-application unexpired idempotency-key capacity is full.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+        Retry-After:
+          description: Required whole-second delay until an idempotency-key slot can be retried.
+          required: true
+          schema:
+            type: string
+            pattern: "^[1-9][0-9]*$"
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
     ServiceUnavailable:
       description: Work was cancelled, timed out, or a required dependency is temporarily unavailable.
       headers:
@@ -1055,6 +1243,72 @@ components:
         resource: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"}
         status: {type: string, const: accepted}
         generation: {type: integer, format: int64, minimum: 1}
+    DeployImageRequest:
+      description: One image reference for a new asynchronous deployment.
+      type: object
+      additionalProperties: false
+      required: [image]
+      properties:
+        image: {$ref: "#/components/schemas/ContainerImageReference"}
+      example: {image: "nginx:1.27"}
+    DeploymentAcceptance:
+      description: Stable acknowledgement reconstructed from the durable command ledger on replay.
+      type: object
+      additionalProperties: false
+      required: [deployment_id, application, target_generation, status]
+      properties:
+        deployment_id: {type: string, format: uuid, example: 30000000-0000-4000-8000-000000000001}
+        application: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", example: api}
+        target_generation: {type: integer, format: int64, minimum: 1, example: 2}
+        status: {type: string, const: accepted, example: accepted}
+    Deployment:
+      description: Redacted application-scoped deployment state, including read-only legacy history.
+      type: object
+      additionalProperties: false
+      required: [id, source_type, status, triggered_by, target_generation, created_at]
+      properties:
+        id: {type: string, format: uuid, example: 30000000-0000-4000-8000-000000000001}
+        source_type: {type: string, enum: [image, tar], example: image}
+        image:
+          type: string
+          description: Omitted for legacy tar records or empty legacy image values.
+          $ref: "#/components/schemas/PersistedContainerImageReference"
+          example: "nginx:1.27"
+        resolved_image:
+          description: Immutable digest when resolution succeeded.
+          allOf:
+            - {$ref: "#/components/schemas/PersistedContainerImageReference"}
+            - {pattern: "@sha256:[a-f0-9]{64}$"}
+          example: "nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        status: {type: string, enum: [pending, building, in_progress, success, failed, succeeded, applying, superseded], example: pending}
+        triggered_by: {type: string, enum: [api, reconciler, event], example: api}
+        target_generation:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Zero only for migrated history whose target generation was not recorded.
+          example: 2
+        created_at: {type: string, format: date-time, example: "2026-10-14T10:00:00Z"}
+        started_at: {type: string, format: date-time, example: "2026-10-14T10:00:01Z"}
+        finished_at: {type: string, format: date-time, example: "2026-10-14T10:00:30Z"}
+        rollback_source_deployment_id: {type: string, format: uuid, example: 30000000-0000-4000-8000-000000000001}
+        failure_code:
+          type: string
+          enum: [image_not_found, invalid_image, published_port_conflict, convergence_timeout, rollout_paused, task_rejected, deployment_failed]
+          example: image_not_found
+    DeploymentHistory:
+      description: One bounded page in descending durable creation order.
+      type: object
+      additionalProperties: false
+      required: [deployments, limit, next_cursor]
+      properties:
+        deployments:
+          type: array
+          maxItems: 100
+          items: {$ref: "#/components/schemas/Deployment"}
+          example: []
+        limit: {type: integer, minimum: 1, maximum: 100, example: 25}
+        next_cursor: {type: [string, "null"], minLength: 1, maxLength: 256, pattern: "^[A-Za-z0-9_-]+$", example: null}
     CreateProjectRequest:
       description: Project identity accepted by the create operation.
       type: object
