@@ -881,7 +881,7 @@ func TestRouterHeaderLimitUsesStableErrorEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("X-Oversized", strings.Repeat("x", 8192))
+	request.Header.Set("X-Oversized", strings.Repeat("x", 4096))
 	client := &http.Client{Timeout: time.Second}
 	response, err := client.Do(request)
 	if err != nil {

@@ -1,0 +1,16 @@
+title = "ModuleOS Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known deterministic API key and idempotency key test fixtures"
+targetRules = ["generic-api-key"]
+regexes = [
+  '''^0123456789abcdef0123456789abcdef$''',
+  '''^01234567-89ab-cdef-0123-456789abcdef$''',
+  '''^11234567-89ab-cdef-0123-456789abcdef$''',
+  '''^21234567-89ab-cdef-0123-456789abcdef$''',
+  '''^31234567-89ab-cdef-0123-456789abcdef$''',
+  '''^abcdef01-2345-6789-abcd-ef0123456789$''',
+]
