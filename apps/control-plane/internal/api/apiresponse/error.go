@@ -176,6 +176,8 @@ func definitionForStatus(status int) errorDefinition {
 		return errorDefinition{code: "bad_gateway", message: "an upstream dependency returned an invalid response", retryable: true}
 	case fiber.StatusServiceUnavailable:
 		return errorDefinition{code: "dependency_unavailable", message: "service is temporarily unavailable", retryable: true}
+	case fiber.StatusGatewayTimeout:
+		return errorDefinition{code: "gateway_timeout", message: "upstream dependency timed out", retryable: true}
 	default:
 		if status >= 400 && status < 500 {
 			return errorDefinition{code: "request_rejected", message: "request was rejected"}

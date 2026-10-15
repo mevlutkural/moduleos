@@ -15,6 +15,7 @@ import (
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/api/apiresponse"
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/api/handler"
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/api/middleware"
+	"github.com/valyala/fasthttp"
 )
 
 const (
@@ -41,6 +42,7 @@ type RouterOptions struct {
 	Projects           handler.ProjectService
 	Applications       handler.ApplicationService
 	Deployments        handler.DeploymentService
+	Logs               handler.LogService
 	Environment        string
 	APIKey             string
 	IngressNetwork     string
@@ -51,11 +53,13 @@ type RouterOptions struct {
 	ReadinessTimeout   time.Duration
 	RequestConcurrency int
 	CORSAllowedOrigins []string
+	LogOptions         handler.LogOptions
 }
 
 type Router struct {
 	App    *fiber.App
 	Health *handler.HealthHandler
+	Logs   *handler.LogsHandler
 }
 
 func NewRouter(options RouterOptions) (*Router, error) {
@@ -84,6 +88,10 @@ func NewRouter(options RouterOptions) (*Router, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
 	}
+	logs, err := handler.NewLogsHandler(options.Logs, options.Logger, options.LogOptions)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
+	}
 	var authenticate fiber.Handler
 	if options.APIKey != "" {
 		authenticate, err = middleware.BearerAuth(options.APIKey)
@@ -105,6 +113,16 @@ func NewRouter(options RouterOptions) (*Router, error) {
 		ProxyHeader:             "",
 		RequestMethods:          recognizedHTTPMethods,
 		ErrorHandler:            apiresponse.NewErrorHandler(options.Logger),
+	})
+	app.Server().HeaderReceived = func(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+		if isLogStreamRequest(header.Method(), header.RequestURI()) {
+			return fasthttp.RequestConfig{WriteTimeout: options.LogOptions.MaxDuration}
+		}
+		return fasthttp.RequestConfig{}
+	}
+	app.Hooks().OnPreShutdown(func() error {
+		logs.CloseActiveStreams()
+		return nil
 	})
 	app.Use(middleware.RequestID())
 	app.Use(middleware.RequestLogger(options.Logger))
@@ -151,8 +169,10 @@ func NewRouter(options RouterOptions) (*Router, error) {
 	protected.Get("/apps/:name/deployments", deployments.List)
 	protected.Get("/apps/:name/deployments/:id", deployments.Get)
 	protected.Post("/apps/:name/deployments/:id/rollback", deployments.Rollback)
+	protected.Get("/apps/:name/logs", logs.Tail)
+	protected.Get("/apps/:name/logs/stream", logs.Stream)
 
-	return &Router{App: app, Health: health}, nil
+	return &Router{App: app, Health: health, Logs: logs}, nil
 }
 
 func validateRouterOptions(options RouterOptions) ([]string, error) {
@@ -167,6 +187,8 @@ func validateRouterOptions(options RouterOptions) ([]string, error) {
 		return nil, fmt.Errorf("%w: application service is required", ErrInvalidRouterOptions)
 	case options.Deployments == nil:
 		return nil, fmt.Errorf("%w: deployment service is required", ErrInvalidRouterOptions)
+	case options.Logs == nil:
+		return nil, fmt.Errorf("%w: log service is required", ErrInvalidRouterOptions)
 	case options.Environment != "development" && options.Environment != "production":
 		return nil, fmt.Errorf("%w: environment must be development or production", ErrInvalidRouterOptions)
 	case options.Environment == "production" && len(options.APIKey) < 32:
@@ -186,6 +208,35 @@ func validateRouterOptions(options RouterOptions) ([]string, error) {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRouterOptions, err)
 	}
 	return origins, nil
+}
+
+func isLogStreamRequest(method, requestURI []byte) bool {
+	if string(method) != fiber.MethodGet {
+		return false
+	}
+	path := string(requestURI)
+	if query := strings.IndexByte(path, '?'); query >= 0 {
+		path = path[:query]
+	}
+	const prefix = "/api/v1/apps/"
+	const suffix = "/logs/stream"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if len(name) < 1 || len(name) > 63 || !asciiLowerDigit(name[0]) || !asciiLowerDigit(name[len(name)-1]) {
+		return false
+	}
+	for index := 1; index < len(name)-1; index++ {
+		if !asciiLowerDigit(name[index]) && name[index] != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiLowerDigit(value byte) bool {
+	return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9')
 }
 
 func normalizeOrigins(origins []string) ([]string, error) {

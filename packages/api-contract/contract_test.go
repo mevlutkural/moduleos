@@ -38,6 +38,8 @@ func TestOpenAPIContractIsValidAndMatchesRuntimeRoutes(t *testing.T) {
 		"GET /apps/{name}/deployments":                {"200", "400", "401", "404", "500", "503"},
 		"GET /apps/{name}/deployments/{id}":           {"200", "400", "401", "404", "500", "503"},
 		"POST /apps/{name}/deployments/{id}/rollback": {"202", "400", "401", "404", "409", "412", "413", "428", "429", "500", "503"},
+		"GET /apps/{name}/logs":                       {"200", "400", "401", "404", "422", "500", "502", "503", "504"},
+		"GET /apps/{name}/logs/stream":                {"200", "400", "401", "404", "422", "429", "500", "503", "504"},
 		"GET /live":                                   {"200", "500"},
 		"GET /ready":                                  {"200", "500", "503"},
 		"GET /version":                                {"200", "500"},
@@ -101,7 +103,11 @@ func TestOpenAPIContractIsValidAndMatchesRuntimeRoutes(t *testing.T) {
 						t.Fatalf("%s response %s is missing %s", operationKey, status, header)
 					}
 				}
-				if response.Value.Content.Get("application/json") == nil {
+				if operationKey == "GET /apps/{name}/logs/stream" && status == "200" {
+					if response.Value.Content.Get("text/event-stream") == nil {
+						t.Fatalf("%s response %s is missing text/event-stream content", operationKey, status)
+					}
+				} else if response.Value.Content.Get("application/json") == nil {
 					t.Fatalf("%s response %s is missing application/json content", operationKey, status)
 				}
 				if status == "401" && response.Value.Headers["WWW-Authenticate"] == nil {
@@ -145,6 +151,8 @@ func TestOpenAPIContractIsValidAndMatchesRuntimeRoutes(t *testing.T) {
 		"GET /apps/{name}",
 		"GET /apps/{name}/deployments",
 		"GET /apps/{name}/deployments/{id}",
+		"GET /apps/{name}/logs",
+		"GET /apps/{name}/logs/stream",
 		"GET /live",
 		"GET /projects",
 		"GET /projects/{slug}",

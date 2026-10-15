@@ -80,6 +80,11 @@ const (
 	maxPortEntries        = 20
 )
 
+var (
+	ErrInvalidLogRequest  = errors.New("invalid runtime log request")
+	ErrTTYLogsUnsupported = errors.New("TTY runtime logs are unsupported")
+)
+
 // ReconcileQueue is the only runtime side-effect requested by application
 // mutations. The durable database intent remains correct even when enqueueing
 // is skipped by a crash; the reconciler's full scan will recover it.
@@ -679,16 +684,28 @@ func (s *Service) ListDeployments(ctx context.Context, appName string) ([]*store
 	return s.store.ListDeployments(ctx, app.ID)
 }
 
-// GetLogs returns a log stream for an app. The caller is responsible for closing rc.
-func (s *Service) GetLogs(ctx context.Context, serviceID string, tail string, follow bool) (io.ReadCloser, error) {
-	rc, err := s.swarm.GetServiceLogs(ctx, serviceID, tail, follow)
+// GetLogs returns a runtime log reader. The caller owns and must close it.
+func (s *Service) GetLogs(ctx context.Context, serviceID string, request swarm.LogRequest) (io.ReadCloser, error) {
+	if request.Tail < 1 {
+		return nil, ErrInvalidLogRequest
+	}
+	rc, err := s.swarm.GetServiceLogs(ctx, serviceID, request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve logs: %w", err)
 	}
 	return rc, nil
 }
 
-func (s *Service) GetApplicationLogs(ctx context.Context, application *store.Application, tail string, follow bool) (io.ReadCloser, error) {
+// OpenApplicationLogs verifies current application ownership before returning
+// an owned runtime stream and its explicit Docker framing mode.
+func (s *Service) OpenApplicationLogs(ctx context.Context, name string, request swarm.LogRequest) (*swarm.LogStream, error) {
+	if request.Tail < 1 {
+		return nil, ErrInvalidLogRequest
+	}
+	application, err := s.store.GetApplication(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("application not found: %w", err)
+	}
 	info, err := s.swarm.InspectService(ctx, swarm.ServiceName(application.Name))
 	if err != nil {
 		return nil, fmt.Errorf("inspect service for logs: %w", err)
@@ -696,7 +713,17 @@ func (s *Service) GetApplicationLogs(ctx context.Context, application *store.App
 	if info.Labels[swarm.LabelManagedBy] != "true" || info.Labels[swarm.LabelAppID] != application.ID {
 		return nil, fmt.Errorf("%w: service is not owned by application", swarm.ErrOwnershipConflict)
 	}
-	return s.GetLogs(ctx, info.ID, tail, follow)
+	// Docker's service-log endpoint sends daemon errors in-band without a
+	// distinguishable frame for TTY services. Refuse the stream rather than
+	// exposing runtime internals as application output.
+	if info.TTY {
+		return nil, ErrTTYLogsUnsupported
+	}
+	reader, err := s.GetLogs(ctx, info.ID, request)
+	if err != nil {
+		return nil, err
+	}
+	return &swarm.LogStream{Reader: reader, Framing: swarm.LogFramingMultiplexed}, nil
 }
 
 // UpdateAppStatus updates only the status field. Used by the watcher and reconciler.

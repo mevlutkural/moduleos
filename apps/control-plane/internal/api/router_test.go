@@ -31,6 +31,7 @@ import (
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/store"
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/swarm"
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/testkit/swarmfake"
+	"github.com/valyala/fasthttp"
 )
 
 type routerHealthStore struct {
@@ -70,6 +71,73 @@ type routerProjectService struct{}
 type routerApplicationService struct{}
 
 type routerDeploymentService struct{}
+
+type routerLogService struct{}
+
+func (*routerLogService) OpenApplicationLogs(context.Context, string, swarm.LogRequest) (*swarm.LogStream, error) {
+	return nil, store.ErrNotFound
+}
+
+type routerRecordingLogService struct {
+	mu     sync.Mutex
+	calls  int
+	stream *swarm.LogStream
+}
+
+func (s *routerRecordingLogService) OpenApplicationLogs(context.Context, string, swarm.LogRequest) (*swarm.LogStream, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	if s.stream != nil {
+		return s.stream, nil
+	}
+	return &swarm.LogStream{Reader: io.NopCloser(strings.NewReader("")), Framing: swarm.LogFramingMultiplexed}, nil
+}
+
+func (s *routerRecordingLogService) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+type routerBlockingLogReader struct {
+	reader *io.PipeReader
+	once   sync.Once
+	closed chan struct{}
+}
+
+type routerFloodLogReader struct {
+	once   sync.Once
+	closed chan struct{}
+	offset int
+}
+
+var routerMultiplexedLogFrame = []byte{1, 0, 0, 0, 0, 0, 0, 2, 'x', '\n'}
+
+func (r *routerFloodLogReader) Read(buffer []byte) (int, error) {
+	select {
+	case <-r.closed:
+		return 0, io.EOF
+	default:
+	}
+	for index := range buffer {
+		buffer[index] = routerMultiplexedLogFrame[r.offset]
+		r.offset = (r.offset + 1) % len(routerMultiplexedLogFrame)
+	}
+	return len(buffer), nil
+}
+
+func (r *routerFloodLogReader) Close() error {
+	r.once.Do(func() { close(r.closed) })
+	return nil
+}
+
+func (r *routerBlockingLogReader) Read(buffer []byte) (int, error) { return r.reader.Read(buffer) }
+func (r *routerBlockingLogReader) Close() error {
+	err := r.reader.Close()
+	r.once.Do(func() { close(r.closed) })
+	return err
+}
 
 type routerRecordingQueue struct {
 	mu    sync.Mutex
@@ -215,6 +283,7 @@ func validRouterOptions() RouterOptions {
 		Projects:           &routerProjectService{},
 		Applications:       &routerApplicationService{},
 		Deployments:        &routerDeploymentService{},
+		Logs:               &routerLogService{},
 		Environment:        "development",
 		IngressNetwork:     "moduleos-ingress",
 		BodyLimit:          1024,
@@ -223,6 +292,12 @@ func validRouterOptions() RouterOptions {
 		IdleTimeout:        time.Second,
 		ReadinessTimeout:   time.Second,
 		RequestConcurrency: 8,
+		LogOptions: handler.LogOptions{
+			MaxTail: 1000, MaxPayloadBytes: 1024 * 1024, MaxConnections: 20,
+			MaxConnectionsPerApp: 3, InitialTail: 50, TailTimeout: time.Second,
+			OpenTimeout: time.Second, HeartbeatInterval: 10 * time.Millisecond,
+			IdleTimeout: time.Second, MaxDuration: time.Minute,
+		},
 	}
 }
 
@@ -280,6 +355,8 @@ func TestNewRouterRejectsInvalidOptions(t *testing.T) {
 		{name: "projects", mutate: func(options *RouterOptions) { options.Projects = nil }},
 		{name: "applications", mutate: func(options *RouterOptions) { options.Applications = nil }},
 		{name: "deployments", mutate: func(options *RouterOptions) { options.Deployments = nil }},
+		{name: "logs", mutate: func(options *RouterOptions) { options.Logs = nil }},
+		{name: "log options", mutate: func(options *RouterOptions) { options.LogOptions.MaxTail = 0 }},
 		{name: "environment", mutate: func(options *RouterOptions) { options.Environment = "staging" }},
 		{name: "production API key missing", mutate: func(options *RouterOptions) { options.Environment = "production" }},
 		{name: "production API key short", mutate: func(options *RouterOptions) {
@@ -398,6 +475,8 @@ func TestRouterRegistersPhase6C2ContractRoutes(t *testing.T) {
 		"GET /api/v1/apps/:name",
 		"GET /api/v1/apps/:name/deployments",
 		"GET /api/v1/apps/:name/deployments/:id",
+		"GET /api/v1/apps/:name/logs",
+		"GET /api/v1/apps/:name/logs/stream",
 		"GET /api/v1/live",
 		"GET /api/v1/projects",
 		"GET /api/v1/projects/:slug",
@@ -417,6 +496,204 @@ func TestRouterRegistersPhase6C2ContractRoutes(t *testing.T) {
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("routes:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestLogRoutesAuthenticateBeforeRuntimeAccess(t *testing.T) {
+	logs := &routerRecordingLogService{}
+	options := validRouterOptions()
+	options.APIKey = strings.Repeat("secure-key-", 4)
+	options.Logs = logs
+	router, err := NewRouter(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/api/v1/apps/api/logs", "/api/v1/apps/api/logs/stream", "/api/v1/apps/api/logs?access_token=secret"} {
+		response := sendRequest(t, router.App, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.StatusCode != fiber.StatusUnauthorized {
+			t.Fatalf("%s status = %d", path, response.StatusCode)
+		}
+	}
+	if logs.callCount() != 0 {
+		t.Fatalf("unauthorized requests reached runtime %d times", logs.callCount())
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/apps/api/logs", nil)
+	request.Header.Set(fiber.HeaderAuthorization, "Bearer "+options.APIKey)
+	response := sendRequest(t, router.App, request)
+	if response.StatusCode != fiber.StatusOK || logs.callCount() != 1 {
+		t.Fatalf("authorized status/calls = %d/%d", response.StatusCode, logs.callCount())
+	}
+}
+
+func TestLogStreamRouteReceivesOnlyTheBoundedWriteDeadlineOverride(t *testing.T) {
+	tests := []struct {
+		method string
+		uri    string
+		want   bool
+	}{
+		{method: http.MethodGet, uri: "/api/v1/apps/api/logs/stream", want: true},
+		{method: http.MethodGet, uri: "/api/v1/apps/api/logs/stream?tail=1", want: true},
+		{method: http.MethodPost, uri: "/api/v1/apps/api/logs/stream"},
+		{method: http.MethodGet, uri: "/api/v1/apps/api/logs"},
+		{method: http.MethodGet, uri: "/api/v1/apps/Bad/logs/stream"},
+		{method: http.MethodGet, uri: "/api/v1/apps/api/logs/stream/"},
+	}
+	for _, test := range tests {
+		if got := isLogStreamRequest([]byte(test.method), []byte(test.uri)); got != test.want {
+			t.Fatalf("%s %s = %v, want %v", test.method, test.uri, got, test.want)
+		}
+	}
+	options := validRouterOptions()
+	options.WriteTimeout = 20 * time.Millisecond
+	options.LogOptions.MaxDuration = time.Minute
+	router, err := NewRouter(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var streamHeader, ordinaryHeader fasthttp.RequestHeader
+	streamHeader.SetMethod(http.MethodGet)
+	streamHeader.SetRequestURI("/api/v1/apps/api/logs/stream")
+	ordinaryHeader.SetMethod(http.MethodGet)
+	ordinaryHeader.SetRequestURI("/api/v1/apps/api/logs")
+	if got := router.App.Server().HeaderReceived(&streamHeader).WriteTimeout; got != time.Minute {
+		t.Fatalf("stream timeout = %v", got)
+	}
+	if got := router.App.Server().HeaderReceived(&ordinaryHeader).WriteTimeout; got != 0 {
+		t.Fatalf("ordinary route override = %v", got)
+	}
+}
+
+func TestLogStreamDisconnectAndShutdownCloseRuntimeReader(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		shutdown bool
+	}{
+		{name: "client disconnect"},
+		{name: "pre-shutdown cancellation", shutdown: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pipeReader, pipeWriter := io.Pipe()
+			defer pipeWriter.Close()
+			reader := &routerBlockingLogReader{reader: pipeReader, closed: make(chan struct{})}
+			logs := &routerRecordingLogService{stream: &swarm.LogStream{Reader: reader, Framing: swarm.LogFramingMultiplexed}}
+			options := validRouterOptions()
+			options.Logs = logs
+			options.LogOptions.HeartbeatInterval = 5 * time.Millisecond
+			options.LogOptions.IdleTimeout = time.Second
+			options.LogOptions.MaxDuration = time.Minute
+			router, err := NewRouter(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			baseURL := startRealHTTPServer(t, router.App)
+			client := &http.Client{Timeout: time.Second}
+			response, err := client.Get(baseURL + "/api/v1/apps/api/logs/stream")
+			if err != nil {
+				t.Fatal(err)
+			}
+			buffer := make([]byte, len(": connected\n\n"))
+			if _, err := io.ReadFull(response.Body, buffer); err != nil {
+				t.Fatal(err)
+			}
+			if test.shutdown {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				if err := router.App.ShutdownWithContext(ctx); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := response.Body.Close(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-reader.closed:
+			case <-time.After(time.Second):
+				t.Fatal("runtime reader was not closed")
+			}
+			_ = response.Body.Close()
+		})
+	}
+}
+
+func TestLogStreamShutdownInterruptsBlockedClientWrite(t *testing.T) {
+	reader := &routerFloodLogReader{closed: make(chan struct{})}
+	logs := &routerRecordingLogService{stream: &swarm.LogStream{Reader: reader, Framing: swarm.LogFramingMultiplexed}}
+	options := validRouterOptions()
+	options.Logs = logs
+	options.LogOptions.HeartbeatInterval = time.Second
+	options.LogOptions.IdleTimeout = time.Minute
+	options.LogOptions.MaxDuration = time.Hour
+	router, err := NewRouter(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseURL := startRealHTTPServer(t, router.App)
+	connection, err := net.Dial("tcp", strings.TrimPrefix(baseURL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if tcp, ok := connection.(*net.TCPConn); ok {
+		_ = tcp.SetReadBuffer(1)
+	}
+	if _, err := io.WriteString(connection, "GET /api/v1/apps/api/logs/stream HTTP/1.1\r\nHost: moduleos.local\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for logs.callCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if logs.callCount() == 0 {
+		t.Fatal("runtime stream was not opened")
+	}
+	// Allow the tiny client receive window and server-side buffers to fill.
+	time.Sleep(100 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := router.App.ShutdownWithContext(ctx); err != nil {
+		t.Fatalf("shutdown with blocked client write: %v", err)
+	}
+	select {
+	case <-reader.closed:
+	case <-time.After(time.Second):
+		t.Fatal("runtime reader was not closed")
+	}
+}
+
+func TestLogStreamMaximumDurationInterruptsBlockedClientWrite(t *testing.T) {
+	reader := &routerFloodLogReader{closed: make(chan struct{})}
+	logs := &routerRecordingLogService{stream: &swarm.LogStream{Reader: reader, Framing: swarm.LogFramingMultiplexed}}
+	options := validRouterOptions()
+	options.Logs = logs
+	options.LogOptions.HeartbeatInterval = 5 * time.Millisecond
+	options.LogOptions.IdleTimeout = 50 * time.Millisecond
+	options.LogOptions.MaxDuration = 100 * time.Millisecond
+	router, err := NewRouter(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseURL := startRealHTTPServer(t, router.App)
+	connection, err := net.Dial("tcp", strings.TrimPrefix(baseURL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if tcp, ok := connection.(*net.TCPConn); ok {
+		_ = tcp.SetReadBuffer(1)
+	}
+	if _, err := io.WriteString(connection, "GET /api/v1/apps/api/logs/stream HTTP/1.1\r\nHost: moduleos.local\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for logs.callCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if logs.callCount() == 0 {
+		t.Fatal("runtime stream was not opened")
+	}
+	select {
+	case <-reader.closed:
+	case <-time.After(time.Second):
+		t.Fatal("maximum duration did not close a stream blocked on the client")
 	}
 }
 

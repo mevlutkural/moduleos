@@ -24,6 +24,8 @@ tags:
     description: Durable application desired state and asynchronous lifecycle intent.
   - name: Deployments
     description: Durable image deployment intent, bounded history, and immutable rollback.
+  - name: Runtime logs
+    description: Bounded snapshots and bounded live streams from the current owned Swarm service.
 security:
   - bearerAuth: []
 paths:
@@ -474,6 +476,70 @@ paths:
         "429": {$ref: "#/components/responses/IdempotencyCapacity"}
         "500": {$ref: "#/components/responses/InternalError"}
         "503": {$ref: "#/components/responses/ServiceUnavailable"}
+  /apps/{name}/logs:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ApplicationName"
+    get:
+      operationId: getApplicationLogs
+      tags: [Runtime logs]
+      summary: Read a bounded runtime-log snapshot
+      description: Reads stdout and stderr from the application's currently owned Swarm service. The request body must be empty.
+      parameters:
+        - $ref: "#/components/parameters/LogTail"
+      responses:
+        "200":
+          description: A bounded log snapshot in runtime order.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/NoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LogTailResponse"}
+              example: {logs: [{stream: stdout, message: ready}], total: 1}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "502": {$ref: "#/components/responses/BadGateway"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+  /apps/{name}/logs/stream:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ApplicationName"
+    get:
+      operationId: streamApplicationLogs
+      tags: [Runtime logs]
+      summary: Stream bounded live runtime logs
+      description: >-
+        Opens an authenticated SSE session for a server-configured maximum
+        duration (30 minutes by default). The stream
+        sends log events, keepalive comments, and a terminal error event when
+        an upstream error occurs after headers. Replay and Last-Event-ID are
+        unsupported; browser clients must use a fetch-based bearer request.
+      parameters:
+        - $ref: "#/components/parameters/LogStreamTail"
+      responses:
+        "200":
+          description: A live SSE session. Each log event contains a LogEntry JSON object.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/RequestID"}
+            Cache-Control: {$ref: "#/components/headers/SSECacheControl"}
+            X-Accel-Buffering: {$ref: "#/components/headers/DisableProxyBuffering"}
+          content:
+            text/event-stream:
+              schema: {type: string}
+              example: "event: log\ndata: {\"stream\":\"stdout\",\"message\":\"ready\"}\n\n"
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "429": {$ref: "#/components/responses/LogStreamCapacity"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
   /projects:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -824,6 +890,18 @@ components:
       required: false
       description: Opaque application-scoped cursor returned by the previous page.
       schema: {type: string, minLength: 1, maxLength: 256, pattern: "^[A-Za-z0-9_-]+$"}
+    LogTail:
+      name: tail
+      in: query
+      required: false
+      description: Number of recent log lines requested. Runtime configuration may impose a lower maximum.
+      schema: {type: integer, minimum: 1, maximum: 10000, default: 100}
+    LogStreamTail:
+      name: tail
+      in: query
+      required: false
+      description: Number of recent log lines sent before following live output. The server-configured default is 50 and runtime configuration may impose a lower maximum.
+      schema: {type: integer, minimum: 1, maximum: 10000}
   securitySchemes:
     bearerAuth:
       type: http
@@ -846,6 +924,18 @@ components:
       schema:
         type: string
         const: no-store
+    SSECacheControl:
+      description: Prevents storage and intermediary buffering of a live event stream.
+      required: true
+      schema:
+        type: string
+        const: no-cache, no-store
+    DisableProxyBuffering:
+      description: Requests compatible reverse proxies to forward SSE chunks without buffering.
+      required: true
+      schema:
+        type: string
+        const: no
     RetryAfter:
       description: Number of seconds the caller should wait before retrying an overloaded request.
       schema:
@@ -983,6 +1073,34 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+    LogStreamCapacity:
+      description: The global or per-application live-log connection limit is full.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+        Retry-After:
+          description: Required whole-second delay before another stream attempt.
+          required: true
+          schema: {type: string, const: "1"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    BadGateway:
+      description: Docker returned malformed or over-limit runtime-log data.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    GatewayTimeout:
+      description: Opening or reading the runtime log source exceeded its bounded deadline.
+      headers:
+        X-Request-ID: {$ref: "#/components/headers/RequestID"}
+        Cache-Control: {$ref: "#/components/headers/NoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
     ServiceUnavailable:
       description: Work was cancelled, timed out, or a required dependency is temporarily unavailable.
       headers:
@@ -1011,6 +1129,29 @@ components:
                   request_id: 550e8400-e29b-41d4-a716-446655440000
                   retryable: false
   schemas:
+    LogEntry:
+      description: One bounded logical line from a non-TTY service's stdout or stderr stream. TTY service logs are rejected because Docker cannot distinguish their daemon errors from application output.
+      example: {stream: stdout, message: ready}
+      type: object
+      additionalProperties: false
+      required: [stream, message]
+      properties:
+        stream: {type: string, enum: [stdout, stderr], example: stdout}
+        message: {type: string, example: ready}
+    LogTailResponse:
+      description: A complete bounded runtime-log snapshot with no partial-success semantics.
+      example: {logs: [{stream: stdout, message: ready}], total: 1}
+      type: object
+      additionalProperties: false
+      required: [logs, total]
+      properties:
+        logs:
+          description: Log lines in the order produced by the runtime stream.
+          example: [{stream: stdout, message: ready}]
+          type: array
+          maxItems: 10000
+          items: {$ref: "#/components/schemas/LogEntry"}
+        total: {type: integer, minimum: 0, maximum: 10000}
     ApplicationPortInput:
       description: Container port and optional Swarm publication settings.
       example: {container_port: 8080, published_port: 0, protocol: tcp, publish_mode: ingress}

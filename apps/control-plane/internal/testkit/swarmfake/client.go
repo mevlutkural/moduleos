@@ -314,7 +314,7 @@ func (m *Client) RemoveNetwork(_ context.Context, networkNameOrID string) error 
 	return fmt.Errorf("%w: network %s", errdefs.ErrNotFound, networkNameOrID)
 }
 
-func (m *Client) GetServiceLogs(_ context.Context, _ string, _ string, _ bool) (io.ReadCloser, error) {
+func (m *Client) GetServiceLogs(_ context.Context, _ string, _ swarm.LogRequest) (io.ReadCloser, error) {
 	line := []byte("mock log line\n")
 	header := make([]byte, 8)
 	header[0] = 0x01 // stdout
