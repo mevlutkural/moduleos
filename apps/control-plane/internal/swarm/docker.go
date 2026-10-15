@@ -9,6 +9,7 @@ import (
 	"net"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/moby/moby/api/types/network"
 	dockerswarm "github.com/moby/moby/api/types/swarm"
 	"github.com/moby/moby/client"
+	"github.com/moby/moby/client/pkg/versions"
 )
 
 const servicePrefix = "moduleos_"
@@ -574,16 +576,20 @@ func (c *DockerClient) ListServices(ctx context.Context) ([]ServiceInfo, error) 
 }
 
 // GetServiceLogs returns a log stream for a service.
-func (c *DockerClient) GetServiceLogs(ctx context.Context, serviceID string, tail string, follow bool) (io.ReadCloser, error) {
+func (c *DockerClient) GetServiceLogs(ctx context.Context, serviceID string, request LogRequest) (io.ReadCloser, error) {
 	logs, err := c.docker.ServiceLogs(ctx, serviceID, client.ServiceLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
-		Follow:     follow,
-		Tail:       tail,
+		Follow:     request.Follow,
+		Tail:       strconv.Itoa(request.Tail),
 		Timestamps: false,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve logs: %w", err)
+	}
+	if versions.LessThan(c.docker.ClientVersion(), "1.42") {
+		_ = logs.Close()
+		return nil, fmt.Errorf("%w: negotiated API version %s", ErrServiceLogsUnsupported, c.docker.ClientVersion())
 	}
 
 	return logs, nil
@@ -805,6 +811,9 @@ func toServiceInfo(svc dockerswarm.Service) *ServiceInfo {
 		Running:  running,
 		Labels:   svc.Spec.Labels,
 		Spec:     spec,
+	}
+	if containerSpec := svc.Spec.TaskTemplate.ContainerSpec; containerSpec != nil {
+		info.TTY = containerSpec.TTY
 	}
 	if serviceUpdateIsPaused(svc) {
 		info.RolloutPaused = true

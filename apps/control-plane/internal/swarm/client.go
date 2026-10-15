@@ -8,10 +8,11 @@ import (
 )
 
 var (
-	ErrDockerUnavailable     = errors.New("docker unavailable")
-	ErrDockerInfoUnavailable = errors.New("docker info unavailable")
-	ErrSwarmInactive         = errors.New("swarm inactive")
-	ErrSwarmManagerRequired  = errors.New("swarm manager required")
+	ErrDockerUnavailable      = errors.New("docker unavailable")
+	ErrDockerInfoUnavailable  = errors.New("docker info unavailable")
+	ErrSwarmInactive          = errors.New("swarm inactive")
+	ErrSwarmManagerRequired   = errors.New("swarm manager required")
+	ErrServiceLogsUnsupported = errors.New("service logs require Docker API 1.42 or newer")
 )
 
 // ServiceSpec holds the information needed to create or update a Swarm service.
@@ -82,6 +83,23 @@ type ServiceInfo struct {
 	Labels             map[string]string
 	Spec               ServiceSpec
 	TaskErrors         []string
+	TTY                bool
+}
+
+type LogRequest struct {
+	Tail   int
+	Follow bool
+}
+
+type LogFraming string
+
+const (
+	LogFramingMultiplexed LogFraming = "multiplexed"
+)
+
+type LogStream struct {
+	Reader  io.ReadCloser
+	Framing LogFraming
 }
 
 type NetworkInfo struct {
@@ -109,7 +127,7 @@ type Client interface {
 	InspectService(ctx context.Context, serviceID string) (*ServiceInfo, error)
 	GetService(ctx context.Context, serviceID string) (*ServiceInfo, error)
 	ListServices(ctx context.Context) ([]ServiceInfo, error)
-	GetServiceLogs(ctx context.Context, serviceID string, tail string, follow bool) (io.ReadCloser, error)
+	GetServiceLogs(ctx context.Context, serviceID string, request LogRequest) (io.ReadCloser, error)
 	WatchEvents(ctx context.Context) (<-chan SwarmEvent, <-chan error)
 	GetNetwork(ctx context.Context, networkNameOrID string) (*NetworkInfo, error)
 	ListNetworks(ctx context.Context) ([]NetworkInfo, error)

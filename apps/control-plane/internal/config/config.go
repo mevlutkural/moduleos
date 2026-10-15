@@ -46,6 +46,12 @@ type Config struct {
 	MaxLogPayloadBytes      int64         `env:"MAX_LOG_PAYLOAD_BYTES" envDefault:"1048576"`
 	MaxSSEConnections       int           `env:"MAX_SSE_CONNECTIONS" envDefault:"20"`
 	MaxSSEConnectionsPerApp int           `env:"MAX_SSE_CONNECTIONS_PER_APP" envDefault:"3"`
+	LogTailTimeout          time.Duration `env:"LOG_TAIL_TIMEOUT" envDefault:"10s"`
+	SSEOpenTimeout          time.Duration `env:"SSE_OPEN_TIMEOUT" envDefault:"10s"`
+	SSEHeartbeatInterval    time.Duration `env:"SSE_HEARTBEAT_INTERVAL" envDefault:"15s"`
+	SSEIdleTimeout          time.Duration `env:"SSE_IDLE_TIMEOUT" envDefault:"5m"`
+	SSEMaxDuration          time.Duration `env:"SSE_MAX_DURATION" envDefault:"30m"`
+	SSEInitialTail          int           `env:"SSE_INITIAL_TAIL" envDefault:"50"`
 	RequestConcurrency      int           `env:"REQUEST_CONCURRENCY" envDefault:"128"`
 }
 
@@ -129,11 +135,20 @@ func (c *Config) Validate() error {
 	if c.ReconcileWorkers < 1 || c.ReconcileWorkers > 32 || c.MaxReplicas < 1 || c.MaxReplicas > 1000 || c.MaxApplications < 1 || c.MaxApplications > 10000 || c.MaxProjects < 2 || c.MaxProjects > 1000 {
 		return fmt.Errorf("worker or replica limit is outside supported bounds")
 	}
-	if c.BodyLimit < 1024 || c.BodyLimit > 10*1024*1024 || c.MaxLogTail < 1 || c.MaxLogPayloadBytes < 1024 || c.MaxSSEConnections < 1 || c.MaxSSEConnectionsPerApp < 1 || c.RequestConcurrency < 1 {
+	if c.BodyLimit < 1024 || c.BodyLimit > 10*1024*1024 || c.MaxLogTail < 100 || c.MaxLogTail > 10000 || c.MaxLogPayloadBytes < 1024 || c.MaxLogPayloadBytes > 16*1024*1024 || c.MaxSSEConnections < 1 || c.MaxSSEConnections > 1024 || c.MaxSSEConnectionsPerApp < 1 || c.RequestConcurrency < 1 {
 		return fmt.Errorf("HTTP or log limit is outside supported bounds")
 	}
 	if c.MaxSSEConnectionsPerApp > c.MaxSSEConnections {
 		return fmt.Errorf("per-app SSE limit cannot exceed global SSE limit")
+	}
+	if c.SSEInitialTail < 1 || c.SSEInitialTail > c.MaxLogTail {
+		return fmt.Errorf("SSE_INITIAL_TAIL must be between 1 and MAX_LOG_TAIL")
+	}
+	if c.LogTailTimeout <= 0 || c.LogTailTimeout > time.Minute || c.SSEOpenTimeout <= 0 || c.SSEOpenTimeout > time.Minute {
+		return fmt.Errorf("log tail and SSE open timeouts must be positive and at most one minute")
+	}
+	if c.SSEHeartbeatInterval <= 0 || c.SSEIdleTimeout <= 0 || c.SSEMaxDuration <= 0 || c.SSEHeartbeatInterval >= c.SSEIdleTimeout || c.SSEIdleTimeout >= c.SSEMaxDuration {
+		return fmt.Errorf("SSE durations must satisfy heartbeat < idle < maximum duration")
 	}
 	return nil
 }

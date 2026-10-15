@@ -224,6 +224,7 @@ func TestToServiceInfoProjectsDockerStatus(t *testing.T) {
 	spec.Mode.Replicated.Replicas = &replicas
 	spec.UpdateConfig.MaxFailureRatio = 0.25
 	spec.RollbackConfig.MaxFailureRatio = 0.5
+	spec.TaskTemplate.ContainerSpec.TTY = true
 	running := uint64(1)
 	svc := dockerswarm.Service{
 		ID:            "service-id",
@@ -232,7 +233,7 @@ func TestToServiceInfoProjectsDockerStatus(t *testing.T) {
 	}
 
 	got := toServiceInfo(svc)
-	if got.ID != "service-id" || got.Name != "moduleos_api" || got.Replicas != 2 || got.Running != 1 {
+	if got.ID != "service-id" || got.Name != "moduleos_api" || got.Replicas != 2 || got.Running != 1 || !got.TTY {
 		t.Fatalf("service status converted incorrectly: %#v", got)
 	}
 	if got.Spec.Update.MaxFailureRatio != 0.25 || got.Spec.Rollback.MaxFailureRatio != 0.5 {

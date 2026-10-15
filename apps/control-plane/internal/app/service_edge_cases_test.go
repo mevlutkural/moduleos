@@ -128,7 +128,7 @@ type logErrorClient struct {
 	err error
 }
 
-func (c *logErrorClient) GetServiceLogs(context.Context, string, string, bool) (io.ReadCloser, error) {
+func (c *logErrorClient) GetServiceLogs(context.Context, string, swarm.LogRequest) (io.ReadCloser, error) {
 	return nil, c.err
 }
 
@@ -1187,30 +1187,43 @@ func TestApplicationLogsRequireRuntimeOwnership(t *testing.T) {
 		ID: "service-id", Name: serviceName,
 		Labels: map[string]string{swarm.LabelManagedBy: "true", swarm.LabelAppID: application.ID},
 	}
-	stream, err := service.GetApplicationLogs(t.Context(), application, "100", false)
+	stream, err := service.OpenApplicationLogs(t.Context(), application.Name, swarm.LogRequest{Tail: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := io.ReadAll(stream)
-	closeErr := stream.Close()
+	if stream.Framing != swarm.LogFramingMultiplexed {
+		t.Fatalf("framing = %q", stream.Framing)
+	}
+	payload, err := io.ReadAll(stream.Reader)
+	closeErr := stream.Reader.Close()
 	if err != nil || closeErr != nil || !strings.Contains(string(payload), "mock log line") {
 		t.Fatalf("log payload=%q readErr=%v closeErr=%v", payload, err, closeErr)
 	}
 
 	mock.Services[serviceName].Labels[swarm.LabelAppID] = uuid.NewString()
-	if _, err := service.GetApplicationLogs(t.Context(), application, "100", false); !errors.Is(err, swarm.ErrOwnershipConflict) {
+	if _, err := service.OpenApplicationLogs(t.Context(), application.Name, swarm.LogRequest{Tail: 100}); !errors.Is(err, swarm.ErrOwnershipConflict) {
 		t.Fatalf("foreign service log error = %v", err)
 	}
 	delete(mock.Services, serviceName)
-	if _, err := service.GetApplicationLogs(t.Context(), application, "100", false); err == nil {
+	if _, err := service.OpenApplicationLogs(t.Context(), application.Name, swarm.LogRequest{Tail: 100}); err == nil {
 		t.Fatal("missing runtime service unexpectedly returned logs")
 	}
 
 	logErr := errors.New("log backend unavailable")
 	faultClient := &logErrorClient{Client: mock, err: logErr}
 	faultService := NewService(st, faultClient, "moduleos.local", service.log)
-	if _, err := faultService.GetLogs(t.Context(), "service-id", "all", true); !errors.Is(err, logErr) {
+	if _, err := faultService.GetLogs(t.Context(), "service-id", swarm.LogRequest{Tail: 100, Follow: true}); !errors.Is(err, logErr) {
 		t.Fatalf("log backend error = %v", err)
+	}
+	if _, err := faultService.GetLogs(t.Context(), "service-id", swarm.LogRequest{}); !errors.Is(err, ErrInvalidLogRequest) {
+		t.Fatalf("invalid log request error = %v", err)
+	}
+	mock.Services[serviceName] = &swarm.ServiceInfo{
+		ID: "service-id", Name: serviceName, TTY: true,
+		Labels: map[string]string{swarm.LabelManagedBy: "true", swarm.LabelAppID: application.ID},
+	}
+	if stream, err := service.OpenApplicationLogs(t.Context(), application.Name, swarm.LogRequest{Tail: 1}); stream != nil || !errors.Is(err, ErrTTYLogsUnsupported) {
+		t.Fatalf("TTY stream/error = %#v/%v", stream, err)
 	}
 }
 

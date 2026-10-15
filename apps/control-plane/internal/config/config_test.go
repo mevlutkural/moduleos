@@ -19,7 +19,9 @@ var configEnvironmentKeys = []string{
 	"DEPLOYMENT_TIMEOUT", "STABILIZATION_WINDOW", "SHUTDOWN_TIMEOUT", "HTTP_READ_TIMEOUT",
 	"HTTP_WRITE_TIMEOUT", "HTTP_IDLE_TIMEOUT", "HTTP_BODY_LIMIT", "MAX_REPLICAS", "MAX_APPLICATIONS",
 	"MAX_PROJECTS", "MAX_LOG_TAIL", "MAX_LOG_PAYLOAD_BYTES", "MAX_SSE_CONNECTIONS",
-	"MAX_SSE_CONNECTIONS_PER_APP", "REQUEST_CONCURRENCY",
+	"MAX_SSE_CONNECTIONS_PER_APP", "LOG_TAIL_TIMEOUT", "SSE_OPEN_TIMEOUT",
+	"SSE_HEARTBEAT_INTERVAL", "SSE_IDLE_TIMEOUT", "SSE_MAX_DURATION", "SSE_INITIAL_TAIL",
+	"REQUEST_CONCURRENCY",
 }
 
 func clearConfigEnvironment(t *testing.T) {
@@ -65,6 +67,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.APIKey != "" {
 		t.Errorf("APIKey: got %q, want empty string", cfg.APIKey)
 	}
+	if cfg.LogTailTimeout != 10*time.Second || cfg.SSEOpenTimeout != 10*time.Second || cfg.SSEHeartbeatInterval != 15*time.Second || cfg.SSEIdleTimeout != 5*time.Minute || cfg.SSEMaxDuration != 30*time.Minute || cfg.SSEInitialTail != 50 {
+		t.Errorf("log defaults are invalid: %#v", cfg)
+	}
 }
 
 func TestLoad_EnvOverrides(t *testing.T) {
@@ -104,7 +109,8 @@ func TestLoadRejectsInsecureProductionConfiguration(t *testing.T) {
 }
 
 func TestValidateRejectsUnsafeMountRoot(t *testing.T) {
-	cfg := &config.Config{Env: "development", LogLevel: "info", ListenAddress: "127.0.0.1", Port: "3000", DockerEndpoint: "unix:///var/run/docker.sock", BaseDomain: "moduleos.local", DatabasePath: ":memory:", IngressNetwork: "moduleos-ingress", AllowedMountRoots: []string{"/"}, ReconcileInterval: time.Second, ReconcileMaxBackoff: time.Second, DeploymentTimeout: time.Minute, StabilizationWindow: time.Second, ShutdownTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, IdleTimeout: time.Second, ReconcileWorkers: 1, MaxReplicas: 1, BodyLimit: 1024, MaxLogTail: 1, MaxLogPayloadBytes: 1024, MaxSSEConnections: 1, MaxSSEConnectionsPerApp: 1, RequestConcurrency: 1}
+	cfg := validConfig()
+	cfg.AllowedMountRoots = []string{"/"}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected root mount allowlist to be rejected")
 	}
@@ -132,8 +138,11 @@ func validConfig() *config.Config {
 		DeploymentTimeout: time.Minute, StabilizationWindow: 0, ShutdownTimeout: time.Second,
 		ReadTimeout: time.Second, WriteTimeout: time.Second, IdleTimeout: time.Second,
 		BodyLimit: 1024, MaxReplicas: 1, MaxApplications: 1, MaxProjects: 2,
-		MaxLogTail: 1, MaxLogPayloadBytes: 1024, MaxSSEConnections: 1,
+		MaxLogTail: 100, MaxLogPayloadBytes: 1024, MaxSSEConnections: 1,
 		MaxSSEConnectionsPerApp: 1, RequestConcurrency: 1,
+		LogTailTimeout: 10 * time.Second, SSEOpenTimeout: 10 * time.Second,
+		SSEHeartbeatInterval: 15 * time.Second, SSEIdleTimeout: 5 * time.Minute,
+		SSEMaxDuration: 30 * time.Minute, SSEInitialTail: 50,
 	}
 }
 
@@ -175,12 +184,24 @@ func TestValidateRejectsInvalidConfigurationBoundaries(t *testing.T) {
 		{name: "project lower bound", mutate: func(c *config.Config) { c.MaxProjects = 1 }, wantMessage: "worker or replica"},
 		{name: "body lower bound", mutate: func(c *config.Config) { c.BodyLimit = 1023 }, wantMessage: "HTTP or log limit"},
 		{name: "body upper bound", mutate: func(c *config.Config) { c.BodyLimit = 10*1024*1024 + 1 }, wantMessage: "HTTP or log limit"},
-		{name: "log tail lower bound", mutate: func(c *config.Config) { c.MaxLogTail = 0 }, wantMessage: "HTTP or log limit"},
+		{name: "log tail lower bound", mutate: func(c *config.Config) { c.MaxLogTail = 99 }, wantMessage: "HTTP or log limit"},
+		{name: "log tail upper bound", mutate: func(c *config.Config) { c.MaxLogTail = 10001 }, wantMessage: "HTTP or log limit"},
 		{name: "log payload lower bound", mutate: func(c *config.Config) { c.MaxLogPayloadBytes = 1023 }, wantMessage: "HTTP or log limit"},
+		{name: "log payload upper bound", mutate: func(c *config.Config) { c.MaxLogPayloadBytes = 16*1024*1024 + 1 }, wantMessage: "HTTP or log limit"},
 		{name: "SSE global lower bound", mutate: func(c *config.Config) { c.MaxSSEConnections = 0 }, wantMessage: "HTTP or log limit"},
+		{name: "SSE global upper bound", mutate: func(c *config.Config) { c.MaxSSEConnections = 1025 }, wantMessage: "HTTP or log limit"},
 		{name: "SSE app lower bound", mutate: func(c *config.Config) { c.MaxSSEConnectionsPerApp = 0 }, wantMessage: "HTTP or log limit"},
 		{name: "request concurrency lower bound", mutate: func(c *config.Config) { c.RequestConcurrency = 0 }, wantMessage: "HTTP or log limit"},
 		{name: "SSE app exceeds global", mutate: func(c *config.Config) { c.MaxSSEConnectionsPerApp = 2 }, wantMessage: "per-app SSE"},
+		{name: "initial tail lower bound", mutate: func(c *config.Config) { c.SSEInitialTail = 0 }, wantMessage: "SSE_INITIAL_TAIL"},
+		{name: "initial tail upper bound", mutate: func(c *config.Config) { c.SSEInitialTail = 101 }, wantMessage: "SSE_INITIAL_TAIL"},
+		{name: "tail timeout lower bound", mutate: func(c *config.Config) { c.LogTailTimeout = 0 }, wantMessage: "log tail and SSE open"},
+		{name: "tail timeout upper bound", mutate: func(c *config.Config) { c.LogTailTimeout = time.Minute + time.Nanosecond }, wantMessage: "log tail and SSE open"},
+		{name: "open timeout lower bound", mutate: func(c *config.Config) { c.SSEOpenTimeout = 0 }, wantMessage: "log tail and SSE open"},
+		{name: "heartbeat lower bound", mutate: func(c *config.Config) { c.SSEHeartbeatInterval = 0 }, wantMessage: "SSE durations"},
+		{name: "heartbeat reaches idle", mutate: func(c *config.Config) { c.SSEHeartbeatInterval = c.SSEIdleTimeout }, wantMessage: "SSE durations"},
+		{name: "idle reaches maximum", mutate: func(c *config.Config) { c.SSEIdleTimeout = c.SSEMaxDuration }, wantMessage: "SSE durations"},
+		{name: "maximum lower bound", mutate: func(c *config.Config) { c.SSEMaxDuration = 0 }, wantMessage: "SSE durations"},
 	}
 
 	for _, test := range tests {

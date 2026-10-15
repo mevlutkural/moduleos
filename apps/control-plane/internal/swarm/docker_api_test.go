@@ -20,18 +20,36 @@ import (
 const testDockerAPIVersion = "1.52"
 
 func newDockerAPITestClient(t *testing.T, handler http.HandlerFunc) *DockerClient {
+	return newDockerAPITestClientWithVersion(t, testDockerAPIVersion, handler)
+}
+
+func newDockerAPITestClientWithVersion(t *testing.T, apiVersion string, handler http.HandlerFunc) *DockerClient {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	client, err := dockerclient.New(
 		dockerclient.WithHost(server.URL),
-		dockerclient.WithAPIVersion(testDockerAPIVersion),
+		dockerclient.WithAPIVersion(apiVersion),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
 	return &DockerClient{docker: client}
+}
+
+func TestDockerClientRejectsRawLegacyServiceLogResponses(t *testing.T) {
+	client := newDockerAPITestClientWithVersion(t, "1.41", func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1.41/services/service-id/logs" {
+			http.NotFound(response, request)
+			return
+		}
+		_, _ = io.WriteString(response, "legacy raw logs")
+	})
+	logs, err := client.GetServiceLogs(t.Context(), "service-id", LogRequest{Tail: 25})
+	if logs != nil || !errors.Is(err, ErrServiceLogsUnsupported) {
+		t.Fatalf("logs/error = %#v/%v", logs, err)
+	}
 }
 
 func dockerAPIPath(request *http.Request) string {
@@ -1217,6 +1235,10 @@ func TestDockerClientNetworkAndLogOperations(t *testing.T) {
 		case request.Method == http.MethodDelete && dockerAPIPath(request) == "/networks/network-id":
 			response.WriteHeader(http.StatusOK)
 		case request.Method == http.MethodGet && dockerAPIPath(request) == "/services/service-id/logs":
+			query := request.URL.Query()
+			if query.Get("tail") != "25" || query.Get("follow") != "1" || query.Get("stdout") != "1" || query.Get("stderr") != "1" || query.Has("timestamps") {
+				t.Fatalf("log query = %v", query)
+			}
 			_, _ = io.WriteString(response, "logs")
 		default:
 			http.NotFound(response, request)
@@ -1237,7 +1259,7 @@ func TestDockerClientNetworkAndLogOperations(t *testing.T) {
 	if err := client.RemoveNetwork(t.Context(), "network-id"); err != nil {
 		t.Fatal(err)
 	}
-	logs, err := client.GetServiceLogs(t.Context(), "service-id", "25", true)
+	logs, err := client.GetServiceLogs(t.Context(), "service-id", LogRequest{Tail: 25, Follow: true})
 	if err != nil {
 		t.Fatal(err)
 	}
