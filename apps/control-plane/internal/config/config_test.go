@@ -317,6 +317,14 @@ func TestLoadEnforcesProductionRequirements(t *testing.T) {
 			wantMessage: "DATABASE_PATH",
 		},
 		{
+			name: "queried bare memory database is forbidden",
+			configure: func(t *testing.T) {
+				t.Setenv("BASE_DOMAIN", "moduleos.example")
+				t.Setenv("DATABASE_PATH", ":memory:?_pragma=busy_timeout(1)")
+			},
+			wantMessage: "DATABASE_PATH",
+		},
+		{
 			name: "percent-encoded memory URI database is forbidden",
 			configure: func(t *testing.T) {
 				t.Setenv("BASE_DOMAIN", "moduleos.example")
@@ -388,6 +396,30 @@ func TestLoadEnforcesProductionRequirements(t *testing.T) {
 			},
 			wantMessage: "DATABASE_PATH",
 		},
+		{
+			name: "read-only mode is forbidden",
+			configure: func(t *testing.T) {
+				t.Setenv("BASE_DOMAIN", "moduleos.example")
+				t.Setenv("DATABASE_PATH", "file:moduleos.db?mode=ro")
+			},
+			wantMessage: "DATABASE_PATH",
+		},
+		{
+			name: "immutable mode is forbidden",
+			configure: func(t *testing.T) {
+				t.Setenv("BASE_DOMAIN", "moduleos.example")
+				t.Setenv("DATABASE_PATH", "file:moduleos.db?immutable=1")
+			},
+			wantMessage: "DATABASE_PATH",
+		},
+		{
+			name: "query-only pragma is forbidden",
+			configure: func(t *testing.T) {
+				t.Setenv("BASE_DOMAIN", "moduleos.example")
+				t.Setenv("DATABASE_PATH", "moduleos.db?_pragma=query_only(1)")
+			},
+			wantMessage: "DATABASE_PATH",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -409,16 +441,19 @@ func TestValidateProductionSQLiteDatabaseBoundaries(t *testing.T) {
 		databasePath string
 		wantError    bool
 	}{
-		{name: "persistent file URI", databasePath: "file:moduleos.db?cache=shared"},
 		{name: "ordinary filesystem path", databasePath: filepath.Join(t.TempDir(), "moduleos.db")},
 		{name: "literal NUL", databasePath: "moduleos.db\x00ignored", wantError: true},
 		{name: "malformed file URI", databasePath: "file://%gh", wantError: true},
+		{name: "persistent file URI", databasePath: "file:moduleos.db", wantError: true},
 		{name: "encoded NUL in query", databasePath: "file:moduleos.db?cache=%00", wantError: true},
 		{name: "encoded NUL in query key", databasePath: "file:moduleos.db?%00=value", wantError: true},
 		{name: "encoded NUL in fragment", databasePath: "file:moduleos.db#%00", wantError: true},
 		{name: "malformed file URI query", databasePath: "file:moduleos.db?cache=%zz", wantError: true},
 		{name: "locking override even when disabled", databasePath: "file:moduleos.db?nolock=0", wantError: true},
 		{name: "case-insensitive VFS selection", databasePath: "file:moduleos.db?VFS=unix-dotfile", wantError: true},
+		{name: "read-only URI mode", databasePath: "file:moduleos.db?mode=ro", wantError: true},
+		{name: "immutable URI", databasePath: "file:moduleos.db?immutable=1", wantError: true},
+		{name: "query-only pragma", databasePath: "moduleos.db?_pragma=query_only(1)", wantError: true},
 	}
 
 	for _, test := range tests {
@@ -549,6 +584,8 @@ func TestValidateRejectsUnsafeDockerEndpointFormsWithoutEchoingValues(t *testing
 		"UNIX:///run/docker.sock",
 		"unix://host/run/docker.sock",
 		"unix:///",
+		"unix:///run/docker.sock?",
+		"unix:///run/docker.sock#",
 		"unix:///run/docker\x00.sock",
 		"tcp://",
 		"tcp://docker.internal",
@@ -564,7 +601,9 @@ func TestValidateRejectsUnsafeDockerEndpointFormsWithoutEchoingValues(t *testing
 		"TCP://docker.internal:2375",
 		"tcp://user:super-secret@docker.internal:2375",
 		"tcp://docker.internal:2375/path",
+		"tcp://docker.internal:2375?",
 		"tcp://docker.internal:2375?token=super-secret",
+		"tcp://docker.internal:2375#",
 		"tcp://docker.internal:2375#fragment",
 		"tcp://[fe80::1%25en0]:2375",
 		"tcp://docker.internal:2375 ",

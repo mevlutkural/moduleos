@@ -3,6 +3,7 @@ package banner
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -44,11 +45,35 @@ func TestPrintRejectsMissingDevelopmentOutput(t *testing.T) {
 	if err := Print(nil, "v0.1.0", "development", "3000", "moduleos.example"); !errors.Is(err, ErrMissingOutput) {
 		t.Fatalf("Print error = %v, want ErrMissingOutput", err)
 	}
+	outputs := map[string]io.Writer{
+		"pointer":  (*bytes.Buffer)(nil),
+		"channel":  nilChannelWriter(nil),
+		"function": nilFunctionWriter(nil),
+		"map":      nilMapWriter(nil),
+		"slice":    nilSliceWriter(nil),
+	}
+	for name, output := range outputs {
+		t.Run(name, func(t *testing.T) {
+			if err := Print(output, "v0.1.0", "development", "3000", "moduleos.example"); !errors.Is(err, ErrMissingOutput) {
+				t.Fatalf("Print typed-nil error = %v, want ErrMissingOutput", err)
+			}
+		})
+	}
 }
 
 type failingWriter struct {
 	err error
 }
+
+type nilChannelWriter chan byte
+type nilFunctionWriter func()
+type nilMapWriter map[string]struct{}
+type nilSliceWriter []byte
+
+func (nilChannelWriter) Write([]byte) (int, error)  { panic("typed nil writer used") }
+func (nilFunctionWriter) Write([]byte) (int, error) { panic("typed nil writer used") }
+func (nilMapWriter) Write([]byte) (int, error)      { panic("typed nil writer used") }
+func (nilSliceWriter) Write([]byte) (int, error)    { panic("typed nil writer used") }
 
 func (writer failingWriter) Write([]byte) (int, error) {
 	return 0, writer.err

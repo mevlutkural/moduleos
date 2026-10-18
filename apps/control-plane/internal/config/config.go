@@ -278,7 +278,11 @@ func safeConfigurationParseError(parseErr error) error {
 }
 
 func isSQLiteMemoryDatabase(value string) bool {
-	if strings.EqualFold(value, ":memory:") {
+	driverName := value
+	if queryIndex := strings.IndexRune(value, '?'); queryIndex >= 1 && !strings.HasPrefix(value, "file:") {
+		driverName = value[:queryIndex]
+	}
+	if strings.EqualFold(driverName, ":memory:") {
 		return true
 	}
 	parsed, err := url.Parse(value)
@@ -292,6 +296,9 @@ func isSQLiteMemoryDatabase(value string) bool {
 	decodedName, err := url.PathUnescape(databaseName)
 	if err != nil {
 		return true
+	}
+	if nulIndex := strings.IndexRune(decodedName, '\x00'); nulIndex >= 0 {
+		decodedName = decodedName[:nulIndex]
 	}
 	if decodedName == "" || strings.EqualFold(decodedName, ":memory:") {
 		return true
@@ -311,54 +318,21 @@ func isSQLiteMemoryDatabase(value string) bool {
 }
 
 func validateProductionSQLiteDatabase(value string) error {
-	if strings.ContainsRune(value, '\x00') {
-		return errors.New("cannot contain NUL characters")
+	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return errors.New("cannot contain control characters")
 	}
 	if isSQLiteMemoryDatabase(value) {
 		return errors.New("cannot use an in-memory database in production")
 	}
-
+	if strings.ContainsRune(value, '?') {
+		return errors.New("must be a filesystem path without SQLite URI query parameters")
+	}
 	parsed, err := url.Parse(value)
 	if err != nil {
-		if strings.HasPrefix(strings.ToLower(value), "file:") {
-			return errors.New("must use a valid file URI")
-		}
-		return nil
+		return errors.New("must be a valid filesystem path")
 	}
-	if !strings.EqualFold(parsed.Scheme, "file") {
-		return nil
-	}
-	databaseName := parsed.Opaque
-	if databaseName == "" {
-		databaseName = parsed.Path
-	}
-	decodedName, err := url.PathUnescape(databaseName)
-	if err != nil {
-		return errors.New("must use a valid file URI")
-	}
-	if strings.ContainsRune(decodedName, '\x00') || strings.ContainsRune(parsed.Fragment, '\x00') {
-		return errors.New("cannot contain encoded NUL characters")
-	}
-
-	query, err := url.ParseQuery(parsed.RawQuery)
-	if err != nil {
-		return errors.New("must use a valid file URI query")
-	}
-	for key, values := range query {
-		if strings.ContainsRune(key, '\x00') {
-			return errors.New("cannot contain encoded NUL characters")
-		}
-		for _, candidate := range values {
-			if strings.ContainsRune(candidate, '\x00') {
-				return errors.New("cannot contain encoded NUL characters")
-			}
-		}
-		if strings.EqualFold(key, "nolock") {
-			return errors.New("cannot override SQLite locking in production")
-		}
-		if strings.EqualFold(key, "vfs") {
-			return errors.New("cannot select a SQLite VFS in production")
-		}
+	if parsed.Scheme != "" {
+		return errors.New("must be a filesystem path, not a URI")
 	}
 	return nil
 }
@@ -432,6 +406,9 @@ func parseDockerEndpoint(value string) (dockerEndpointIdentity, error) {
 	}
 	if !strings.HasPrefix(value, "unix://") && !strings.HasPrefix(value, "tcp://") {
 		return dockerEndpointIdentity{}, errors.New("must be unix://, tcp://, or an absolute Unix socket path")
+	}
+	if strings.ContainsAny(value, "?#") {
+		return dockerEndpointIdentity{}, errors.New("must not contain a query or fragment")
 	}
 
 	parsed, err := url.Parse(value)
