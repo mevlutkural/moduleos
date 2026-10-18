@@ -152,8 +152,10 @@ func (c *Config) Validate() error {
 	if !resourceName.MatchString(c.IngressNetwork) {
 		return fmt.Errorf("INGRESS_NETWORK contains invalid characters")
 	}
-	if c.APIKey != "" && strings.ContainsAny(c.APIKey, " \t\r\n") {
-		return fmt.Errorf("API_KEY cannot contain whitespace")
+	if c.APIKey != "" && strings.IndexFunc(c.APIKey, func(character rune) bool {
+		return unicode.IsSpace(character) || unicode.IsControl(character)
+	}) >= 0 {
+		return fmt.Errorf("API_KEY cannot contain whitespace or control characters")
 	}
 	if c.Env == "production" && len(c.APIKey) < 32 {
 		return fmt.Errorf("API_KEY must contain at least 32 characters in production")
@@ -161,8 +163,10 @@ func (c *Config) Validate() error {
 	if c.DatabasePath == "" {
 		return fmt.Errorf("DATABASE_PATH cannot be empty")
 	}
-	if c.Env == "production" && isSQLiteMemoryDatabase(c.DatabasePath) {
-		return fmt.Errorf("DATABASE_PATH cannot use an in-memory database in production")
+	if c.Env == "production" {
+		if err := validateProductionSQLiteDatabase(c.DatabasePath); err != nil {
+			return fmt.Errorf("DATABASE_PATH %w", err)
+		}
 	}
 	if c.DatabasePath != ":memory:" {
 		parent := filepath.Dir(c.DatabasePath)
@@ -304,6 +308,59 @@ func isSQLiteMemoryDatabase(value string) bool {
 		}
 	}
 	return false
+}
+
+func validateProductionSQLiteDatabase(value string) error {
+	if strings.ContainsRune(value, '\x00') {
+		return errors.New("cannot contain NUL characters")
+	}
+	if isSQLiteMemoryDatabase(value) {
+		return errors.New("cannot use an in-memory database in production")
+	}
+
+	parsed, err := url.Parse(value)
+	if err != nil {
+		if strings.HasPrefix(strings.ToLower(value), "file:") {
+			return errors.New("must use a valid file URI")
+		}
+		return nil
+	}
+	if !strings.EqualFold(parsed.Scheme, "file") {
+		return nil
+	}
+	databaseName := parsed.Opaque
+	if databaseName == "" {
+		databaseName = parsed.Path
+	}
+	decodedName, err := url.PathUnescape(databaseName)
+	if err != nil {
+		return errors.New("must use a valid file URI")
+	}
+	if strings.ContainsRune(decodedName, '\x00') || strings.ContainsRune(parsed.Fragment, '\x00') {
+		return errors.New("cannot contain encoded NUL characters")
+	}
+
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return errors.New("must use a valid file URI query")
+	}
+	for key, values := range query {
+		if strings.ContainsRune(key, '\x00') {
+			return errors.New("cannot contain encoded NUL characters")
+		}
+		for _, candidate := range values {
+			if strings.ContainsRune(candidate, '\x00') {
+				return errors.New("cannot contain encoded NUL characters")
+			}
+		}
+		if strings.EqualFold(key, "nolock") {
+			return errors.New("cannot override SQLite locking in production")
+		}
+		if strings.EqualFold(key, "vfs") {
+			return errors.New("cannot select a SQLite VFS in production")
+		}
+	}
+	return nil
 }
 
 func validateExplicitEnvironment(environment map[string]environmentValue) error {

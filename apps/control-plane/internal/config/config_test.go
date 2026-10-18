@@ -172,6 +172,9 @@ func TestValidateRejectsInvalidConfigurationBoundaries(t *testing.T) {
 		{name: "ingress network", mutate: func(c *config.Config) { c.IngressNetwork = "Invalid Network" }, wantMessage: "INGRESS_NETWORK"},
 		{name: "production API key", mutate: func(c *config.Config) { c.Env = "production" }, wantMessage: "API_KEY"},
 		{name: "API key whitespace", mutate: func(c *config.Config) { c.APIKey = "invalid key" }, wantMessage: "API_KEY"},
+		{name: "API key NUL", mutate: func(c *config.Config) { c.APIKey = "invalid\x00key" }, wantMessage: "API_KEY"},
+		{name: "API key vertical tab", mutate: func(c *config.Config) { c.APIKey = "invalid\vkey" }, wantMessage: "API_KEY"},
+		{name: "API key Unicode whitespace", mutate: func(c *config.Config) { c.APIKey = "invalid\u00a0key" }, wantMessage: "API_KEY"},
 		{name: "empty database path", mutate: func(c *config.Config) { c.DatabasePath = "" }, wantMessage: "DATABASE_PATH"},
 		{name: "production memory database", mutate: func(c *config.Config) { c.Env = "production"; c.APIKey = strings.Repeat("a", 32) }, wantMessage: "DATABASE_PATH"},
 		{name: "missing database parent", mutate: func(c *config.Config) { c.DatabasePath = missingDatabase }, wantMessage: "DATABASE_PATH"},
@@ -322,6 +325,14 @@ func TestLoadEnforcesProductionRequirements(t *testing.T) {
 			wantMessage: "DATABASE_PATH",
 		},
 		{
+			name: "NUL-truncated memory URI database is forbidden",
+			configure: func(t *testing.T) {
+				t.Setenv("BASE_DOMAIN", "moduleos.example")
+				t.Setenv("DATABASE_PATH", "file:%3Amemory%3A%00ignored")
+			},
+			wantMessage: "DATABASE_PATH",
+		},
+		{
 			name: "empty file URI database is forbidden",
 			configure: func(t *testing.T) {
 				t.Setenv("BASE_DOMAIN", "moduleos.example")
@@ -353,6 +364,30 @@ func TestLoadEnforcesProductionRequirements(t *testing.T) {
 			},
 			wantMessage: "DATABASE_PATH",
 		},
+		{
+			name: "locking override is forbidden",
+			configure: func(t *testing.T) {
+				t.Setenv("BASE_DOMAIN", "moduleos.example")
+				t.Setenv("DATABASE_PATH", "file:moduleos.db?nolock=1")
+			},
+			wantMessage: "DATABASE_PATH",
+		},
+		{
+			name: "encoded locking override is forbidden",
+			configure: func(t *testing.T) {
+				t.Setenv("BASE_DOMAIN", "moduleos.example")
+				t.Setenv("DATABASE_PATH", "file:moduleos.db?%6eolock=1")
+			},
+			wantMessage: "DATABASE_PATH",
+		},
+		{
+			name: "custom VFS selection is forbidden",
+			configure: func(t *testing.T) {
+				t.Setenv("BASE_DOMAIN", "moduleos.example")
+				t.Setenv("DATABASE_PATH", "file:moduleos.db?vfs=unix-dotfile")
+			},
+			wantMessage: "DATABASE_PATH",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -363,6 +398,45 @@ func TestLoadEnforcesProductionRequirements(t *testing.T) {
 			_, err := config.Load()
 			if err == nil || !strings.Contains(err.Error(), test.wantMessage) {
 				t.Fatalf("Load() error = %v, want %s", err, test.wantMessage)
+			}
+		})
+	}
+}
+
+func TestValidateProductionSQLiteDatabaseBoundaries(t *testing.T) {
+	tests := []struct {
+		name         string
+		databasePath string
+		wantError    bool
+	}{
+		{name: "persistent file URI", databasePath: "file:moduleos.db?cache=shared"},
+		{name: "ordinary filesystem path", databasePath: filepath.Join(t.TempDir(), "moduleos.db")},
+		{name: "literal NUL", databasePath: "moduleos.db\x00ignored", wantError: true},
+		{name: "malformed file URI", databasePath: "file://%gh", wantError: true},
+		{name: "encoded NUL in query", databasePath: "file:moduleos.db?cache=%00", wantError: true},
+		{name: "encoded NUL in query key", databasePath: "file:moduleos.db?%00=value", wantError: true},
+		{name: "encoded NUL in fragment", databasePath: "file:moduleos.db#%00", wantError: true},
+		{name: "malformed file URI query", databasePath: "file:moduleos.db?cache=%zz", wantError: true},
+		{name: "locking override even when disabled", databasePath: "file:moduleos.db?nolock=0", wantError: true},
+		{name: "case-insensitive VFS selection", databasePath: "file:moduleos.db?VFS=unix-dotfile", wantError: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Env = "production"
+			cfg.APIKey = strings.Repeat("k", 32)
+			cfg.DatabasePath = test.databasePath
+
+			err := cfg.Validate()
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "DATABASE_PATH") {
+					t.Fatalf("Validate() error = %v, want DATABASE_PATH error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() error = %v, want nil", err)
 			}
 		})
 	}
