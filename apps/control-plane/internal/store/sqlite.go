@@ -31,11 +31,56 @@ type SQLiteStore struct {
 	deploymentCommit func(*sql.Tx) error
 }
 
+type sqliteInitializationDependencies struct {
+	open          func(string) (*sql.DB, error)
+	applyPragmas  func(*sql.DB) error
+	runMigrations func(*SQLiteStore) error
+}
+
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	return newSQLiteStore(dbPath, sqliteInitializationDependencies{
+		open: func(path string) (*sql.DB, error) {
+			return sql.Open("sqlite", path)
+		},
+		applyPragmas: applySQLitePragmas,
+		runMigrations: func(store *SQLiteStore) error {
+			return store.runMigrations()
+		},
+	})
+}
+
+func newSQLiteStore(dbPath string, dependencies sqliteInitializationDependencies) (*SQLiteStore, error) {
+	if dependencies.open == nil || dependencies.applyPragmas == nil || dependencies.runMigrations == nil {
+		return nil, fmt.Errorf("failed to initialize database: initialization dependencies are incomplete")
+	}
+	db, err := dependencies.open(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
+	if db == nil {
+		return nil, fmt.Errorf("failed to open database: database handle is nil")
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			_ = db.Close()
+		}
+	}()
+
+	if err := dependencies.applyPragmas(db); err != nil {
+		return nil, fmt.Errorf("failed to apply pragma settings: %w", err)
+	}
+
+	store := &SQLiteStore{db: db}
+	if err := dependencies.runMigrations(store); err != nil {
+		return nil, fmt.Errorf("migration failed: %w", err)
+	}
+
+	transferred = true
+	return store, nil
+}
+
+func applySQLitePragmas(db *sql.DB) error {
 	// SQLite pragmas such as foreign_keys are connection-local. Keeping one
 	// connection guarantees every query observes the same FK and busy-timeout
 	// policy and also makes :memory: databases deterministic in tests.
@@ -43,21 +88,12 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	db.SetMaxIdleConns(1)
 
 	// recommended pragma settings for SQLite
-	if _, err := db.Exec(`
+	_, err := db.Exec(`
 		PRAGMA journal_mode=WAL;
 		PRAGMA foreign_keys=ON;
 		PRAGMA busy_timeout=5000;
-	`); err != nil {
-		return nil, fmt.Errorf("failed to apply pragma settings: %w", err)
-	}
-
-	store := &SQLiteStore{db: db}
-
-	if err := store.runMigrations(); err != nil {
-		return nil, fmt.Errorf("migration failed: %w", err)
-	}
-
-	return store, nil
+	`)
+	return err
 }
 
 func (s *SQLiteStore) runMigrations() error {

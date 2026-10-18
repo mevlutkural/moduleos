@@ -1,21 +1,50 @@
 package banner
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"io"
+	"reflect"
+)
 
-func Print(version, env, port, domain string) {
-	fmt.Println()
-	fmt.Println(`  ███╗   ███╗ ██████╗ ██████╗ ██╗   ██╗██╗     ███████╗ ██████╗ ███████╗`)
-	fmt.Println(`  ████╗ ████║██╔═══██╗██╔══██╗██║   ██║██║     ██╔════╝██╔═══██╗██╔════╝`)
-	fmt.Println(`  ██╔████╔██║██║   ██║██║  ██║██║   ██║██║     █████╗  ██║   ██║███████╗`)
-	fmt.Println(`  ██║╚██╔╝██║██║   ██║██║  ██║██║   ██║██║     ██╔══╝  ██║   ██║╚════██║`)
-	fmt.Println(`  ██║ ╚═╝ ██║╚██████╔╝██████╔╝╚██████╔╝███████╗███████╗╚██████╔╝███████║`)
-	fmt.Println(`  ╚═╝     ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝ ╚══════╝╚══════╝ ╚═════╝ ╚══════╝`)
-	fmt.Println()
-	fmt.Printf("  version    %s\n", version)
-	fmt.Printf("  env        %s\n", env)
-	fmt.Printf("  port       :%s\n", port)
-	fmt.Printf("  domain     *.%s\n", domain)
-	fmt.Println()
-	fmt.Println("  ─────────────────────────────────────────────────────────────────────")
-	fmt.Println()
+var ErrMissingOutput = errors.New("banner output is required in development")
+
+func Print(output io.Writer, version, environment, port, domain string) error {
+	if environment != "development" {
+		return nil
+	}
+	if isNilWriter(output) {
+		return ErrMissingOutput
+	}
+	banner := fmt.Sprintf(`
+  ███╗   ███╗ ██████╗ ██████╗ ██╗   ██╗██╗     ███████╗ ██████╗ ███████╗
+  ████╗ ████║██╔═══██╗██╔══██╗██║   ██║██║     ██╔════╝██╔═══██╗██╔════╝
+  ██╔████╔██║██║   ██║██║  ██║██║   ██║██║     █████╗  ██║   ██║███████╗
+  ██║╚██╔╝██║██║   ██║██║  ██║██║   ██║██║     ██╔══╝  ██║   ██║╚════██║
+  ██║ ╚═╝ ██║╚██████╔╝██████╔╝╚██████╔╝███████╗███████╗╚██████╔╝███████║
+  ╚═╝     ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝ ╚══════╝╚══════╝ ╚═════╝ ╚══════╝
+
+  version    %s
+  env        %s
+  port       :%s
+  domain     *.%s
+
+  ─────────────────────────────────────────────────────────────────────
+
+`, version, environment, port, domain)
+	_, err := io.WriteString(output, banner)
+	return err
+}
+
+func isNilWriter(output io.Writer) bool {
+	if output == nil {
+		return true
+	}
+	value := reflect.ValueOf(output)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
