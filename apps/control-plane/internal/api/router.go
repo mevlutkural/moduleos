@@ -4,9 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +12,7 @@ import (
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/api/apiresponse"
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/api/handler"
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/api/middleware"
+	"github.com/mevlutkural/moduleos/apps/control-plane/internal/config"
 	"github.com/valyala/fasthttp"
 )
 
@@ -240,46 +238,5 @@ func asciiLowerDigit(value byte) bool {
 }
 
 func normalizeOrigins(origins []string) ([]string, error) {
-	if len(origins) == 0 {
-		return nil, nil
-	}
-	unique := make(map[string]struct{}, len(origins))
-	for _, raw := range origins {
-		raw = strings.TrimSpace(raw)
-		parsed, err := url.Parse(raw)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.Path != "" || parsed.RawPath != "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(parsed.Host, "*") || strings.HasSuffix(parsed.Host, ":") {
-			return nil, fmt.Errorf("CORS origin %q must be an exact HTTP or HTTPS origin", raw)
-		}
-		if port := parsed.Port(); port != "" {
-			value, err := strconv.Atoi(port)
-			if err != nil || value < 1 || value > 65535 {
-				return nil, fmt.Errorf("CORS origin %q must use a port between 1 and 65535", raw)
-			}
-		}
-		scheme := strings.ToLower(parsed.Scheme)
-		hostname := strings.ToLower(parsed.Hostname())
-		if strings.Contains(hostname, "%") {
-			return nil, fmt.Errorf("CORS origin %q must not contain an IPv6 zone identifier", raw)
-		}
-		port := parsed.Port()
-		if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
-			port = ""
-		}
-		host := hostname
-		if strings.Contains(hostname, ":") {
-			host = "[" + hostname + "]"
-		}
-		if port != "" {
-			host += ":" + port
-		}
-		normalized := scheme + "://" + host
-		unique[normalized] = struct{}{}
-	}
-
-	result := make([]string, 0, len(unique))
-	for origin := range unique {
-		result = append(result, origin)
-	}
-	sort.Strings(result)
-	return result, nil
+	return config.NormalizeCORSOrigins(origins)
 }
