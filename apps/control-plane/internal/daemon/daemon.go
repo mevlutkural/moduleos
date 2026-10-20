@@ -69,13 +69,14 @@ func (arbiter *terminalArbiter) report(result componentResult) {
 	close(arbiter.done)
 }
 
-func (arbiter *terminalArbiter) beginStartup() bool {
+func (arbiter *terminalArbiter) beginStartup(start func()) bool {
 	arbiter.mu.Lock()
 	defer arbiter.mu.Unlock()
 	if arbiter.terminated || arbiter.startupBegun {
 		return false
 	}
 	arbiter.startupBegun = true
+	start()
 	return true
 }
 
@@ -176,13 +177,14 @@ func (d *Daemon) Run(operator context.Context) Outcome {
 	serverStarted := false
 	var serverGate *completionGate
 	if primary == nil {
-		started := make(chan struct{})
-		serverGate = &completionGate{}
-		serverGroup.Add(1)
-		serverStarted = true
-		go d.runServer(serverGate, started, arbiter, results, &serverGroup)
-		<-started
-		if !arbiter.beginStartup() {
+		if !arbiter.beginStartup(func() {
+			started := make(chan struct{})
+			serverGate = &completionGate{}
+			serverGroup.Add(1)
+			serverStarted = true
+			go d.runServer(serverGate, started, arbiter, results, &serverGroup)
+			<-started
+		}) {
 			primary = arbiter.poll()
 		}
 	}
@@ -272,6 +274,7 @@ func (d *Daemon) shutdown(outcome Outcome, cancelWorkers context.CancelFunc, res
 	shutdownContext, cancel := context.WithTimeout(context.Background(), d.shutdownTimeout)
 	defer cancel()
 
+	serverDrained := !serverStarted
 	serverStopped := !serverStarted
 	if serverStarted {
 		if completed, didPanic := boundedAction(shutdownContext, d.readiness.SetDraining); !completed {
@@ -289,6 +292,8 @@ func (d *Daemon) shutdown(outcome Outcome, cancelWorkers context.CancelFunc, res
 		} else if err != nil || didPanic {
 			outcome.ShutdownFailed = true
 			outcome.Panicked = outcome.Panicked || didPanic
+		} else {
+			serverDrained = true
 		}
 
 	}
@@ -331,10 +336,10 @@ func (d *Daemon) shutdown(outcome Outcome, cancelWorkers context.CancelFunc, res
 		outcome.ShutdownFailed = true
 	}
 
-	if serverStopped && workersStopped {
+	if serverDrained && serverStopped && workersStopped {
 		for index := len(d.cleanups) - 1; index >= 0; index-- {
 			cleanup := d.cleanups[index]
-			err, completed, didPanic := boundedCleanup(shutdownContext, cleanup.Run)
+			err, completed, didPanic := runCleanup(shutdownContext, cleanup.Run)
 			if !completed {
 				outcome.DeadlineExpired = true
 				outcome.CleanupFailed = true
@@ -583,29 +588,18 @@ func boundedAction(ctx context.Context, function func()) (bool, bool) {
 	}
 }
 
-func boundedCleanup(ctx context.Context, function func(context.Context) error) (err error, completed, didPanic bool) {
-	type result struct {
-		err      error
-		panicked bool
-	}
+func runCleanup(ctx context.Context, function func(context.Context) error) (err error, completed, didPanic bool) {
 	if ctx.Err() != nil {
 		return nil, false, false
 	}
-	results := make(chan result, 1)
-	go func() {
-		value := result{}
-		func() {
-			defer func() { value.panicked = recover() != nil }()
-			value.err = function(ctx)
-		}()
-		results <- value
+	completed = true
+	defer func() {
+		if recover() != nil {
+			didPanic = true
+		}
 	}()
-	select {
-	case value := <-results:
-		return value.err, true, value.panicked
-	case <-ctx.Done():
-		return nil, false, false
-	}
+	err = function(ctx)
+	return err, completed, false
 }
 
 func waitGroup(ctx context.Context, group *sync.WaitGroup) bool {

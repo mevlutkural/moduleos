@@ -310,15 +310,57 @@ func TestTerminalArbiterRetainsFirstArrival(t *testing.T) {
 func TestTerminalArbiterSerializesStartupDecision(t *testing.T) {
 	terminated := newTerminalArbiter()
 	terminated.report(componentResult{kind: CauseWorker, component: "reconciler"})
-	if terminated.beginStartup() {
+	var serveCalls atomic.Int32
+	if terminated.beginStartup(func() { serveCalls.Add(1) }) {
 		t.Fatal("startup began after termination")
+	}
+	if serveCalls.Load() != 0 {
+		t.Fatal("server launch ran after termination")
 	}
 
 	running := newTerminalArbiter()
-	if !running.beginStartup() {
+	launchEntered := make(chan struct{})
+	launchLockHeld := make(chan bool, 1)
+	releaseLaunch := make(chan struct{})
+	startupDone := make(chan bool, 1)
+	go func() {
+		startupDone <- running.beginStartup(func() {
+			serveCalls.Add(1)
+			if running.mu.TryLock() {
+				running.mu.Unlock()
+				launchLockHeld <- false
+			} else {
+				launchLockHeld <- true
+			}
+			close(launchEntered)
+			<-releaseLaunch
+		})
+	}()
+	waitSignal(t, launchEntered)
+	if !<-launchLockHeld {
+		t.Fatal("startup launch ran outside the terminal arbitration lock")
+	}
+	reportAttempted := make(chan struct{})
+	reportDone := make(chan struct{})
+	go func() {
+		close(reportAttempted)
+		running.report(componentResult{kind: CauseOperator})
+		close(reportDone)
+	}()
+	waitSignal(t, reportAttempted)
+	select {
+	case <-reportDone:
+		t.Fatal("terminal report interleaved with the atomic startup decision")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseLaunch)
+	if !<-startupDone {
 		t.Fatal("startup was rejected before termination")
 	}
-	running.report(componentResult{kind: CauseOperator})
+	waitSignal(t, reportDone)
+	if serveCalls.Load() != 1 {
+		t.Fatalf("server launch calls = %d", serveCalls.Load())
+	}
 	if trigger := running.poll(); trigger == nil || trigger.kind != CauseOperator {
 		t.Fatalf("trigger = %+v", trigger)
 	}
@@ -699,7 +741,7 @@ func TestListenerCloseFailuresAndExpiredHelpers(t *testing.T) {
 	if completed, _ := boundedAction(ctx, func() { t.Fatal("expired action ran") }); completed {
 		t.Fatal("expired action completed")
 	}
-	if _, completed, _ := boundedCleanup(ctx, func(context.Context) error { t.Fatal("expired cleanup ran"); return nil }); completed {
+	if _, completed, _ := runCleanup(ctx, func(context.Context) error { t.Fatal("expired cleanup ran"); return nil }); completed {
 		t.Fatal("expired cleanup completed")
 	}
 }
@@ -797,9 +839,6 @@ func TestGlobalDeadlineBoundsWorkerAndCleanup(t *testing.T) {
 		{name: "worker ignores cancellation", configure: func(options *Options, entered, release chan struct{}) {
 			options.Workers[0].Run = func(context.Context) error { close(entered); <-release; return nil }
 		}},
-		{name: "cleanup ignores cancellation", configure: func(options *Options, entered, release chan struct{}) {
-			options.Cleanups = []Cleanup{{Name: "blocked", Run: func(context.Context) error { close(entered); <-release; return nil }}}
-		}},
 		{name: "readiness ignores cancellation", configure: func(options *Options, entered, release chan struct{}) {
 			options.Readiness = &testReadiness{drain: func() { close(entered); <-release }}
 		}},
@@ -830,6 +869,48 @@ func TestGlobalDeadlineBoundsWorkerAndCleanup(t *testing.T) {
 				t.Fatalf("outcome = %+v", outcome)
 			}
 		})
+	}
+}
+
+func TestCleanupCancellationIsJoined(t *testing.T) {
+	options := validOptions()
+	options.ShutdownTimeout = 10 * time.Millisecond
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	options.Cleanups = []Cleanup{{Name: "blocked", Run: func(ctx context.Context) error {
+		close(entered)
+		<-ctx.Done()
+		close(canceled)
+		<-release
+		close(returned)
+		return ctx.Err()
+	}}}
+	started := make(chan struct{})
+	server := options.Server.(*testServer)
+	options.Server = &testServer{serve: func(listener net.Listener) error { close(started); return server.serve(listener) }, shutdown: server.shutdown}
+	daemon, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	outcomes := make(chan Outcome, 1)
+	go func() { outcomes <- daemon.Run(ctx) }()
+	waitSignal(t, started)
+	cancel()
+	waitSignal(t, entered)
+	waitSignal(t, canceled)
+	select {
+	case outcome := <-outcomes:
+		t.Fatalf("daemon returned before cleanup joined: %+v", outcome)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	waitSignal(t, returned)
+	outcome := receiveOutcome(t, outcomes)
+	if !outcome.DeadlineExpired || !outcome.CleanupFailed || outcome.ExitCode != 1 {
+		t.Fatalf("outcome = %+v", outcome)
 	}
 }
 
@@ -874,11 +955,11 @@ func TestCleanupDeadlineDoesNotStartEarlierEntries(t *testing.T) {
 	options := validOptions()
 	options.ShutdownTimeout = 100 * time.Millisecond
 	blocked := make(chan struct{})
-	release := make(chan struct{})
+	done := make(chan struct{})
 	var earlier atomic.Int32
 	options.Cleanups = []Cleanup{
 		{Name: "earlier", Run: func(context.Context) error { earlier.Add(1); return nil }},
-		{Name: "blocked", Run: func(context.Context) error { close(blocked); <-release; return nil }},
+		{Name: "blocked", Run: func(ctx context.Context) error { close(blocked); <-ctx.Done(); close(done); return ctx.Err() }},
 	}
 	started := make(chan struct{})
 	server := options.Server.(*testServer)
@@ -894,7 +975,7 @@ func TestCleanupDeadlineDoesNotStartEarlierEntries(t *testing.T) {
 	cancel()
 	waitSignal(t, blocked)
 	outcome := receiveOutcome(t, outcomes)
-	close(release)
+	waitSignal(t, done)
 	if !outcome.DeadlineExpired || earlier.Load() != 0 {
 		t.Fatalf("outcome=%+v earlier=%d", outcome, earlier.Load())
 	}
@@ -941,38 +1022,53 @@ func TestDependenciesRemainOwnedUntilServerAndWorkersStop(t *testing.T) {
 		}
 	})
 
-	t.Run("failed graceful drain retains failure and still cleans stopped components", func(t *testing.T) {
-		listener := newTestListener()
-		serverStarted := make(chan struct{})
-		var cleanupCalls atomic.Int32
-		options := validOptions()
-		options.Listener = listener
-		options.Server = &testServer{
-			serve: func(bound net.Listener) error {
-				close(serverStarted)
-				_, err := bound.Accept()
-				return err
-			},
-			shutdown: func(context.Context) error { return errors.New("drain failed") },
-		}
-		options.Cleanups = []Cleanup{{Name: "store", Run: func(context.Context) error {
-			cleanupCalls.Add(1)
-			return nil
-		}}}
-		daemon, err := New(options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		outcomes := make(chan Outcome, 1)
-		go func() { outcomes <- daemon.Run(ctx) }()
-		waitSignal(t, serverStarted)
-		cancel()
-		outcome := receiveOutcome(t, outcomes)
-		if cleanupCalls.Load() != 1 || !outcome.ShutdownFailed || outcome.CleanupFailed {
-			t.Fatalf("outcome=%+v cleanup calls=%d", outcome, cleanupCalls.Load())
-		}
-	})
+	for _, test := range []struct {
+		name            string
+		shutdown        func(context.Context) error
+		wantPanicked    bool
+		wantDeadline    bool
+		shutdownTimeout time.Duration
+	}{
+		{name: "shutdown error", shutdown: func(context.Context) error { return errors.New("drain failed") }},
+		{name: "shutdown panic", shutdown: func(context.Context) error { panic("drain panic") }, wantPanicked: true},
+		{name: "shutdown deadline", shutdown: func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }, wantDeadline: true, shutdownTimeout: 10 * time.Millisecond},
+	} {
+		t.Run(test.name+" retains dependencies", func(t *testing.T) {
+			listener := newTestListener()
+			serverStarted := make(chan struct{})
+			var cleanupCalls atomic.Int32
+			options := validOptions()
+			options.Listener = listener
+			if test.shutdownTimeout > 0 {
+				options.ShutdownTimeout = test.shutdownTimeout
+			}
+			options.Server = &testServer{
+				serve: func(bound net.Listener) error {
+					close(serverStarted)
+					_, err := bound.Accept()
+					return err
+				},
+				shutdown: test.shutdown,
+			}
+			options.Cleanups = []Cleanup{{Name: "store", Run: func(context.Context) error {
+				cleanupCalls.Add(1)
+				return nil
+			}}}
+			daemon, err := New(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			outcomes := make(chan Outcome, 1)
+			go func() { outcomes <- daemon.Run(ctx) }()
+			waitSignal(t, serverStarted)
+			cancel()
+			outcome := receiveOutcome(t, outcomes)
+			if cleanupCalls.Load() != 0 || !outcome.ShutdownFailed || !outcome.CleanupFailed || outcome.Panicked != test.wantPanicked || outcome.DeadlineExpired != test.wantDeadline {
+				t.Fatalf("outcome=%+v cleanup calls=%d", outcome, cleanupCalls.Load())
+			}
+		})
+	}
 
 	t.Run("active worker prevents cleanup", func(t *testing.T) {
 		workerStarted := make(chan struct{})

@@ -34,7 +34,8 @@ type Worker struct {
 	Run  func(context.Context) error
 }
 
-// Cleanup describes one named resource release operation.
+// Cleanup describes one named resource release operation. Run must honor
+// context cancellation and return before its deadline so shutdown can join it.
 type Cleanup struct {
 	Name string
 	Run  func(context.Context) error

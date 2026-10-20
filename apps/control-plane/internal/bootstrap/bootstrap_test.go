@@ -376,17 +376,45 @@ func TestRegistrarRejectsInvalidDuplicateAndPostUnwindUse(t *testing.T) {
 
 func TestUnwindHonorsSingleDeadline(t *testing.T) {
 	started := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	cleanupReturned := make(chan struct{})
+	unwindReturned := make(chan struct{})
 	var earlier atomic.Int32
-	unwind([]daemon.Cleanup{
-		{Name: "earlier", Run: func(context.Context) error { earlier.Add(1); return nil }},
-		{Name: "blocked", Run: func(ctx context.Context) error { close(started); <-ctx.Done(); return ctx.Err() }},
-	}, 5*time.Millisecond)
+	go func() {
+		unwind([]daemon.Cleanup{
+			{Name: "earlier", Run: func(context.Context) error { earlier.Add(1); return nil }},
+			{Name: "blocked", Run: func(ctx context.Context) error {
+				close(started)
+				<-ctx.Done()
+				close(canceled)
+				<-release
+				close(cleanupReturned)
+				return ctx.Err()
+			}},
+		}, 5*time.Millisecond)
+		close(unwindReturned)
+	}()
+	waitBootstrapSignal(t, started)
+	waitBootstrapSignal(t, canceled)
 	select {
-	case <-started:
-	default:
-		t.Fatal("cleanup did not start")
+	case <-unwindReturned:
+		t.Fatal("unwind returned before the canceled cleanup joined")
+	case <-time.After(20 * time.Millisecond):
 	}
+	close(release)
+	waitBootstrapSignal(t, cleanupReturned)
+	waitBootstrapSignal(t, unwindReturned)
 	if earlier.Load() != 0 {
 		t.Fatalf("cleanup started after deadline: %d", earlier.Load())
+	}
+}
+
+func waitBootstrapSignal(t *testing.T, signal <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for bootstrap lifecycle barrier")
 	}
 }

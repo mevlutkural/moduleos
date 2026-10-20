@@ -192,17 +192,13 @@ func unwindContext(entries []daemon.Cleanup, ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		done := make(chan struct{}, 1)
-		go func(cleanup daemon.Cleanup) {
-			defer func() { _ = recover(); done <- struct{}{} }()
-			_ = cleanup.Run(ctx)
-		}(entries[index])
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return
-		}
+		runCleanup(ctx, entries[index])
 	}
+}
+
+func runCleanup(ctx context.Context, cleanup daemon.Cleanup) {
+	defer func() { _ = recover() }()
+	_ = cleanup.Run(ctx)
 }
 
 func isNilInterface(value any) bool {
