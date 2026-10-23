@@ -18,6 +18,27 @@ go test ./apps/control-plane/...
 
 The production daemon built from this application is named `moduleosd`.
 
+Build it from the repository root:
+
+```sh
+CGO_ENABLED=0 go build -trimpath -o ./moduleosd ./apps/control-plane/cmd/moduleosd
+```
+
+For a local development run, make the data root available and start the
+daemon with development defaults:
+
+```sh
+mkdir -p /tmp/moduleos-data
+ALLOWED_MOUNT_ROOTS=/tmp/moduleos-data \
+DATABASE_PATH=/tmp/moduleos.db \
+go run ./apps/control-plane/cmd/moduleosd
+```
+
+Genesis controls the Docker Engine on the same host through a local Unix
+socket. The default endpoint is `unix:///var/run/docker.sock`; containers must
+mount that socket at the configured path. Remote Docker transports are not
+supported.
+
 ## Runtime-log limits
 
 Runtime log snapshots and live SSE sessions are bounded control-plane

@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -249,24 +250,23 @@ func TestToServiceInfoProjectsDockerStatus(t *testing.T) {
 }
 
 func TestDockerClientConstructionAndAccessors(t *testing.T) {
-	clientWithPath, err := NewDockerClientWithEndpoint("/var/run/docker.sock")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if clientWithPath.Client() == nil {
-		t.Fatal("underlying Docker client is nil")
-	}
-	if err := clientWithPath.Close(); err != nil {
-		t.Fatal(err)
+	for _, endpoint := range []string{"/var/run/docker.sock", "unix:///var/run/docker.sock"} {
+		clientWithPath, err := NewDockerClientWithEndpoint(endpoint)
+		if err != nil {
+			t.Fatalf("NewDockerClientWithEndpoint(%q): %v", endpoint, err)
+		}
+		if clientWithPath.Client() == nil {
+			t.Fatal("underlying Docker client is nil")
+		}
+		if err := clientWithPath.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
-	clientFromEnv, err := NewDockerClient()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := clientFromEnv.Close(); err != nil {
-		t.Fatal(err)
+	for _, endpoint := range []string{"tcp://127.0.0.1:2375", "ssh://docker.internal", "relative.sock", "unix://host/run/docker.sock"} {
+		if _, err := NewDockerClientWithEndpoint(endpoint); !errors.Is(err, ErrInvalidDockerEndpoint) {
+			t.Fatalf("NewDockerClientWithEndpoint(%q) error = %v, want ErrInvalidDockerEndpoint", endpoint, err)
+		}
 	}
 
 	if got := ServiceName("worker"); got != "moduleos_worker" {

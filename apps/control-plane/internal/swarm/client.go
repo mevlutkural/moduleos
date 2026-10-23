@@ -12,6 +12,7 @@ var (
 	ErrDockerInfoUnavailable  = errors.New("docker info unavailable")
 	ErrSwarmInactive          = errors.New("swarm inactive")
 	ErrSwarmManagerRequired   = errors.New("swarm manager required")
+	ErrInvalidDockerEndpoint  = errors.New("invalid Docker endpoint")
 	ErrServiceLogsUnsupported = errors.New("service logs require Docker API 1.42 or newer")
 )
 

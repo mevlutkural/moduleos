@@ -127,14 +127,9 @@ func (s *Service) WithDockerEndpoint(endpoint string) *Service {
 	path := endpoint
 	if strings.HasPrefix(endpoint, "unix://") {
 		path = strings.TrimPrefix(endpoint, "unix://")
-	} else if strings.HasPrefix(endpoint, "tcp://") {
-		s.dockerSocketPath = ""
-		return s
 	}
 	if filepath.IsAbs(path) && filepath.Clean(path) == path {
 		s.dockerSocketPath = path
-	} else {
-		s.dockerSocketPath = ""
 	}
 	return s
 }

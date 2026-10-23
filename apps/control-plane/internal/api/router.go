@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -58,6 +60,18 @@ type Router struct {
 	App    *fiber.App
 	Health *handler.HealthHandler
 	Logs   *handler.LogsHandler
+}
+
+func (r *Router) Serve(listener net.Listener) error {
+	return r.App.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true})
+}
+
+func (r *Router) Shutdown(ctx context.Context) error {
+	err := r.App.ShutdownWithContext(ctx)
+	if errors.Is(err, fiber.ErrNotRunning) {
+		return nil
+	}
+	return err
 }
 
 func NewRouter(options RouterOptions) (*Router, error) {

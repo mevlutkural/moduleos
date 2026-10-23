@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -98,7 +99,7 @@ func (w *Watcher) processEvents(ctx context.Context, events <-chan swarm.SwarmEv
 				continue
 			}
 			if err != nil {
-				w.log.Warn("event stream error", "error", err)
+				w.log.Warn("event stream error", "error_type", fmt.Sprintf("%T", err))
 				return received
 			}
 		case event, ok := <-events:

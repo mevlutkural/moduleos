@@ -1,9 +1,12 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/mevlutkural/moduleos/apps/control-plane/internal/swarm"
@@ -47,5 +50,21 @@ func TestProcessEventsOnlyEnqueuesManagedResources(t *testing.T) {
 	}
 	if len(queue.names) != 1 || queue.names[0] != "api" {
 		t.Fatalf("queued names = %#v", queue.names)
+	}
+}
+
+func TestProcessEventsDoesNotLogRawRuntimeError(t *testing.T) {
+	var output bytes.Buffer
+	watch := &Watcher{queue: &recordingQueue{}, log: slog.New(slog.NewTextHandler(&output, nil))}
+	var events <-chan swarm.SwarmEvent
+	errs := make(chan error, 1)
+	errs <- errors.New("private /var/run/secret.sock")
+	close(errs)
+	watch.processEvents(context.Background(), events, errs)
+	if strings.Contains(output.String(), "private") || strings.Contains(output.String(), "/var/run/secret.sock") {
+		t.Fatalf("raw runtime error leaked: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "error_type") {
+		t.Fatalf("safe classification missing: %q", output.String())
 	}
 }

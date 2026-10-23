@@ -154,8 +154,12 @@ func TestServiceConfigurationAndAccessors(t *testing.T) {
 		t.Fatal("non-positive or empty overrides changed existing limits")
 	}
 	service.WithDockerEndpoint("tcp://127.0.0.1:2375")
-	if service.dockerSocketPath != "" {
-		t.Fatalf("TCP endpoint retained a local socket path: %q", service.dockerSocketPath)
+	if service.dockerSocketPath != "/srv/moduleos/docker.sock" {
+		t.Fatalf("unsupported endpoint disabled socket protection: %q", service.dockerSocketPath)
+	}
+	service.WithDockerEndpoint("/run/docker.sock")
+	if service.dockerSocketPath != "/run/docker.sock" {
+		t.Fatalf("absolute socket path = %q", service.dockerSocketPath)
 	}
 	serviceWithDefaultLogger := NewService(st, swarmfake.New(), "moduleos.local", nil)
 	if serviceWithDefaultLogger.log == nil {

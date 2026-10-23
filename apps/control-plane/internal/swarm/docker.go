@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/containerd/errdefs"
 	"github.com/distribution/reference"
@@ -29,23 +32,36 @@ type DockerClient struct {
 	docker *client.Client
 }
 
-func NewDockerClient() (*DockerClient, error) {
-	cli, err := client.New(client.FromEnv)
+func NewDockerClientWithEndpoint(endpoint string) (*DockerClient, error) {
+	canonicalEndpoint, err := canonicalUnixEndpoint(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	cli, err := client.New(client.WithHost(canonicalEndpoint))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create docker client: %w", err)
 	}
 	return &DockerClient{docker: cli}, nil
 }
 
-func NewDockerClientWithEndpoint(endpoint string) (*DockerClient, error) {
-	if endpoint != "" && !strings.Contains(endpoint, "://") {
-		endpoint = "unix://" + endpoint
+func canonicalUnixEndpoint(endpoint string) (string, error) {
+	if endpoint == "" || strings.TrimSpace(endpoint) != endpoint || strings.IndexFunc(endpoint, unicode.IsControl) >= 0 || strings.ContainsAny(endpoint, "?#") {
+		return "", ErrInvalidDockerEndpoint
 	}
-	cli, err := client.New(client.WithHost(endpoint))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create docker client: %w", err)
+	path := endpoint
+	if strings.HasPrefix(endpoint, "unix://") {
+		parsed, err := url.Parse(endpoint)
+		if err != nil || parsed.Scheme != "unix" || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawPath != "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return "", ErrInvalidDockerEndpoint
+		}
+		path = parsed.Path
+	} else if strings.Contains(endpoint, "://") {
+		return "", ErrInvalidDockerEndpoint
 	}
-	return &DockerClient{docker: cli}, nil
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == string(filepath.Separator) {
+		return "", ErrInvalidDockerEndpoint
+	}
+	return "unix://" + path, nil
 }
 
 func (c *DockerClient) Health(ctx context.Context) error {

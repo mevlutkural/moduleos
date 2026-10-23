@@ -231,7 +231,7 @@ func TestValidateRejectsInvalidConfigurationBoundaries(t *testing.T) {
 }
 
 func TestValidateAcceptsSupportedEndpointAndListenForms(t *testing.T) {
-	for _, endpoint := range []string{"unix:///var/run/docker.sock", "tcp://127.0.0.1:2375", "tcp://docker.internal:2375", "tcp://[::1]:2375", "/var/run/docker.sock"} {
+	for _, endpoint := range []string{"unix:///var/run/docker.sock", "/var/run/docker.sock"} {
 		cfg := validConfig()
 		cfg.ListenAddress = "localhost"
 		cfg.DockerEndpoint = endpoint
@@ -532,12 +532,12 @@ func TestLoadDockerEndpointAliasPolicy(t *testing.T) {
 		wantErr   bool
 		forbidden []string
 	}{
-		{name: "primary only", primary: "tcp://docker.internal:2375", want: "tcp://docker.internal:2375"},
+		{name: "primary only", primary: "unix:///run/primary.sock", want: "unix:///run/primary.sock"},
 		{name: "legacy only", legacy: "/run/custom-docker.sock", want: "/run/custom-docker.sock"},
 		{name: "identical aliases", primary: "unix:///run/docker.sock", legacy: "unix:///run/docker.sock", want: "unix:///run/docker.sock"},
 		{name: "equivalent Unix aliases", primary: "unix:///run/docker.sock", legacy: "/run/docker.sock", want: "unix:///run/docker.sock"},
 		{name: "conflicting Unix aliases", primary: "unix:///run/primary.sock", legacy: "/run/legacy.sock", wantErr: true, forbidden: []string{"/run/primary.sock", "/run/legacy.sock"}},
-		{name: "conflicting TCP aliases", primary: "tcp://first.example:2375", legacy: "tcp://second.example:2375", wantErr: true, forbidden: []string{"first.example", "second.example"}},
+		{name: "unsupported primary transport", primary: "tcp://docker.internal:2375", legacy: "/run/docker.sock", wantErr: true, forbidden: []string{"docker.internal", "/run/docker.sock"}},
 		{name: "invalid primary is not hidden", primary: "relative.sock", legacy: "/run/docker.sock", wantErr: true, forbidden: []string{"relative.sock", "/run/docker.sock"}},
 		{name: "invalid legacy is not ignored", primary: "unix:///run/docker.sock", legacy: "relative.sock", wantErr: true, forbidden: []string{"relative.sock", "/run/docker.sock"}},
 		{name: "whitespace legacy is not ignored", legacy: " \t ", wantErr: true},
@@ -725,7 +725,7 @@ func TestSafeSummaryClassifiesSensitivePathsAndEndpoints(t *testing.T) {
 		forbidden []string
 	}{
 		{name: "Unix", endpoint: "unix:///private/run/docker.sock", database: "/private/data/moduleos.db", transport: "unix", dbSummary: "[configured]", forbidden: []string{"/private/run", "/private/data"}},
-		{name: "TCP", endpoint: "tcp://private.example:2375", database: ":memory:", transport: "tcp", dbSummary: "[memory]", forbidden: []string{"private.example", "2375"}},
+		{name: "unsupported TCP", endpoint: "tcp://private.example:2375", database: ":memory:", transport: "[invalid]", dbSummary: "[memory]", forbidden: []string{"private.example", "2375"}},
 		{name: "memory VFS", endpoint: "unix:///private/run/docker.sock", database: "file:volatile-state?vfs=memdb", transport: "unix", dbSummary: "[memory]", forbidden: []string{"/private/run", "volatile-state", "memdb"}},
 		{name: "encoded memory URI", endpoint: "unix:///private/run/docker.sock", database: "file:%3Amemory%3A", transport: "unix", dbSummary: "[memory]", forbidden: []string{"/private/run", "%3Amemory%3A"}},
 		{name: "invalid credential endpoint", endpoint: "tcp://user:super-secret@private.example:2375", database: "/private/data/moduleos.db", transport: "[invalid]", dbSummary: "[configured]", forbidden: []string{"user", "super-secret", "private.example", "/private/data"}},

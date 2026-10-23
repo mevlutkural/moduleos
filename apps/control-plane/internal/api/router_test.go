@@ -74,6 +74,13 @@ type routerDeploymentService struct{}
 
 type routerLogService struct{}
 
+type daemonServerContract interface {
+	Serve(net.Listener) error
+	Shutdown(context.Context) error
+}
+
+var _ daemonServerContract = (*Router)(nil)
+
 func (*routerLogService) OpenApplicationLogs(context.Context, string, swarm.LogRequest) (*swarm.LogStream, error) {
 	return nil, store.ErrNotFound
 }
@@ -342,6 +349,53 @@ func startRealHTTPServer(t *testing.T, app *fiber.App) string {
 		}
 	})
 	return "http://" + listener.Addr().String()
+}
+
+func TestRouterDaemonAdapterUsesProvidedListenerAndContextShutdown(t *testing.T) {
+	router, err := NewRouter(validRouterOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- router.Serve(listener) }()
+
+	response, err := (&http.Client{Timeout: time.Second}).Get("http://" + listener.Addr().String() + "/api/v1/live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("live status = %d", response.StatusCode)
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := router.Shutdown(shutdownContext); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve() returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not stop after shutdown")
+	}
+}
+
+func TestRouterDaemonAdapterTreatsShutdownBeforeServeAsComplete(t *testing.T) {
+	router, err := NewRouter(validRouterOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := router.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() = %v", err)
+	}
 }
 
 func TestNewRouterRejectsInvalidOptions(t *testing.T) {
