@@ -1,0 +1,49 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 5
+    assignees:
+      - "mevlutkural"
+    labels:
+      - "dependencies"
+      - "area/ci"
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      routine-go-updates:
+        applies-to: "version-updates"
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "09:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 5
+    assignees:
+      - "mevlutkural"
+    labels:
+      - "dependencies"
+      - "area/ci"
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      routine-actions-updates:
+        applies-to: "version-updates"
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
