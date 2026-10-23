@@ -388,13 +388,17 @@ func TestRetrySchedulingIsBoundedAndCancellable(t *testing.T) {
 func TestReconcileSafelyConvertsPanicToRetryableError(t *testing.T) {
 	_, _, st, mock := newInternalReconciler(t)
 	client := &panicCreateClient{Client: mock}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	service := app.NewService(st, client, "moduleos.local", logger)
 	created := mustCreateInternalApp(t, service, app.CreateAppRequest{Name: "panic-app", Image: "nginx:1.27"})
 	reconciler := New(client, service, logger).WithStabilizationWindow(0)
 	err := reconciler.reconcileSafely(t.Context(), created.Name)
 	if err == nil || !isRetryable(err) || !strings.Contains(err.Error(), "synthetic create panic") {
 		t.Fatalf("panic classification = %v", err)
+	}
+	if strings.Contains(logs.String(), "synthetic create panic") || !strings.Contains(logs.String(), "panicked=true") {
+		t.Fatalf("panic log was not sanitized: %q", logs.String())
 	}
 }
 

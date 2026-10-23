@@ -230,7 +230,7 @@ func (r *Reconciler) worker(ctx context.Context) {
 func (r *Reconciler) reconcileSafely(ctx context.Context, name string) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			r.log.Error("reconcile panic", "app", name, "panic", recovered)
+			r.log.Error("reconcile panic", "app", name, "panicked", true)
 			err = retryableError("reconcile_panic", fmt.Errorf("panic: %v", recovered))
 		}
 	}()
@@ -300,13 +300,13 @@ func (r *Reconciler) cancelRetries() {
 func (r *Reconciler) enqueueFullScan(ctx context.Context) {
 	projects, err := r.store.ListProjects(ctx)
 	if err != nil {
-		r.log.Error("failed to list projects", "error", err)
+		r.log.Error("failed to list projects", "error_type", fmt.Sprintf("%T", err))
 	} else {
 		r.reconcileProjects(ctx, projects)
 	}
 	applications, appErr := r.store.ListApplications(ctx)
 	if appErr != nil {
-		r.log.Error("failed to list applications", "error", appErr)
+		r.log.Error("failed to list applications", "error_type", fmt.Sprintf("%T", appErr))
 	} else {
 		for _, application := range applications {
 			r.enqueue(ctx, application.Name, true)
@@ -321,17 +321,17 @@ func (r *Reconciler) enqueueFullScan(ctx context.Context) {
 func (r *Reconciler) Reconcile(ctx context.Context) {
 	projects, err := r.store.ListProjects(ctx)
 	if err != nil {
-		r.log.Error("failed to list projects", "error", err)
+		r.log.Error("failed to list projects", "error_type", fmt.Sprintf("%T", err))
 	} else {
 		r.reconcileProjects(ctx, projects)
 	}
 	applications, appErr := r.store.ListApplications(ctx)
 	if appErr != nil {
-		r.log.Error("failed to list applications", "error", appErr)
+		r.log.Error("failed to list applications", "error_type", fmt.Sprintf("%T", appErr))
 	} else {
 		for _, application := range applications {
 			if err := r.ReconcileApplication(ctx, application.Name); err != nil {
-				r.log.Warn("application reconcile failed", "app", application.Name, "error", err)
+				r.log.Warn("application reconcile failed", "app", application.Name, "error_type", fmt.Sprintf("%T", err))
 			}
 		}
 	}
@@ -677,7 +677,7 @@ func (r *Reconciler) reconcileProjects(ctx context.Context, projects []*store.Pr
 			network, err := r.swarm.GetNetwork(ctx, project.Network)
 			if errdefs.IsNotFound(err) {
 				if err := r.store.FinalizeProjectDeletion(ctx, project.ID); err != nil {
-					r.log.Error("project deletion finalization failed", "project", project.Slug, "error", err)
+					r.log.Error("project deletion finalization failed", "project", project.Slug, "error_type", fmt.Sprintf("%T", err))
 				}
 				continue
 			}
@@ -694,12 +694,12 @@ func (r *Reconciler) reconcileProjects(ctx context.Context, projects []*store.Pr
 				continue
 			}
 			if err := r.store.FinalizeProjectDeletion(ctx, project.ID); err != nil {
-				r.log.Error("project deletion finalization failed", "project", project.Slug, "error", err)
+				r.log.Error("project deletion finalization failed", "project", project.Slug, "error_type", fmt.Sprintf("%T", err))
 			}
 			continue
 		}
 		if err := r.swarm.EnsureProjectNetwork(ctx, project.Network, project.ID, project.Slug); err != nil {
-			r.log.Warn("project network reconcile failed", "project", project.Slug, "error", err)
+			r.log.Warn("project network reconcile failed", "project", project.Slug, "error_type", fmt.Sprintf("%T", err))
 			r.markProjectObserved(ctx, project, store.ObservedStateDegraded, "network_reconcile_failed", err.Error())
 		} else {
 			r.markProjectObserved(ctx, project, store.ObservedStateReady, "", "")
@@ -709,7 +709,7 @@ func (r *Reconciler) reconcileProjects(ctx context.Context, projects []*store.Pr
 
 func (r *Reconciler) markProjectObserved(ctx context.Context, project *store.Project, state store.ObservedState, code, message string) {
 	if err := r.store.MarkProjectObserved(ctx, project.ID, state, code, safeDiagnostic(message)); err != nil {
-		r.log.Error("project observation write failed", "project", project.Slug, "state", state, "error", err)
+		r.log.Error("project observation write failed", "project", project.Slug, "state", state, "error_type", fmt.Sprintf("%T", err))
 	}
 }
 
@@ -894,7 +894,7 @@ func (r *Reconciler) detectOrphans(ctx context.Context, apps []*store.Applicatio
 			}
 		}
 	} else {
-		r.log.Warn("failed to list services for orphan detection", "error", err)
+		r.log.Warn("failed to list services for orphan detection", "error_type", fmt.Sprintf("%T", err))
 	}
 	networks, err := r.swarm.ListNetworks(ctx)
 	if err == nil {
@@ -907,7 +907,7 @@ func (r *Reconciler) detectOrphans(ctx context.Context, apps []*store.Applicatio
 			}
 		}
 	} else {
-		r.log.Warn("failed to list networks for orphan detection", "error", err)
+		r.log.Warn("failed to list networks for orphan detection", "error_type", fmt.Sprintf("%T", err))
 	}
 	sort.Strings(diagnostics.OrphanServices)
 	sort.Strings(diagnostics.OrphanNetworks)

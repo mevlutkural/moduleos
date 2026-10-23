@@ -398,14 +398,17 @@ func parseDockerEndpoint(value string) (dockerEndpointIdentity, error) {
 	if value == "" || strings.TrimSpace(value) != value || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 		return dockerEndpointIdentity{}, errors.New("must be a non-empty endpoint without whitespace or control characters")
 	}
+	if strings.Contains(value, "%") {
+		return dockerEndpointIdentity{}, errors.New("must not contain percent-encoded path data")
+	}
 	if filepath.IsAbs(value) {
 		if strings.ContainsAny(value, "?#") || filepath.Clean(value) != value || value == string(filepath.Separator) {
 			return dockerEndpointIdentity{}, errors.New("must use a canonical absolute Unix socket path")
 		}
 		return dockerEndpointIdentity{transport: "unix", address: value}, nil
 	}
-	if !strings.HasPrefix(value, "unix://") && !strings.HasPrefix(value, "tcp://") {
-		return dockerEndpointIdentity{}, errors.New("must be unix://, tcp://, or an absolute Unix socket path")
+	if !strings.HasPrefix(value, "unix://") {
+		return dockerEndpointIdentity{}, errors.New("must be unix:// or an absolute Unix socket path")
 	}
 	if strings.ContainsAny(value, "?#") {
 		return dockerEndpointIdentity{}, errors.New("must not contain a query or fragment")
@@ -413,7 +416,7 @@ func parseDockerEndpoint(value string) (dockerEndpointIdentity, error) {
 
 	parsed, err := url.Parse(value)
 	if err != nil {
-		return dockerEndpointIdentity{}, errors.New("must be a valid unix:// or tcp:// endpoint")
+		return dockerEndpointIdentity{}, errors.New("must be a valid unix:// endpoint")
 	}
 	switch parsed.Scheme {
 	case "unix":
@@ -421,51 +424,9 @@ func parseDockerEndpoint(value string) (dockerEndpointIdentity, error) {
 			return dockerEndpointIdentity{}, errors.New("must use a canonical absolute Unix socket path")
 		}
 		return dockerEndpointIdentity{transport: "unix", address: parsed.Path}, nil
-	case "tcp":
-		if parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Host == "" {
-			return dockerEndpointIdentity{}, errors.New("must use tcp://host:port without credentials, path, query, or fragment")
-		}
-		host, portText, splitErr := net.SplitHostPort(parsed.Host)
-		if splitErr != nil || !isSupportedTCPHost(host) {
-			return dockerEndpointIdentity{}, errors.New("must use tcp://host:port with a supported host")
-		}
-		port, portErr := strconv.Atoi(portText)
-		if portErr != nil || port < 1 || port > 65535 {
-			return dockerEndpointIdentity{}, errors.New("must use a TCP port between 1 and 65535")
-		}
-		if ip := net.ParseIP(host); ip != nil {
-			host = ip.String()
-		} else {
-			host = strings.ToLower(host)
-		}
-		return dockerEndpointIdentity{transport: "tcp", address: net.JoinHostPort(host, strconv.Itoa(port))}, nil
 	default:
-		return dockerEndpointIdentity{}, errors.New("must be unix://, tcp://, or an absolute Unix socket path")
+		return dockerEndpointIdentity{}, errors.New("must be unix:// or an absolute Unix socket path")
 	}
-}
-
-func isSupportedTCPHost(host string) bool {
-	if host == "" || strings.Contains(host, "%") {
-		return false
-	}
-	if net.ParseIP(host) != nil {
-		return true
-	}
-	if len(host) > 253 || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
-		return false
-	}
-	for _, label := range strings.Split(host, ".") {
-		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for _, character := range label {
-			if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
-				(character < '0' || character > '9') && character != '-' {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func NormalizeCORSOrigins(origins []string) ([]string, error) {
