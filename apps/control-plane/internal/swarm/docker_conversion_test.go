@@ -263,7 +263,14 @@ func TestDockerClientConstructionAndAccessors(t *testing.T) {
 		}
 	}
 
-	for _, endpoint := range []string{"tcp://127.0.0.1:2375", "ssh://docker.internal", "relative.sock", "unix://host/run/docker.sock"} {
+	for _, endpoint := range []string{
+		"tcp://127.0.0.1:2375",
+		"ssh://docker.internal",
+		"relative.sock",
+		"unix://host/run/docker.sock",
+		"unix:///srv/moduleos-data/docker%20engine.sock",
+		"/srv/moduleos-data/docker%20engine.sock",
+	} {
 		if _, err := NewDockerClientWithEndpoint(endpoint); !errors.Is(err, ErrInvalidDockerEndpoint) {
 			t.Fatalf("NewDockerClientWithEndpoint(%q) error = %v, want ErrInvalidDockerEndpoint", endpoint, err)
 		}

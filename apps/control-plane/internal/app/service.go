@@ -124,6 +124,11 @@ func (s *Service) WithRuntimeLimits(maxReplicas int, allowedMountRoots []string,
 }
 
 func (s *Service) WithDockerEndpoint(endpoint string) *Service {
+	if strings.ContainsAny(endpoint, "%?#") || strings.IndexFunc(endpoint, func(character rune) bool {
+		return character < ' ' || character == '\u007f'
+	}) >= 0 {
+		return s
+	}
 	path := endpoint
 	if strings.HasPrefix(endpoint, "unix://") {
 		path = strings.TrimPrefix(endpoint, "unix://")

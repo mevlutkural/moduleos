@@ -45,7 +45,7 @@ func NewDockerClientWithEndpoint(endpoint string) (*DockerClient, error) {
 }
 
 func canonicalUnixEndpoint(endpoint string) (string, error) {
-	if endpoint == "" || strings.TrimSpace(endpoint) != endpoint || strings.IndexFunc(endpoint, unicode.IsControl) >= 0 || strings.ContainsAny(endpoint, "?#") {
+	if endpoint == "" || strings.TrimSpace(endpoint) != endpoint || strings.IndexFunc(endpoint, unicode.IsControl) >= 0 || strings.ContainsAny(endpoint, "%?#") {
 		return "", ErrInvalidDockerEndpoint
 	}
 	path := endpoint

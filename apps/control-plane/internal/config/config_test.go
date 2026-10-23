@@ -607,6 +607,8 @@ func TestValidateRejectsUnsafeDockerEndpointFormsWithoutEchoingValues(t *testing
 		"tcp://docker.internal:2375#fragment",
 		"tcp://[fe80::1%25en0]:2375",
 		"tcp://docker.internal:2375 ",
+		"unix:///srv/moduleos-data/docker%20engine.sock",
+		"/srv/moduleos-data/docker%20engine.sock",
 		"ssh://docker.internal:22",
 	}
 	for index, endpoint := range tests {

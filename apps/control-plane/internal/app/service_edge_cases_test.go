@@ -157,6 +157,10 @@ func TestServiceConfigurationAndAccessors(t *testing.T) {
 	if service.dockerSocketPath != "/srv/moduleos/docker.sock" {
 		t.Fatalf("unsupported endpoint disabled socket protection: %q", service.dockerSocketPath)
 	}
+	service.WithDockerEndpoint("unix:///srv/moduleos-data/docker%20engine.sock")
+	if service.dockerSocketPath != "/srv/moduleos/docker.sock" {
+		t.Fatalf("encoded endpoint disabled socket protection: %q", service.dockerSocketPath)
+	}
 	service.WithDockerEndpoint("/run/docker.sock")
 	if service.dockerSocketPath != "/run/docker.sock" {
 		t.Fatalf("absolute socket path = %q", service.dockerSocketPath)

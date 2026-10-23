@@ -398,6 +398,9 @@ func parseDockerEndpoint(value string) (dockerEndpointIdentity, error) {
 	if value == "" || strings.TrimSpace(value) != value || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 		return dockerEndpointIdentity{}, errors.New("must be a non-empty endpoint without whitespace or control characters")
 	}
+	if strings.Contains(value, "%") {
+		return dockerEndpointIdentity{}, errors.New("must not contain percent-encoded path data")
+	}
 	if filepath.IsAbs(value) {
 		if strings.ContainsAny(value, "?#") || filepath.Clean(value) != value || value == string(filepath.Separator) {
 			return dockerEndpointIdentity{}, errors.New("must use a canonical absolute Unix socket path")
