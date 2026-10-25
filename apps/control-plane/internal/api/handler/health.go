@@ -108,7 +108,7 @@ func (h *HealthHandler) Ready(c fiber.Ctx) error {
 	defer cancel()
 	if err := h.store.Ping(ctx); err != nil {
 		components.Database = ComponentUnavailable
-		return writeReadiness(c, fiber.StatusServiceUnavailable, "database_unavailable", components)
+		return h.writeNotReady(c, "database_unavailable", components)
 	}
 	components.Database = ComponentReady
 
@@ -116,10 +116,10 @@ func (h *HealthHandler) Ready(c fiber.Ctx) error {
 		if errors.Is(err, swarm.ErrSwarmInactive) || errors.Is(err, swarm.ErrSwarmManagerRequired) {
 			components.Docker = ComponentReady
 			components.Swarm = ComponentUnavailable
-			return writeReadiness(c, fiber.StatusServiceUnavailable, "swarm_unavailable", components)
+			return h.writeNotReady(c, "swarm_unavailable", components)
 		}
 		components.Docker = ComponentUnavailable
-		return writeReadiness(c, fiber.StatusServiceUnavailable, "docker_unavailable", components)
+		return h.writeNotReady(c, "docker_unavailable", components)
 	}
 	components.Docker = ComponentReady
 	components.Swarm = ComponentReady
@@ -127,7 +127,7 @@ func (h *HealthHandler) Ready(c fiber.Ctx) error {
 	applications, err := h.store.ListApplications(ctx)
 	if err != nil {
 		components.Database = ComponentUnavailable
-		return writeReadiness(c, fiber.StatusServiceUnavailable, "database_unavailable", components)
+		return h.writeNotReady(c, "database_unavailable", components)
 	}
 	components.Ingress = ComponentNotRequired
 	for _, application := range applications {
@@ -136,7 +136,7 @@ func (h *HealthHandler) Ready(c fiber.Ctx) error {
 			network, err := h.runtime.GetNetwork(ctx, h.ingressNetwork)
 			if err != nil || network == nil || network.Driver != "overlay" || !network.Attachable {
 				components.Ingress = ComponentUnavailable
-				return writeReadiness(c, fiber.StatusServiceUnavailable, "ingress_network_unavailable", components)
+				return h.writeNotReady(c, "ingress_network_unavailable", components)
 			}
 			break
 		}
@@ -177,6 +177,15 @@ func (h *HealthHandler) writeReady(c fiber.Ctx, components ReadinessComponents) 
 		return writeReadiness(c, fiber.StatusServiceUnavailable, "shutting_down", components)
 	}
 	return c.JSON(ReadinessResponse{Status: "ready", Components: components})
+}
+
+func (h *HealthHandler) writeNotReady(c fiber.Ctx, code string, components ReadinessComponents) error {
+	h.stateMu.RLock()
+	defer h.stateMu.RUnlock()
+	if h.draining {
+		code = "shutting_down"
+	}
+	return writeReadiness(c, fiber.StatusServiceUnavailable, code, components)
 }
 
 func isNilInterface(value any) bool {

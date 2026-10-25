@@ -24,6 +24,24 @@ Build it from the repository root:
 CGO_ENABLED=0 go build -trimpath -o ./moduleosd ./apps/control-plane/cmd/moduleosd
 ```
 
+Run the executable-level lifecycle qualification and static Linux build checks:
+
+```sh
+go test -count=1 -v -timeout=3m ./apps/control-plane/cmd/moduleosd
+./scripts/check-moduleosd-build.sh
+```
+
+The process suite requires a Unix-like host. It launches the real production
+binary with isolated temporary listeners, SQLite databases, and Docker Unix
+sockets. Its test-only Docker HTTP server proves process startup, readiness,
+signal, in-flight readiness cancellation, stream-cancellation, exit-code, and
+cleanup behavior; it does not
+claim Docker Engine, Swarm, or Traefik compatibility. Real runtime integration
+and the evidence-producing 24-hour Genesis qualification remain separate later
+release gates. Database and Docker cleanup registration and reverse-order
+execution are verified by the bootstrap and daemon component suites; process
+exit alone is not treated as proof that an individual cleanup callback ran.
+
 For a local development run, make the data root available and start the
 daemon with development defaults:
 
