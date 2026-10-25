@@ -51,17 +51,29 @@ func (s *healthStoreStub) ListApplications(context.Context) ([]*store.Applicatio
 }
 
 type healthRuntimeStub struct {
-	healthErr    error
-	networkErr   error
-	networkInfo  *swarm.NetworkInfo
-	nilNetwork   bool
-	healthCalls  int
-	networkCalls int
-	lastNetwork  string
+	healthErr     error
+	healthStarted chan<- struct{}
+	healthRelease <-chan struct{}
+	networkErr    error
+	networkInfo   *swarm.NetworkInfo
+	nilNetwork    bool
+	healthCalls   int
+	networkCalls  int
+	lastNetwork   string
 }
 
-func (r *healthRuntimeStub) Health(context.Context) error {
+func (r *healthRuntimeStub) Health(ctx context.Context) error {
 	r.healthCalls++
+	if r.healthStarted != nil {
+		r.healthStarted <- struct{}{}
+	}
+	if r.healthRelease != nil {
+		select {
+		case <-r.healthRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return r.healthErr
 }
 
@@ -176,6 +188,33 @@ func TestHealthReadyDoesNotSucceedAfterDrainStarts(t *testing.T) {
 	<-pingStarted
 	health.SetDraining()
 	close(pingRelease)
+	response := <-result
+	t.Cleanup(func() { _ = response.Body.Close() })
+	body := decodeResponse[handler.ReadinessResponse](t, response)
+	if response.StatusCode != fiber.StatusServiceUnavailable || body.Status != "not_ready" || body.Code != "shutting_down" {
+		t.Fatalf("status/body after drain transition = %d/%#v", response.StatusCode, body)
+	}
+}
+
+func TestHealthReadyReportsShutdownWhenDependencyFailsAfterDrainStarts(t *testing.T) {
+	healthStarted := make(chan struct{})
+	healthRelease := make(chan struct{})
+	runtimeStub := &healthRuntimeStub{
+		healthErr:     errors.New("docker unavailable"),
+		healthStarted: healthStarted,
+		healthRelease: healthRelease,
+	}
+	server, health := newHealthServer(t, &healthStoreStub{}, runtimeStub, time.Second)
+	result := make(chan *http.Response, 1)
+	go func() {
+		response, _ := server.Test(httptest.NewRequest("GET", "/ready", nil), fiber.TestConfig{Timeout: 0})
+		result <- response
+	}()
+
+	<-healthStarted
+	health.SetDraining()
+	close(healthRelease)
+
 	response := <-result
 	t.Cleanup(func() { _ = response.Body.Close() })
 	body := decodeResponse[handler.ReadinessResponse](t, response)

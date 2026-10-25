@@ -60,6 +60,14 @@ jobs:
         env:
           GOTOOLCHAIN: local
         run: go build ./...
+      - name: Qualify moduleosd process lifecycle
+        env:
+          GOTOOLCHAIN: local
+        run: go test -count=1 -v -timeout=3m ./apps/control-plane/cmd/moduleosd
+      - name: Verify static moduleosd builds
+        env:
+          GOTOOLCHAIN: local
+        run: ./scripts/check-moduleosd-build.sh
       - name: Run tests
         env:
           GOTOOLCHAIN: local
