@@ -42,6 +42,33 @@ release gates. Database and Docker cleanup registration and reverse-order
 execution are verified by the bootstrap and daemon component suites; process
 exit alone is not treated as proof that an individual cleanup callback ran.
 
+## Real Docker and Swarm integration
+
+The integration qualification runs the public store, application service,
+reconciler, watcher, and Docker adapter against a real Docker Engine and a real
+single-node Swarm manager. It exercises canonical runtime specs, convergence,
+event and periodic recovery, ownership conflicts, orphan preservation, Project
+Links and Swarm DNS, and selected SQLite-backed crash windows.
+
+The suite is destructive and must run only against an empty, disposable
+single-node Swarm. It refuses to run without explicit acknowledgement and
+fails rather than skipping missing prerequisites:
+
+```sh
+MODULEOS_INTEGRATION_DISPOSABLE=1 ./scripts/check-swarm-integration.sh
+```
+
+If Swarm is inactive, the runner creates a one-node manager and removes only
+that script-owned Swarm afterward. If Swarm is already active, it must already
+be a disposable one-node manager and the runner leaves it active. The suite
+uses immutable multi-architecture images, tracks exact resource identities,
+and fails if its final service/network snapshot differs from its baseline.
+
+This qualification proves the in-process control-plane integration boundary;
+it does not launch the public HTTP daemon, qualify Traefik or operator flows,
+make performance claims, or replace the separate evidence-producing 24-hour
+Genesis release qualification.
+
 For a local development run, make the data root available and start the
 daemon with development defaults:
 
