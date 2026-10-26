@@ -236,14 +236,15 @@ func taskTemplateHash(spec ServiceSpec, rolloutIdentity string) (string, error) 
 
 func ownershipLabels(input DesiredServiceInput) map[string]string {
 	labels := map[string]string{
-		LabelManagedBy:   "true",
-		LabelAppName:     input.Name,
-		LabelAppID:       input.ApplicationID,
-		LabelProjectID:   input.ProjectID,
-		LabelProject:     input.ProjectSlug,
-		LabelGeneration:  strconv.FormatInt(input.Generation, 10),
-		LabelSchema:      SchemaVersion,
-		"traefik.enable": strconv.FormatBool(input.Expose),
+		LabelManagedBy:    "true",
+		LabelResourceKind: "application-service",
+		LabelAppName:      input.Name,
+		LabelAppID:        input.ApplicationID,
+		LabelProjectID:    input.ProjectID,
+		LabelProject:      input.ProjectSlug,
+		LabelGeneration:   strconv.FormatInt(input.Generation, 10),
+		LabelSchema:       SchemaVersion,
+		"traefik.enable":  strconv.FormatBool(input.Expose),
 	}
 	if !input.Expose {
 		return labels

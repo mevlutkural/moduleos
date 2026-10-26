@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/errdefs"
 	dockerswarm "github.com/moby/moby/api/types/swarm"
 	dockerclient "github.com/moby/moby/client"
 )
@@ -329,6 +330,34 @@ func TestDockerClientDoesNotMutateServiceWhenImageResolutionFails(t *testing.T) 
 	}
 	if mutated {
 		t.Fatal("service was updated with an unresolved mutable image")
+	}
+}
+
+func TestDockerClientDoesNotReplayDesiredSpecAfterUpdateConflict(t *testing.T) {
+	currentSpec := buildSwarmSpec(canonicalServiceSpec())
+	inspectCalls := 0
+	updateCalls := 0
+	client := newDockerAPITestClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && dockerAPIPath(request) == "/services/service-id":
+			inspectCalls++
+			writeDockerJSON(t, response, dockerswarm.Service{
+				ID: "service-id", Meta: dockerswarm.Meta{Version: dockerswarm.Version{Index: uint64(inspectCalls)}}, Spec: currentSpec,
+			})
+		case request.Method == http.MethodPost && dockerAPIPath(request) == "/services/service-id/update":
+			updateCalls++
+			http.Error(response, "update out of sequence", http.StatusConflict)
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	err := client.UpdateService(t.Context(), "service-id", canonicalServiceSpec())
+	if err == nil || !errdefs.IsConflict(err) {
+		t.Fatalf("UpdateService() error = %v, want version conflict", err)
+	}
+	if inspectCalls != 1 || updateCalls != 1 {
+		t.Fatalf("stale desired spec was retried: inspect/update calls = %d/%d, want 1/1", inspectCalls, updateCalls)
 	}
 }
 
