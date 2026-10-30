@@ -86,6 +86,7 @@ type processHarness struct {
 	database    string
 	dockerSock  string
 	dataRoot    string
+	apiKeyFile  string
 	address     string
 	port        string
 	stdoutPath  string
@@ -113,6 +114,10 @@ func newProcessHarness(t *testing.T) *processHarness {
 	if err := os.Mkdir(dataRoot, 0o700); err != nil {
 		t.Fatalf("create data root: %v", err)
 	}
+	apiKeyFile := filepath.Join(directory, "api-key")
+	if err := os.WriteFile(apiKeyFile, []byte(testAPIKey), 0o600); err != nil {
+		t.Fatalf("create API key file: %v", err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve process port: %v", err)
@@ -129,14 +134,14 @@ func newProcessHarness(t *testing.T) *processHarness {
 		t: t, directory: directory,
 		database:   filepath.Join(directory, "moduleos.db"),
 		dockerSock: filepath.Join(directory, "docker.sock"),
-		dataRoot:   dataRoot, address: address, port: port,
+		dataRoot:   dataRoot, apiKeyFile: apiKeyFile, address: address, port: port,
 		stdoutPath: filepath.Join(directory, "stdout.log"),
 		stderrPath: filepath.Join(directory, "stderr.log"),
 		environment: map[string]string{
 			"ENV": "production", "LOG_LEVEL": "debug", "LISTEN_ADDRESS": "127.0.0.1", "PORT": port,
 			"DOCKER_ENDPOINT": "unix://" + filepath.Join(directory, "docker.sock"),
 			"BASE_DOMAIN":     "moduleos.test", "DATABASE_PATH": filepath.Join(directory, "moduleos.db"),
-			"API_KEY": testAPIKey, "ALLOWED_MOUNT_ROOTS": dataRoot,
+			"API_KEY_FILE": apiKeyFile, "ALLOWED_MOUNT_ROOTS": dataRoot,
 			"RECONCILE_INTERVAL": "1h", "RECONCILE_MAX_BACKOFF": "1s", "RECONCILE_WORKERS": "1",
 			"STABILIZATION_WINDOW": "0s", "SHUTDOWN_TIMEOUT": "2s", "READINESS_TIMEOUT": "500ms",
 			"HTTP_READ_TIMEOUT": "3s", "HTTP_WRITE_TIMEOUT": "5s", "HTTP_IDLE_TIMEOUT": "5s",
@@ -150,6 +155,8 @@ func newProcessHarness(t *testing.T) *processHarness {
 }
 
 func (h *processHarness) set(key, value string) { h.environment[key] = value }
+
+func (h *processHarness) unset(key string) { delete(h.environment, key) }
 
 func (h *processHarness) start() {
 	h.t.Helper()

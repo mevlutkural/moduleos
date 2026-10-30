@@ -22,6 +22,7 @@ func TestProcessRejectsInvalidConfigurationBeforeSideEffects(t *testing.T) {
 	harness := newProcessHarness(t)
 	fake := startFakeDocker(t, harness.dockerSock)
 	sensitiveMarker := "not-a-credential"
+	harness.unset("API_KEY_FILE")
 	harness.set("API_KEY", sensitiveMarker)
 	harness.start()
 	requireExitCode(t, harness, 1)
@@ -38,6 +39,62 @@ func TestProcessRejectsInvalidConfigurationBeforeSideEffects(t *testing.T) {
 	}
 	harness.assertListenerReleased()
 	fake.assertNoUnexpected()
+}
+
+func TestProcessRejectsInvalidAPIKeyFileSourcesBeforeSideEffects(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*processHarness) string
+	}{
+		{
+			name: "missing production source",
+			configure: func(harness *processHarness) string {
+				harness.unset("API_KEY_FILE")
+				return ""
+			},
+		},
+		{
+			name: "conflicting sources",
+			configure: func(harness *processHarness) string {
+				marker := "conflicting-environment-marker"
+				harness.set("API_KEY", marker)
+				return marker
+			},
+		},
+		{
+			name: "invalid file content",
+			configure: func(harness *processHarness) string {
+				marker := "private-invalid-file-marker"
+				if err := os.WriteFile(harness.apiKeyFile, []byte(marker), 0o600); err != nil {
+					t.Fatalf("replace API key file: %v", err)
+				}
+				return marker
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newProcessHarness(t)
+			fake := startFakeDocker(t, harness.dockerSock)
+			forbidden := test.configure(harness)
+			harness.start()
+			requireExitCode(t, harness, 1)
+
+			if _, err := os.Stat(harness.database); !os.IsNotExist(err) {
+				t.Fatalf("database was created for invalid API key source: %v", err)
+			}
+			if fake.requestCount() != 0 {
+				t.Fatalf("Docker received %d requests for invalid API key source", fake.requestCount())
+			}
+			output := harness.output()
+			if (forbidden != "" && strings.Contains(output, forbidden)) || strings.Contains(output, harness.apiKeyFile) || containsAny(output, "daemon started", "reconciler started", "event watcher started", "Docker connected") {
+				t.Fatalf("invalid API key source leaked material or claimed startup:\n%s", output)
+			}
+			harness.assertListenerReleased()
+			fake.assertNoUnexpected()
+		})
+	}
 }
 
 func TestProcessListenerCollisionFailsBeforeWorkers(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 
 var configEnvironmentKeys = []string{
 	"ENV", "LOG_LEVEL", "LISTEN_ADDRESS", "PORT", "DOCKER_ENDPOINT", "DOCKER_SOCKET",
-	"BASE_DOMAIN", "DATABASE_PATH", "API_KEY", "INGRESS_NETWORK", "CORS_ALLOWED_ORIGINS",
+	"BASE_DOMAIN", "DATABASE_PATH", "API_KEY", "API_KEY_FILE", "INGRESS_NETWORK", "CORS_ALLOWED_ORIGINS",
 	"ALLOWED_MOUNT_ROOTS", "RECONCILE_INTERVAL", "RECONCILE_MAX_BACKOFF", "RECONCILE_WORKERS",
 	"DEPLOYMENT_TIMEOUT", "STABILIZATION_WINDOW", "SHUTDOWN_TIMEOUT", "READINESS_TIMEOUT", "HTTP_READ_TIMEOUT",
 	"HTTP_WRITE_TIMEOUT", "HTTP_IDLE_TIMEOUT", "HTTP_BODY_LIMIT", "MAX_REPLICAS", "MAX_APPLICATIONS",
@@ -40,6 +40,16 @@ func clearConfigEnvironment(t *testing.T) {
 			_ = os.Unsetenv(key)
 		})
 	}
+}
+
+func setAPIKeyFile(t *testing.T, value string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "api-key")
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+		t.Fatalf("write API key file: %v", err)
+	}
+	t.Setenv("API_KEY_FILE", path)
+	return path
 }
 
 func TestLoad_Defaults(t *testing.T) {
@@ -83,7 +93,7 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	t.Setenv("BASE_DOMAIN", "mycompany.com")
 	t.Setenv("DATABASE_PATH", filepath.Join(t.TempDir(), "moduleos.db"))
 	apiKey := strings.Repeat("test-key-segment-", 2)
-	t.Setenv("API_KEY", apiKey)
+	setAPIKeyFile(t, apiKey)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -104,12 +114,86 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInsecureProductionConfiguration(t *testing.T) {
+func TestLoadRejectsEnvironmentAPIKeyInProduction(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("ENV", "production")
-	t.Setenv("API_KEY", "short")
-	if _, err := config.Load(); err == nil {
-		t.Fatal("expected weak production API key to be rejected")
+	secret := "environment-secret-must-not-be-exposed"
+	t.Setenv("API_KEY", secret)
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "API_KEY") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("Load() error = %v, want safe production API_KEY source rejection", err)
+	}
+}
+
+func TestLoadAPIKeySourcePolicy(t *testing.T) {
+	validKey := strings.Repeat("k", 32)
+	tests := []struct {
+		name        string
+		environment string
+		configure   func(*testing.T)
+		wantKey     string
+		wantError   string
+	}{
+		{name: "development without a source", environment: "development"},
+		{name: "development environment source", environment: "development", configure: func(t *testing.T) { t.Setenv("API_KEY", "development-key") }, wantKey: "development-key"},
+		{name: "development explicitly empty environment source", environment: "development", configure: func(t *testing.T) { t.Setenv("API_KEY", "") }},
+		{name: "development file source", environment: "development", configure: func(t *testing.T) { setAPIKeyFile(t, validKey) }, wantKey: validKey},
+		{name: "development explicitly empty file source", environment: "development", configure: func(t *testing.T) { t.Setenv("API_KEY_FILE", "") }, wantError: "API_KEY_FILE"},
+		{name: "development conflicting sources", environment: "development", configure: func(t *testing.T) { t.Setenv("API_KEY", "development-key"); setAPIKeyFile(t, validKey) }, wantError: "API_KEY and API_KEY_FILE"},
+		{name: "development conflicting empty sources", environment: "development", configure: func(t *testing.T) { t.Setenv("API_KEY", ""); t.Setenv("API_KEY_FILE", "") }, wantError: "API_KEY and API_KEY_FILE"},
+		{name: "production without a source", environment: "production", wantError: "API_KEY_FILE"},
+		{name: "production environment source", environment: "production", configure: func(t *testing.T) { t.Setenv("API_KEY", validKey) }, wantError: "API_KEY"},
+		{name: "production explicitly empty environment source", environment: "production", configure: func(t *testing.T) { t.Setenv("API_KEY", "") }, wantError: "API_KEY"},
+		{name: "production file source", environment: "production", configure: func(t *testing.T) { setAPIKeyFile(t, validKey) }, wantKey: validKey},
+		{name: "production explicitly empty file source", environment: "production", configure: func(t *testing.T) { t.Setenv("API_KEY_FILE", "") }, wantError: "API_KEY_FILE"},
+		{name: "production conflicting sources", environment: "production", configure: func(t *testing.T) { t.Setenv("API_KEY", validKey); setAPIKeyFile(t, validKey) }, wantError: "API_KEY and API_KEY_FILE"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearConfigEnvironment(t)
+			t.Setenv("ENV", test.environment)
+			if test.environment == "production" {
+				t.Setenv("BASE_DOMAIN", "moduleos.example")
+				t.Setenv("DATABASE_PATH", filepath.Join(t.TempDir(), "moduleos.db"))
+			}
+			if test.configure != nil {
+				test.configure(t)
+			}
+
+			cfg, err := config.Load()
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("Load() error = %v, want safe error containing %q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.APIKey != test.wantKey {
+				t.Fatalf("APIKey = %q, want %q", cfg.APIKey, test.wantKey)
+			}
+		})
+	}
+}
+
+func TestLoadReadsAPIKeyFileOnlyDuringStartup(t *testing.T) {
+	clearConfigEnvironment(t)
+	initial := strings.Repeat("a", 32)
+	path := setAPIKeyFile(t, initial)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Repeat("b", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIKey != initial {
+		t.Fatalf("APIKey changed after source mutation: %q", cfg.APIKey)
 	}
 }
 
@@ -425,7 +509,7 @@ func TestLoadEnforcesProductionRequirements(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			clearConfigEnvironment(t)
 			t.Setenv("ENV", "production")
-			t.Setenv("API_KEY", strings.Repeat("k", 32))
+			setAPIKeyFile(t, strings.Repeat("k", 32))
 			test.configure(t)
 			_, err := config.Load()
 			if err == nil || !strings.Contains(err.Error(), test.wantMessage) {
@@ -482,7 +566,7 @@ func TestLoadAcceptsExplicitProductionValuesEqualToDevelopmentDefaults(t *testin
 	t.Setenv("ENV", "production")
 	t.Setenv("BASE_DOMAIN", "moduleos.local")
 	t.Setenv("DATABASE_PATH", "./moduleos.db")
-	t.Setenv("API_KEY", strings.Repeat("k", 32))
+	setAPIKeyFile(t, strings.Repeat("k", 32))
 
 	cfg, err := config.Load()
 	if err != nil {
