@@ -22,6 +22,7 @@ const (
 	minimumBodyLimit          = 1024
 	maximumBodyLimit          = 10 * 1024 * 1024
 	maximumRequestConcurrency = 65536
+	requestHeaderBufferSize   = 8 * 1024
 )
 
 var recognizedHTTPMethods = []string{
@@ -115,6 +116,7 @@ func NewRouter(options RouterOptions) (*Router, error) {
 	app := fiber.New(fiber.Config{
 		AppName:                 "ModuleOS",
 		BodyLimit:               options.BodyLimit,
+		ReadBufferSize:          requestHeaderBufferSize,
 		ReadTimeout:             options.ReadTimeout,
 		WriteTimeout:            options.WriteTimeout,
 		IdleTimeout:             options.IdleTimeout,
