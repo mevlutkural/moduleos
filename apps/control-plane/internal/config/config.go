@@ -29,7 +29,7 @@ var resourceName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$`)
 
 var environmentKeys = []string{
 	"ENV", "LOG_LEVEL", "LISTEN_ADDRESS", "PORT", "DOCKER_ENDPOINT", "DOCKER_SOCKET",
-	"BASE_DOMAIN", "DATABASE_PATH", "API_KEY", "INGRESS_NETWORK", "CORS_ALLOWED_ORIGINS",
+	"BASE_DOMAIN", "DATABASE_PATH", "API_KEY", "API_KEY_FILE", "INGRESS_NETWORK", "CORS_ALLOWED_ORIGINS",
 	"ALLOWED_MOUNT_ROOTS", "RECONCILE_INTERVAL", "RECONCILE_MAX_BACKOFF", "RECONCILE_WORKERS",
 	"DEPLOYMENT_TIMEOUT", "STABILIZATION_WINDOW", "SHUTDOWN_TIMEOUT", "READINESS_TIMEOUT",
 	"HTTP_READ_TIMEOUT", "HTTP_WRITE_TIMEOUT", "HTTP_IDLE_TIMEOUT", "HTTP_BODY_LIMIT",
@@ -91,6 +91,9 @@ type dockerEndpointIdentity struct {
 
 func Load() (*Config, error) {
 	environment := captureEnvironment()
+	if err := validateAPIKeySourceConflict(environment); err != nil {
+		return nil, err
+	}
 	if err := validateExplicitEnvironment(environment); err != nil {
 		return nil, err
 	}
@@ -98,6 +101,12 @@ func Load() (*Config, error) {
 	cfg := &Config{}
 	if err := env.ParseWithOptions(cfg, env.Options{Environment: environmentSnapshot(environment)}); err != nil {
 		return nil, safeConfigurationParseError(err)
+	}
+	if err := validateEnvironmentName(cfg.Env); err != nil {
+		return nil, err
+	}
+	if err := resolveAPIKey(cfg, environment, readAPIKeyFile); err != nil {
+		return nil, err
 	}
 	if cors := environment["CORS_ALLOWED_ORIGINS"]; cors.set && cors.value == "" {
 		cfg.CORSAllowedOrigins = nil
@@ -120,8 +129,8 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) Validate() error {
-	if c.Env != "development" && c.Env != "production" {
-		return fmt.Errorf("ENV must be development or production")
+	if err := validateEnvironmentName(c.Env); err != nil {
+		return err
 	}
 	if c.LogLevel != "debug" && c.LogLevel != "info" && c.LogLevel != "warn" && c.LogLevel != "error" {
 		return fmt.Errorf("LOG_LEVEL must be debug, info, warn, or error")
@@ -152,12 +161,10 @@ func (c *Config) Validate() error {
 	if !resourceName.MatchString(c.IngressNetwork) {
 		return fmt.Errorf("INGRESS_NETWORK contains invalid characters")
 	}
-	if c.APIKey != "" && strings.IndexFunc(c.APIKey, func(character rune) bool {
-		return unicode.IsSpace(character) || unicode.IsControl(character)
-	}) >= 0 {
-		return fmt.Errorf("API_KEY cannot contain whitespace or control characters")
+	if err := validateAPIKeyContent(c.APIKey); err != nil {
+		return fmt.Errorf("API_KEY %w", err)
 	}
-	if c.Env == "production" && len(c.APIKey) < 32 {
+	if c.Env == "production" && len(c.APIKey) < minimumAPIKeyBytes {
 		return fmt.Errorf("API_KEY must contain at least 32 characters in production")
 	}
 	if c.DatabasePath == "" {
@@ -347,6 +354,13 @@ func validateExplicitEnvironment(environment map[string]environmentValue) error 
 		if value.set && !mayBeEmpty && strings.TrimSpace(value.value) == "" {
 			return fmt.Errorf("%s cannot be explicitly empty", key)
 		}
+	}
+	return nil
+}
+
+func validateEnvironmentName(value string) error {
+	if value != "development" && value != "production" {
+		return fmt.Errorf("ENV must be development or production")
 	}
 	return nil
 }
