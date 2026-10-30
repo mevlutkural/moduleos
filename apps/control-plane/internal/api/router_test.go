@@ -935,7 +935,7 @@ func TestRouterHeaderLimitUsesStableErrorEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("X-Oversized", strings.Repeat("x", 4096))
+	request.Header.Set("X-Oversized", strings.Repeat("x", requestHeaderBufferSize))
 	client := &http.Client{Timeout: time.Second}
 	response, err := client.Do(request)
 	if err != nil {
@@ -954,6 +954,32 @@ func TestRouterHeaderLimitUsesStableErrorEnvelope(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "status=431") || !strings.Contains(logs.String(), "route=<unmatched>") || strings.Contains(logs.String(), "status=200") {
 		t.Fatalf("parser failure was logged incorrectly: %q", logs.String())
+	}
+}
+
+func TestRouterAcceptsMaximumSupportedAPIKeyOverHTTP(t *testing.T) {
+	options := validRouterOptions()
+	options.Environment = "production"
+	options.APIKey = strings.Repeat("a", 4096)
+	router, err := NewRouter(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseURL := startRealHTTPServer(t, router.App)
+	request, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/projects", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set(fiber.HeaderAuthorization, "Bearer "+options.APIKey)
+	client := &http.Client{Timeout: time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != fiber.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status = %d, want %d: %s", response.StatusCode, fiber.StatusOK, body)
 	}
 }
 
