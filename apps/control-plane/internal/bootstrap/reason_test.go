@@ -340,3 +340,70 @@ func TestStartupReasonContainsPanics(t *testing.T) {
 		}
 	}
 }
+
+type selfClassifiedError struct{ reason string }
+
+func (err *selfClassifiedError) Error() string         { return "self-classified failure" }
+func (err *selfClassifiedError) StartupReason() string { return err.reason }
+
+func TestCollaboratorProvidedReasonsAreAllowlisted(t *testing.T) {
+	leaking := "/private/host/path " + reasonSentinel
+	for _, test := range []struct {
+		name   string
+		reason string
+		want   string
+	}{
+		{name: "arbitrary text", reason: leaking, want: reasonInternalError},
+		{name: "empty", reason: "", want: reasonInternalError},
+		{name: "config reason in the prepare phase", reason: config.ReasonValueInvalid, want: reasonInternalError},
+		{name: "known prepare reason", reason: reasonDatabaseOpenFailed, want: reasonDatabaseOpenFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dependencies, _, _, _, logs, _ := successfulRunDependencies(phase7CTestConfig())
+			dependencies.newBuilder = func(*config.Config, *slog.Logger) Builder {
+				return func(Registrar) (Assembly, error) { return Assembly{}, &selfClassifiedError{reason: test.reason} }
+			}
+			dependencies.prepare = func(options Options) (process, error) {
+				prepared, err := Prepare(options)
+				if prepared == nil {
+					return nil, err
+				}
+				return prepared, err
+			}
+
+			if exit := run(dependencies); exit != 1 {
+				t.Fatalf("exit = %d", exit)
+			}
+
+			requireFailure(t, failureRecord(t, logs.String()), "prepare", test.want, "")
+			if strings.Contains(logs.String(), "/private/host/path") {
+				t.Fatalf("collaborator reason leaked into the log: %q", logs.String())
+			}
+		})
+	}
+	if got := startupReason(&selfClassifiedError{reason: leaking}, reasonAssemblyFailed); got != reasonInternalError {
+		t.Fatalf("startupReason(unknown) = %q, want %q", got, reasonInternalError)
+	}
+}
+
+func TestReasonAllowlistsCoverEveryDocumentedReason(t *testing.T) {
+	for _, reason := range []string{
+		config.ReasonAPIKeySourceConflict, config.ReasonAPIKeySourceInvalid, config.ReasonAPIKeyFileInvalid,
+		config.ReasonValueEmpty, config.ReasonValueUnparsable, config.ReasonValueInvalid, config.ReasonValueRequired,
+	} {
+		if _, known := configReasons[reason]; !known {
+			t.Fatalf("config reason %q is missing from the allowlist", reason)
+		}
+	}
+	for _, reason := range []string{
+		reasonDatabaseOpenFailed, reasonDatabaseMigrationFailed, reasonDockerClientInvalid,
+		reasonListenerBindFailed, reasonAssemblyFailed, reasonInternalError,
+	} {
+		if !isPrepareReason(reason) {
+			t.Fatalf("prepare reason %q is missing from the allowlist", reason)
+		}
+	}
+	if len(configReasons) != 7 || len(prepareReasons) != 6 {
+		t.Fatalf("allowlist sizes = %d config, %d prepare; update the documented reason tables", len(configReasons), len(prepareReasons))
+	}
+}
