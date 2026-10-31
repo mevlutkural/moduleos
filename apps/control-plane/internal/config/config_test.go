@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1156,5 +1157,86 @@ func TestValidateFailsClosedWhenDatabaseFilesCannotBeInspected(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), directory) {
 		t.Fatalf("error exposed a path: %v", err)
+	}
+}
+
+func TestLoadReportsStableFailureReasons(t *testing.T) {
+	const sentinel = "sentinel-private-value"
+	validKeyFile := func(t *testing.T) string {
+		path := filepath.Join(t.TempDir(), "api-key")
+		if err := os.WriteFile(path, []byte(strings.Repeat("k", 48)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	tests := []struct {
+		name     string
+		env      func(t *testing.T) map[string]string
+		reason   string
+		variable string
+	}{
+		{name: "both key sources", env: func(*testing.T) map[string]string {
+			return map[string]string{"API_KEY": sentinel, "API_KEY_FILE": "/" + sentinel}
+		}, reason: config.ReasonAPIKeySourceConflict},
+		{name: "environment key in production", env: func(*testing.T) map[string]string {
+			return map[string]string{"ENV": "production", "API_KEY": sentinel}
+		}, reason: config.ReasonAPIKeySourceInvalid, variable: "API_KEY"},
+		{name: "missing key file in production", env: func(*testing.T) map[string]string {
+			return map[string]string{"ENV": "production"}
+		}, reason: config.ReasonAPIKeySourceInvalid, variable: "API_KEY_FILE"},
+		{name: "unreadable key file", env: func(t *testing.T) map[string]string {
+			return map[string]string{"API_KEY_FILE": filepath.Join(t.TempDir(), sentinel)}
+		}, reason: config.ReasonAPIKeyFileInvalid, variable: "API_KEY_FILE"},
+		{name: "explicitly empty value", env: func(*testing.T) map[string]string {
+			return map[string]string{"PORT": ""}
+		}, reason: config.ReasonValueEmpty, variable: "PORT"},
+		{name: "unparsable value", env: func(*testing.T) map[string]string {
+			return map[string]string{"RECONCILE_INTERVAL": sentinel}
+		}, reason: config.ReasonValueUnparsable, variable: "RECONCILE_INTERVAL"},
+		{name: "several unparsable values", env: func(*testing.T) map[string]string {
+			return map[string]string{"RECONCILE_INTERVAL": sentinel, "MAX_REPLICAS": sentinel}
+		}, reason: config.ReasonValueUnparsable},
+		{name: "invalid environment name", env: func(*testing.T) map[string]string {
+			return map[string]string{"ENV": sentinel}
+		}, reason: config.ReasonValueInvalid, variable: "ENV"},
+		{name: "invalid port", env: func(*testing.T) map[string]string {
+			return map[string]string{"PORT": sentinel}
+		}, reason: config.ReasonValueInvalid, variable: "PORT"},
+		{name: "remote Docker endpoint", env: func(*testing.T) map[string]string {
+			return map[string]string{"DOCKER_ENDPOINT": "tcp://" + sentinel + ":2375"}
+		}, reason: config.ReasonValueInvalid, variable: "DOCKER_ENDPOINT"},
+		{name: "invalid CORS origin", env: func(*testing.T) map[string]string {
+			return map[string]string{"CORS_ALLOWED_ORIGINS": "ftp://" + sentinel}
+		}, reason: config.ReasonValueInvalid, variable: "CORS_ALLOWED_ORIGINS"},
+		{name: "duration bounds without a single variable", env: func(*testing.T) map[string]string {
+			return map[string]string{"RECONCILE_INTERVAL": "-1s"}
+		}, reason: config.ReasonValueInvalid},
+		{name: "required production value", env: func(t *testing.T) map[string]string {
+			return map[string]string{"ENV": "production", "API_KEY_FILE": validKeyFile(t)}
+		}, reason: config.ReasonValueRequired, variable: "BASE_DOMAIN"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearConfigEnvironment(t)
+			for key, value := range test.env(t) {
+				t.Setenv(key, value)
+			}
+
+			_, err := config.Load()
+
+			var loadErr *config.LoadError
+			if !errors.As(err, &loadErr) {
+				t.Fatalf("Load() error = %v, want *config.LoadError", err)
+			}
+			if loadErr.Reason() != test.reason || loadErr.Variable() != test.variable {
+				t.Fatalf("reason, variable = %q, %q; want %q, %q (err = %v)", loadErr.Reason(), loadErr.Variable(), test.reason, test.variable, err)
+			}
+			if strings.Contains(loadErr.Reason()+loadErr.Variable(), sentinel) {
+				t.Fatal("reason or variable carried a configured value")
+			}
+			if errors.Unwrap(loadErr) == nil {
+				t.Fatal("LoadError does not expose its cause")
+			}
+		})
 	}
 }

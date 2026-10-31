@@ -62,7 +62,11 @@ func Prepare(options Options) (*daemon.Daemon, error) {
 	assembly, err := callBuilder(options.Build, ledger)
 	if err != nil {
 		ledger.unwind(options.CleanupTimeout)
-		return nil, safeWrap("build assembly failed", err)
+		reason := startupReason(err, reasonAssemblyFailed)
+		if errors.Is(err, ErrCollaboratorPanic) {
+			reason = reasonInternalError
+		}
+		return nil, safeWrapReason("build assembly failed", err, reason)
 	}
 	if err := validateAssembly(assembly); err != nil {
 		ledger.unwind(options.CleanupTimeout)
@@ -72,7 +76,11 @@ func Prepare(options Options) (*daemon.Daemon, error) {
 	listener, err := callListener(options.Listen, options.Network, options.Address)
 	if err != nil {
 		unwindPreparation(listener, ledger, nil, options.CleanupTimeout)
-		return nil, safeWrap("bind listener failed", err)
+		reason := reasonListenerBindFailed
+		if errors.Is(err, ErrCollaboratorPanic) {
+			reason = reasonInternalError
+		}
+		return nil, safeWrapReason("bind listener failed", err, reason)
 	}
 	if isNilInterface(listener) {
 		ledger.unwind(options.CleanupTimeout)
@@ -237,9 +245,13 @@ func callListener(factory ListenerFactory, network, address string) (listener ne
 type safeError struct {
 	message string
 	cause   error
+	reason  string
 }
 
 func (err *safeError) Error() string { return err.message }
+
+// StartupReason returns the stable reason recorded when the error was wrapped.
+func (err *safeError) StartupReason() string { return err.reason }
 func (err *safeError) Is(target error) (matched bool) {
 	defer func() {
 		if recover() != nil {
@@ -253,8 +265,8 @@ func (err *safeError) Format(state fmt.State, _ rune) {
 }
 func (err *safeError) GoString() string { return err.message }
 
-func safeWrap(message string, cause error) error {
-	return &safeError{message: message, cause: cause}
+func safeWrapReason(message string, cause error, reason string) error {
+	return &safeError{message: message, cause: cause, reason: reason}
 }
 
 func validateAssembly(assembly Assembly) error {

@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -150,7 +151,11 @@ func newProductionBuilder(cfg *config.Config, log *slog.Logger, factories produc
 	return func(registrar Registrar) (Assembly, error) {
 		st, err := factories.openStore(cfg.DatabasePath)
 		if err != nil {
-			return Assembly{}, fmt.Errorf("open database: %w", err)
+			reason := reasonDatabaseOpenFailed
+			if errors.Is(err, store.ErrMigrationFailed) {
+				reason = reasonDatabaseMigrationFailed
+			}
+			return Assembly{}, withReason(reason, fmt.Errorf("open database: %w", err))
 		}
 		if err := registrar.Add(daemon.Cleanup{Name: "database", Run: closeWithContext(st.Close)}); err != nil {
 			_ = st.Close()
@@ -159,7 +164,7 @@ func newProductionBuilder(cfg *config.Config, log *slog.Logger, factories produc
 
 		runtime, err := factories.openRuntime(cfg.DockerEndpoint)
 		if err != nil {
-			return Assembly{}, fmt.Errorf("construct Docker client: %w", err)
+			return Assembly{}, withReason(reasonDockerClientInvalid, fmt.Errorf("construct Docker client: %w", err))
 		}
 		if err := registrar.Add(daemon.Cleanup{Name: "docker", Run: closeWithContext(runtime.Close)}); err != nil {
 			_ = runtime.Close()

@@ -227,7 +227,7 @@ func TestPrepareSanitizesCollaboratorErrorsAndPanicsWhileUnwinding(t *testing.T)
 
 func TestSafeErrorDoesNotExposeRawCollaboratorType(t *testing.T) {
 	raw := &sensitiveError{value: "secret collaborator detail"}
-	err := safeWrap("startup failed", raw)
+	err := safeWrapReason("startup failed", raw, reasonInternalError)
 	var recovered *sensitiveError
 	diagnostics := fmt.Sprintf("%v %+v %#v %q %s", err, err, err, err, err)
 	if !errors.Is(err, raw) || errors.As(err, &recovered) || strings.Contains(err.Error(), raw.value) || strings.Contains(diagnostics, raw.value) || strings.Contains(diagnostics, "sensitiveError") {
@@ -236,7 +236,7 @@ func TestSafeErrorDoesNotExposeRawCollaboratorType(t *testing.T) {
 }
 
 func TestSafeErrorContainsCollaboratorClassificationPanic(t *testing.T) {
-	err := safeWrap("startup failed", &panickingMatchError{})
+	err := safeWrapReason("startup failed", &panickingMatchError{}, reasonInternalError)
 	if errors.Is(err, errBuild) {
 		t.Fatal("panicking collaborator error unexpectedly matched")
 	}
