@@ -658,6 +658,87 @@ func TestLoadDockerEndpointAliasPolicy(t *testing.T) {
 	}
 }
 
+func TestDockerSocketPathMatchesLoadEndpointPolicy(t *testing.T) {
+	type variable struct {
+		value string
+		set   bool
+	}
+	tests := []struct {
+		name      string
+		primary   variable
+		legacy    variable
+		want      string
+		wantErr   bool
+		forbidden []string
+	}{
+		{name: "default", want: "/var/run/docker.sock"},
+		{name: "primary only", primary: variable{"unix:///run/primary.sock", true}, want: "/run/primary.sock"},
+		{name: "primary absolute path", primary: variable{"/run/primary.sock", true}, want: "/run/primary.sock"},
+		{name: "legacy only", legacy: variable{"/run/custom-docker.sock", true}, want: "/run/custom-docker.sock"},
+		{name: "explicitly empty legacy is ignored", legacy: variable{"", true}, want: "/var/run/docker.sock"},
+		{name: "equivalent Unix aliases", primary: variable{"unix:///run/docker.sock", true}, legacy: variable{"/run/docker.sock", true}, want: "/run/docker.sock"},
+		{name: "conflicting Unix aliases", primary: variable{"unix:///run/primary.sock", true}, legacy: variable{"/run/legacy.sock", true}, wantErr: true, forbidden: []string{"/run/primary.sock", "/run/legacy.sock"}},
+		{name: "unsupported primary transport", primary: variable{"tcp://docker.internal:2375", true}, wantErr: true, forbidden: []string{"docker.internal"}},
+		{name: "invalid legacy is not ignored", primary: variable{"unix:///run/docker.sock", true}, legacy: variable{"relative.sock", true}, wantErr: true, forbidden: []string{"relative.sock"}},
+		{name: "whitespace legacy is not ignored", legacy: variable{" \t ", true}, wantErr: true},
+		{name: "explicitly empty primary", primary: variable{"", true}, wantErr: true},
+		{name: "whitespace primary", primary: variable{" ", true}, wantErr: true},
+		{name: "query secret", primary: variable{"unix:///run/docker.sock?token=super-secret", true}, wantErr: true, forbidden: []string{"super-secret"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lookup := func(key string) (string, bool) {
+				switch key {
+				case "DOCKER_ENDPOINT":
+					return test.primary.value, test.primary.set
+				case "DOCKER_SOCKET":
+					return test.legacy.value, test.legacy.set
+				default:
+					t.Fatalf("DockerSocketPath read unrelated variable %q", key)
+					return "", false
+				}
+			}
+			path, err := config.DockerSocketPath(lookup)
+
+			clearConfigEnvironment(t)
+			if test.primary.set {
+				t.Setenv("DOCKER_ENDPOINT", test.primary.value)
+			}
+			if test.legacy.set {
+				t.Setenv("DOCKER_SOCKET", test.legacy.value)
+			}
+			cfg, loadErr := config.Load()
+
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("DockerSocketPath() = %q, want error", path)
+				}
+				if loadErr == nil {
+					t.Fatal("Load accepted an endpoint DockerSocketPath rejected")
+				}
+				for _, secret := range test.forbidden {
+					if strings.Contains(err.Error(), secret) {
+						t.Fatalf("error exposed endpoint material %q: %v", secret, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DockerSocketPath() error = %v", err)
+			}
+			if loadErr != nil {
+				t.Fatalf("Load() error = %v", loadErr)
+			}
+			if path != test.want {
+				t.Fatalf("DockerSocketPath() = %q, want %q", path, test.want)
+			}
+			if loaded := strings.TrimPrefix(cfg.DockerEndpoint, "unix://"); loaded != path {
+				t.Fatalf("Load resolved socket %q, DockerSocketPath resolved %q", loaded, path)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsUnsafeDockerEndpointFormsWithoutEchoingValues(t *testing.T) {
 	tests := []string{
 		"relative.sock",

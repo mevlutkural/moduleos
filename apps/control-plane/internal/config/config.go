@@ -22,6 +22,8 @@ const (
 	maximumReadinessTimeout   = 5 * time.Second
 	minimumReconcileBackoff   = time.Second
 	maximumRequestConcurrency = 65536
+	// defaultDockerEndpoint must match the DockerEndpoint envDefault tag.
+	defaultDockerEndpoint = "unix:///var/run/docker.sock"
 )
 
 var dnsName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
@@ -376,6 +378,35 @@ func validateEnvironmentRequirements(cfg *Config, environment map[string]environ
 		return fmt.Errorf("DATABASE_PATH must be explicitly configured in production")
 	}
 	return nil
+}
+
+// DockerSocketPath resolves the local Docker Unix socket path with the same
+// DOCKER_ENDPOINT and DOCKER_SOCKET rules that Load applies. It reads only
+// those two variables through lookup and performs no filesystem access, so
+// the container entrypoint can share the daemon's endpoint policy without
+// loading or validating unrelated configuration.
+func DockerSocketPath(lookup func(string) (string, bool)) (string, error) {
+	environment := make(map[string]environmentValue, 2)
+	for _, key := range []string{"DOCKER_ENDPOINT", "DOCKER_SOCKET"} {
+		value, set := lookup(key)
+		environment[key] = environmentValue{value: value, set: set}
+	}
+	primary := environment["DOCKER_ENDPOINT"]
+	if primary.set && strings.TrimSpace(primary.value) == "" {
+		return "", errors.New("DOCKER_ENDPOINT cannot be explicitly empty")
+	}
+	cfg := &Config{DockerEndpoint: defaultDockerEndpoint, DockerSocket: environment["DOCKER_SOCKET"].value}
+	if primary.set {
+		cfg.DockerEndpoint = primary.value
+	}
+	if err := resolveDockerEndpoint(cfg, environment); err != nil {
+		return "", err
+	}
+	identity, err := parseDockerEndpoint(cfg.DockerEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("DOCKER_ENDPOINT %w", err)
+	}
+	return identity.address, nil
 }
 
 func resolveDockerEndpoint(cfg *Config, environment map[string]environmentValue) error {

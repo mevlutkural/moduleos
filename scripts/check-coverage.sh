@@ -55,6 +55,7 @@ foundation|./apps/control-plane/internal/banner|100
 foundation|./apps/control-plane/internal/logger|100
 foundation|./apps/control-plane/internal/bootstrap|90
 foundation|./apps/control-plane/internal/daemon|95
+foundation|./apps/control-plane/internal/containerinit|95
 POLICY
 
 if [ "$failed" -ne 0 ]; then

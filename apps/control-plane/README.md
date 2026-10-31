@@ -69,6 +69,85 @@ it does not launch the public HTTP daemon, qualify Traefik or operator flows,
 make performance claims, or replace the separate evidence-producing 24-hour
 Genesis release qualification.
 
+## Production container image
+
+`apps/control-plane/Dockerfile` builds the production image from the
+repository root. Its build context is limited by
+`apps/control-plane/Dockerfile.dockerignore`:
+
+```sh
+docker buildx build -f apps/control-plane/Dockerfile \
+  --build-arg VERSION=dev \
+  --build-arg REVISION="$(git rev-parse HEAD)" \
+  --build-arg BUILD_DATE=2026-01-01T00:00:00Z \
+  --tag moduleosd:dev --load .
+```
+
+The image contains static `moduleosd` and `moduleosd-container` binaries on a
+digest-pinned distroless base. It has no shell or package manager. The same
+Dockerfile builds `linux/amd64` and `linux/arm64`.
+
+The entrypoint, `moduleosd-container start`, briefly runs as root. It makes
+only these changes:
+
+- It changes the owner of `/var/lib/moduleos` and of the exact SQLite
+  database, `-wal`, and `-shm` files named by `DATABASE_PATH` to
+  `65532:65532`. Nothing else changes, and nothing changes recursively.
+- It adds the configured Docker socket's group as a supplementary group.
+
+It then drops to `65532:65532`, sets `no_new_privs`, and replaces itself with
+`moduleosd`, which runs as PID 1 and receives signals directly.
+
+The entrypoint refuses to start and logs one stable error code in these
+cases:
+
+- `DATABASE_PATH` is not directly inside `/var/lib/moduleos`;
+- the data directory is a symlink, or root cannot search it (with a reduced
+  capability set, keep `CHOWN`, `SETUID`, `SETGID`, and `DAC_READ_SEARCH`);
+- a SQLite file is a symlink, hard link, or special file;
+- the Docker socket is not a socket or is owned by group `0`.
+
+A missing Docker socket is not fatal. The daemon stays live and `/ready`
+reports Docker as unavailable.
+
+The image healthcheck calls `moduleosd-container healthcheck`. It drops to
+`65532:65532` first, then probes `/api/v1/live` only. A Docker outage
+therefore never makes the container unhealthy.
+
+`BUILD_DATE` is required at build time and must be an RFC 3339 UTC timestamp.
+
+The image defaults to `ENV=production`, `LISTEN_ADDRESS=0.0.0.0`, `PORT=3000`,
+and `DATABASE_PATH=/var/lib/moduleos/moduleos.db`. Production still requires
+`API_KEY_FILE` and an explicit `BASE_DOMAIN`. The image declares no volume:
+mount a named volume at `/var/lib/moduleos` to persist the database.
+
+Mounting the Docker socket gives the daemon host-level control of Docker,
+whatever the mount mode and even though the process is non-root.
+
+Qualify the image with:
+
+```sh
+./scripts/check-container-image.sh
+```
+
+The script builds the image for the Docker Engine's native architecture,
+checks that the other architecture also builds, and runs the container suite.
+
+The suite creates only run-labelled containers and volumes and removes exactly
+those. It never mounts the host Docker socket and does not touch Swarm,
+services, or networks. It proves:
+
+- metadata;
+- the fixed non-root identity, `no_new_privs`, and an empty capability set;
+- the socket group;
+- liveness without Docker;
+- graceful `SIGTERM` and `SIGINT` shutdown;
+- persistence across container replacement;
+- adoption of root-owned restored data;
+- fail-closed preparation;
+- read-only root filesystem operation;
+- non-root starts.
+
 For a local development run, make the data root available and start the
 daemon with development defaults:
 
