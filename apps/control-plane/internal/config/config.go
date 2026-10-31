@@ -205,6 +205,18 @@ func (c *Config) Validate() error {
 		if databaseDirectory == "" {
 			return fmt.Errorf("DATABASE_PATH directory cannot be resolved")
 		}
+		// SQLite follows a symlinked database file and keeps its -wal and -shm
+		// files beside the target, so a link could relocate them anywhere,
+		// including beneath an allowed mount root.
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			info, err := os.Lstat(c.DatabasePath + suffix)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("DATABASE_PATH files cannot be inspected")
+			}
+			if err == nil && info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("DATABASE_PATH and its -wal and -shm files cannot be symbolic links")
+			}
+		}
 		for _, root := range c.AllowedMountRoots {
 			if pathFormsOverlap(root, databaseDirectory) {
 				return fmt.Errorf("ALLOWED_MOUNT_ROOTS entries cannot contain or be inside the DATABASE_PATH directory")

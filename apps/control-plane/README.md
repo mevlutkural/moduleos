@@ -162,7 +162,9 @@ The directory that holds `DATABASE_PATH` and its `-wal` and `-shm` files
 must stay separate from every `ALLOWED_MOUNT_ROOTS` entry. Startup fails when
 an allowed root equals, contains, or lies inside it, in either lexical or
 symlink-resolved form. Application bind mounts that equal, contain, or lie
-inside that directory are rejected.
+inside that directory are rejected. The database file and its `-wal` and
+`-shm` files must not be symbolic links: SQLite follows a link and keeps its
+sidecars beside the target, so startup fails if any of them is one.
 
 Genesis controls the Docker Engine on the same host through a local Unix
 socket. The default endpoint is `unix:///var/run/docker.sock`; containers must
