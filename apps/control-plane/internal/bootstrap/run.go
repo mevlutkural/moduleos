@@ -62,17 +62,17 @@ func run(dependencies runDependencies) int {
 	fallback := slog.New(slog.NewJSONHandler(dependencies.stderr, nil))
 	cfg, err := dependencies.loadConfig()
 	if err != nil || cfg == nil {
-		fallback.Error("bootstrap failed", "phase", "config")
+		fallback.Error("bootstrap failed", configFailureAttributes(err)...)
 		return 1
 	}
 
 	log := dependencies.newLogger(cfg.Env, cfg.LogLevel)
 	if log == nil {
-		fallback.Error("bootstrap failed", "phase", "logger")
+		fallback.Error("bootstrap failed", "phase", "logger", "reason", reasonLoggerUnavailable)
 		return 1
 	}
 	if err := dependencies.printBanner(dependencies.stdout, buildinfo.Current().Version, cfg.Env, cfg.Port, cfg.BaseDomain); err != nil {
-		log.Error("bootstrap failed", "phase", "banner")
+		log.Error("bootstrap failed", "phase", "banner", "reason", reasonBannerFailed)
 		return 1
 	}
 	log.Info("configuration loaded", "config", cfg.SafeSummary())
@@ -81,7 +81,7 @@ func run(dependencies runDependencies) int {
 	defer stopSignals()
 	prepared, err := dependencies.prepare(productionOptions(cfg, dependencies.newBuilder(cfg, log), dependencies.listen))
 	if err != nil || isNilInterface(prepared) {
-		log.Error("bootstrap failed", "phase", "prepare")
+		log.Error("bootstrap failed", "phase", "prepare", "reason", startupReason(err, reasonInternalError))
 		return 1
 	}
 	return prepared.Run(operator).ExitCode
