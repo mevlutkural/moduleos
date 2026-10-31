@@ -1,0 +1,18 @@
+# Build-context allowlist for apps/control-plane/Dockerfile. Everything is
+# excluded unless it is required to build the production binaries.
+**
+
+!go.mod
+!go.sum
+!LICENSE
+!apps/control-plane/cmd/
+!apps/control-plane/cmd/**
+!apps/control-plane/internal/
+!apps/control-plane/internal/**
+
+# Tests and test-only support never enter the context.
+**/*_test.go
+**/testdata/
+**/testdata/**
+apps/control-plane/internal/testkit/
+apps/control-plane/internal/testkit/**

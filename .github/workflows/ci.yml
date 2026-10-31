@@ -56,6 +56,10 @@ jobs:
         env:
           GOTOOLCHAIN: local
         run: go vet ./...
+      - name: Run static analysis on the container suite
+        env:
+          GOTOOLCHAIN: local
+        run: go vet -tags container ./apps/control-plane/containertest/...
       - name: Build all packages
         env:
           GOTOOLCHAIN: local
@@ -139,6 +143,26 @@ jobs:
           GOTOOLCHAIN: local
           MODULEOS_INTEGRATION_DISPOSABLE: "1"
         run: ./scripts/check-swarm-integration.sh
+
+  container:
+    name: Container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+      - name: Qualify the production container image
+        env:
+          GOTOOLCHAIN: local
+        run: ./scripts/check-container-image.sh
 
   vulnerability:
     name: Vulnerability
