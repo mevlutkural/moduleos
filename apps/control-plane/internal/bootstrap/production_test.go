@@ -104,11 +104,13 @@ func phase7CTestConfig() *config.Config {
 
 func TestProductionOptionProjectionsMapEveryConfigField(t *testing.T) {
 	cfg := phase7CTestConfig()
+	cfg.DatabasePath = "/var/lib/moduleos/moduleos.db"
 	application := applicationSettingsFromConfig(cfg)
 	wantApplication := applicationSettings{
 		baseDomain: cfg.BaseDomain, ingressNetwork: cfg.IngressNetwork, maxReplicas: cfg.MaxReplicas,
 		allowedMounts: cfg.AllowedMountRoots, deploymentTimeout: cfg.DeploymentTimeout,
 		maxApplications: cfg.MaxApplications, maxProjects: cfg.MaxProjects, dockerEndpoint: cfg.DockerEndpoint,
+		databaseDirectory: "/var/lib/moduleos",
 	}
 	if !reflect.DeepEqual(application, wantApplication) {
 		t.Fatalf("application projection = %#v, want %#v", application, wantApplication)

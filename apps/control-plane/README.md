@@ -148,15 +148,21 @@ services, or networks. It proves:
 - read-only root filesystem operation;
 - non-root starts.
 
-For a local development run, make the data root available and start the
-daemon with development defaults:
+For a local development run, make the data root and a separate database
+directory available and start the daemon with development defaults:
 
 ```sh
-mkdir -p /tmp/moduleos-data
+mkdir -p /tmp/moduleos-data /tmp/moduleos-state
 ALLOWED_MOUNT_ROOTS=/tmp/moduleos-data \
-DATABASE_PATH=/tmp/moduleos.db \
+DATABASE_PATH=/tmp/moduleos-state/moduleos.db \
 go run ./apps/control-plane/cmd/moduleosd
 ```
+
+The directory that holds `DATABASE_PATH` and its `-wal` and `-shm` files
+must stay separate from every `ALLOWED_MOUNT_ROOTS` entry. Startup fails when
+an allowed root equals, contains, or lies inside it, in either lexical or
+symlink-resolved form. Application bind mounts that equal, contain, or lie
+inside that directory are rejected.
 
 Genesis controls the Docker Engine on the same host through a local Unix
 socket. The default endpoint is `unix:///var/run/docker.sock`; containers must

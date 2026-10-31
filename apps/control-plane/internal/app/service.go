@@ -28,6 +28,7 @@ type Service struct {
 	queue             ReconcileQueue
 	allowedMountRoots []string
 	dockerSocketPath  string
+	databaseDirectory string
 	maxReplicas       int
 	maxApplications   int
 	maxProjects       int
@@ -135,6 +136,17 @@ func (s *Service) WithDockerEndpoint(endpoint string) *Service {
 	}
 	if filepath.IsAbs(path) && filepath.Clean(path) == path {
 		s.dockerSocketPath = path
+	}
+	return s
+}
+
+// WithDatabaseDirectory names the directory holding the control-plane SQLite
+// database so application bind mounts can never reach it. An empty or
+// non-canonical value leaves the check disabled, which only in-memory
+// databases use.
+func (s *Service) WithDatabaseDirectory(directory string) *Service {
+	if directory != "" && filepath.IsAbs(directory) && filepath.Clean(directory) == directory {
+		s.databaseDirectory = directory
 	}
 	return s
 }
@@ -913,7 +925,7 @@ func (s *Service) canonicalAllowedMountRoots() ([]string, error) {
 		if err != nil || !info.IsDir() {
 			return nil, fmt.Errorf("%w: allowed mount root must be a directory", store.ErrInvalidData)
 		}
-		if sensitiveMountRoot(canonical) {
+		if sensitiveMountRoot(canonical) || s.overlapsDatabaseDirectory(canonical) {
 			return nil, fmt.Errorf("%w: allowed mount root is denied", store.ErrInvalidData)
 		}
 		for _, existing := range resolved {
@@ -927,7 +939,7 @@ func (s *Service) canonicalAllowedMountRoots() ([]string, error) {
 }
 
 func (s *Service) sensitiveMountSource(source string) bool {
-	if sensitiveMountRoot(source) {
+	if sensitiveMountRoot(source) || s.overlapsDatabaseDirectory(source) {
 		return true
 	}
 	sockets := []string{"/var/run/docker.sock", "/run/docker.sock"}
@@ -952,6 +964,24 @@ func (s *Service) sensitiveMountSource(source string) bool {
 	}
 	for _, socket := range sockets {
 		if pathContains(source, socket) {
+			return true
+		}
+	}
+	return false
+}
+
+// overlapsDatabaseDirectory reports whether a resolved path equals, contains,
+// or lies inside the database directory, in its configured or resolved form.
+func (s *Service) overlapsDatabaseDirectory(path string) bool {
+	if s.databaseDirectory == "" {
+		return false
+	}
+	directories := []string{s.databaseDirectory}
+	if resolved, err := resolveMountPath(s.databaseDirectory); err == nil && resolved != s.databaseDirectory {
+		directories = append(directories, resolved)
+	}
+	for _, directory := range directories {
+		if pathContains(directory, path) || pathContains(path, directory) {
 			return true
 		}
 	}

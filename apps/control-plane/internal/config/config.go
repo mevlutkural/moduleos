@@ -200,6 +200,17 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	if !isSQLiteMemoryDatabase(c.DatabasePath) {
+		databaseDirectory := c.DatabaseDirectory()
+		if databaseDirectory == "" {
+			return fmt.Errorf("DATABASE_PATH directory cannot be resolved")
+		}
+		for _, root := range c.AllowedMountRoots {
+			if pathFormsOverlap(root, databaseDirectory) {
+				return fmt.Errorf("ALLOWED_MOUNT_ROOTS entries cannot contain or be inside the DATABASE_PATH directory")
+			}
+		}
+	}
 	if c.ReconcileInterval <= 0 || c.ReconcileMaxBackoff < minimumReconcileBackoff || c.DeploymentTimeout <= 0 || c.StabilizationWindow < 0 || c.ShutdownTimeout <= 0 {
 		return fmt.Errorf("reconcile, deployment, and shutdown durations are outside supported bounds")
 	}
@@ -524,6 +535,40 @@ func NormalizeCORSOrigins(origins []string) ([]string, error) {
 func configPathContains(root, path string) bool {
 	relative, err := filepath.Rel(root, path)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// DatabaseDirectory returns the absolute directory that holds the SQLite
+// database and its -wal and -shm files, or "" for an in-memory database.
+func (c *Config) DatabaseDirectory() string {
+	if c.DatabasePath == "" || isSQLiteMemoryDatabase(c.DatabasePath) {
+		return ""
+	}
+	directory, err := filepath.Abs(filepath.Dir(filepath.Clean(c.DatabasePath)))
+	if err != nil {
+		return ""
+	}
+	return directory
+}
+
+// pathFormsOverlap reports whether two paths are equal or one contains the
+// other, comparing both their lexical and their symlink-resolved forms.
+func pathFormsOverlap(left, right string) bool {
+	for _, leftForm := range pathForms(left) {
+		for _, rightForm := range pathForms(right) {
+			if configPathContains(leftForm, rightForm) || configPathContains(rightForm, leftForm) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pathForms(path string) []string {
+	forms := []string{filepath.Clean(path)}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && filepath.Clean(resolved) != forms[0] {
+		forms = append(forms, filepath.Clean(resolved))
+	}
+	return forms
 }
 
 func (c *Config) SafeSummary() map[string]any {

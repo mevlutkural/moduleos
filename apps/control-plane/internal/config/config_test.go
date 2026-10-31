@@ -920,3 +920,140 @@ func TestSafeSummaryClassifiesSensitivePathsAndEndpoints(t *testing.T) {
 		})
 	}
 }
+
+func TestDatabaseDirectory(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		path string
+		want string
+	}{
+		{path: "", want: ""},
+		{path: ":memory:", want: ""},
+		{path: "file::memory:?cache=shared", want: ""},
+		{path: "/var/lib/moduleos/moduleos.db", want: "/var/lib/moduleos"},
+		{path: "/var/lib/moduleos/../moduleos/state.db", want: "/var/lib/moduleos"},
+		{path: "data/moduleos.db", want: filepath.Join(workingDirectory, "data")},
+		{path: "moduleos.db", want: workingDirectory},
+	} {
+		cfg := validConfig()
+		cfg.DatabasePath = test.path
+		if got := cfg.DatabaseDirectory(); got != test.want {
+			t.Fatalf("DatabaseDirectory(%q) = %q, want %q", test.path, got, test.want)
+		}
+	}
+}
+
+func TestValidateRejectsMountRootsOverlappingTheDatabaseDirectory(t *testing.T) {
+	base := t.TempDir()
+	database := filepath.Join(base, "state")
+	if err := os.MkdirAll(filepath.Join(database, "apps"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "state-link")
+	if err := os.Symlink(database, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	resolvedDatabase, err := filepath.EvalSymlinks(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name         string
+		databasePath string
+		root         string
+	}{
+		{name: "root is the database directory", databasePath: filepath.Join(database, "moduleos.db"), root: database},
+		{name: "root contains the database directory", databasePath: filepath.Join(database, "moduleos.db"), root: base},
+		{name: "root is inside the database directory", databasePath: filepath.Join(database, "moduleos.db"), root: filepath.Join(database, "apps")},
+		{name: "root resolves to the database directory", databasePath: filepath.Join(database, "moduleos.db"), root: link},
+		{name: "database path resolves into the root", databasePath: filepath.Join(link, "moduleos.db"), root: resolvedDatabase},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.DatabasePath = test.databasePath
+			cfg.AllowedMountRoots = []string{"/srv/unrelated-root", test.root}
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "DATABASE_PATH directory") {
+				t.Fatalf("Validate() error = %v, want the database-directory overlap error", err)
+			}
+			for _, path := range []string{base, database, link, test.root} {
+				if strings.Contains(err.Error(), path) {
+					t.Fatalf("error exposed a path: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateRejectsARelativeDatabasePathInsideAMountRoot(t *testing.T) {
+	database := t.TempDir()
+	t.Chdir(database)
+	cfg := validConfig()
+	cfg.DatabasePath = "moduleos.db"
+	cfg.AllowedMountRoots = []string{database}
+
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "DATABASE_PATH directory") {
+		t.Fatalf("Validate() error = %v, want the database-directory overlap error", err)
+	}
+}
+
+func TestValidateAcceptsMountRootsSeparateFromTheDatabaseDirectory(t *testing.T) {
+	base := t.TempDir()
+	database := filepath.Join(base, "state")
+	if err := os.Mkdir(database, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := validConfig()
+	cfg.DatabasePath = filepath.Join(database, "moduleos.db")
+	cfg.AllowedMountRoots = []string{filepath.Join(base, "apps"), filepath.Join(base, "state-archive")}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	memory := validConfig()
+	memory.AllowedMountRoots = []string{base}
+	if err := memory.Validate(); err != nil {
+		t.Fatalf("in-memory database Validate() error = %v", err)
+	}
+}
+
+func TestValidateFailsClosedWhenTheDatabaseDirectoryCannotBeResolved(t *testing.T) {
+	removed := filepath.Join(t.TempDir(), "removed")
+	if err := os.Mkdir(removed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(removed)
+	if err := os.Remove(removed); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWD", "")
+	if _, err := os.Getwd(); err == nil {
+		t.Skip("the platform still resolves a removed working directory")
+	}
+	cfg := validConfig()
+	cfg.DatabasePath = "moduleos.db"
+
+	err := cfg.Validate()
+
+	if err == nil {
+		t.Fatal("Validate() accepted a database directory that cannot be resolved")
+	}
+}
+
+func TestLoadRejectsAMountRootOverlappingTheDatabaseDirectory(t *testing.T) {
+	clearConfigEnvironment(t)
+	database := t.TempDir()
+	t.Setenv("DATABASE_PATH", filepath.Join(database, "moduleos.db"))
+	t.Setenv("ALLOWED_MOUNT_ROOTS", database)
+
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "DATABASE_PATH directory") {
+		t.Fatalf("Load() error = %v, want the database-directory overlap error", err)
+	}
+	if _, err := os.Stat(filepath.Join(database, "moduleos.db")); !os.IsNotExist(err) {
+		t.Fatalf("Load created the database before rejecting the configuration: %v", err)
+	}
+}
