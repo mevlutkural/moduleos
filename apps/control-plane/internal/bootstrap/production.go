@@ -50,6 +50,7 @@ type applicationSettings struct {
 	maxApplications   int
 	maxProjects       int
 	dockerEndpoint    string
+	databaseDirectory string
 }
 
 type reconcilerSettings struct {
@@ -81,7 +82,8 @@ func defaultProductionFactories() productionFactories {
 				WithIngressNetwork(settings.ingressNetwork).
 				WithRuntimeLimits(settings.maxReplicas, settings.allowedMounts, settings.deploymentTimeout).
 				WithResourceLimits(settings.maxApplications, settings.maxProjects).
-				WithDockerEndpoint(settings.dockerEndpoint)
+				WithDockerEndpoint(settings.dockerEndpoint).
+				WithDatabaseDirectory(settings.databaseDirectory)
 			return service, nil
 		},
 		newReconciler: func(runtime closeableRuntime, service *app.Service, log *slog.Logger, settings reconcilerSettings) (reconcileLoop, error) {
@@ -110,6 +112,7 @@ func applicationSettingsFromConfig(cfg *config.Config) applicationSettings {
 		maxReplicas: cfg.MaxReplicas, allowedMounts: append([]string(nil), cfg.AllowedMountRoots...),
 		deploymentTimeout: cfg.DeploymentTimeout, maxApplications: cfg.MaxApplications,
 		maxProjects: cfg.MaxProjects, dockerEndpoint: cfg.DockerEndpoint,
+		databaseDirectory: cfg.DatabaseDirectory(),
 	}
 }
 

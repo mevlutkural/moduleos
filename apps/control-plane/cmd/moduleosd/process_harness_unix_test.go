@@ -114,6 +114,11 @@ func newProcessHarness(t *testing.T) *processHarness {
 	if err := os.Mkdir(dataRoot, 0o700); err != nil {
 		t.Fatalf("create data root: %v", err)
 	}
+	// The database directory must stay separate from every allowed mount root.
+	stateDirectory := filepath.Join(directory, "state")
+	if err := os.Mkdir(stateDirectory, 0o700); err != nil {
+		t.Fatalf("create database directory: %v", err)
+	}
 	apiKeyFile := filepath.Join(directory, "api-key")
 	if err := os.WriteFile(apiKeyFile, []byte(testAPIKey), 0o600); err != nil {
 		t.Fatalf("create API key file: %v", err)
@@ -132,7 +137,7 @@ func newProcessHarness(t *testing.T) *processHarness {
 	}
 	harness := &processHarness{
 		t: t, directory: directory,
-		database:   filepath.Join(directory, "moduleos.db"),
+		database:   filepath.Join(stateDirectory, "moduleos.db"),
 		dockerSock: filepath.Join(directory, "docker.sock"),
 		dataRoot:   dataRoot, apiKeyFile: apiKeyFile, address: address, port: port,
 		stdoutPath: filepath.Join(directory, "stdout.log"),
@@ -140,7 +145,7 @@ func newProcessHarness(t *testing.T) *processHarness {
 		environment: map[string]string{
 			"ENV": "production", "LOG_LEVEL": "debug", "LISTEN_ADDRESS": "127.0.0.1", "PORT": port,
 			"DOCKER_ENDPOINT": "unix://" + filepath.Join(directory, "docker.sock"),
-			"BASE_DOMAIN":     "moduleos.test", "DATABASE_PATH": filepath.Join(directory, "moduleos.db"),
+			"BASE_DOMAIN":     "moduleos.test", "DATABASE_PATH": filepath.Join(stateDirectory, "moduleos.db"),
 			"API_KEY_FILE": apiKeyFile, "ALLOWED_MOUNT_ROOTS": dataRoot,
 			"RECONCILE_INTERVAL": "1h", "RECONCILE_MAX_BACKOFF": "1s", "RECONCILE_WORKERS": "1",
 			"STABILIZATION_WINDOW": "0s", "SHUTDOWN_TIMEOUT": "2s", "READINESS_TIMEOUT": "500ms",
