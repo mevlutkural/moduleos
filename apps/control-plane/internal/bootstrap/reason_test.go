@@ -252,3 +252,91 @@ func TestStartupFailurePreservesMessageAndCause(t *testing.T) {
 		t.Fatal("unclassified error did not use the fallback")
 	}
 }
+
+type panickingAsError struct{}
+
+func (*panickingAsError) Error() string { return reasonSentinel }
+func (*panickingAsError) As(any) bool   { panic(reasonSentinel) }
+func (*panickingAsError) Unwrap() error { return nil }
+
+type panickingReasonError struct{}
+
+func (*panickingReasonError) Error() string         { return reasonSentinel }
+func (*panickingReasonError) StartupReason() string { panic(reasonSentinel) }
+
+func TestClassificationContainsPanickingCollaboratorErrors(t *testing.T) {
+	assembly := func(Registrar) (Assembly, error) {
+		return Assembly{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Server: &fakeServer{}, Readiness: &fakeReadiness{},
+			Workers: []daemon.Worker{{Name: "worker", Run: func(context.Context) error { return nil }}},
+		}, nil
+	}
+	tests := []struct {
+		failure error
+		stage   string
+		want    string
+	}{
+		// errors.Is panics for both collaborators.
+		{failure: &panickingMatchError{}, stage: "builder", want: reasonInternalError},
+		{failure: &panickingMatchError{}, stage: "listener", want: reasonInternalError},
+		// As and StartupReason are consulted only for builder errors; a
+		// listener failure never inspects them, so it stays a bind failure.
+		{failure: &panickingAsError{}, stage: "builder", want: reasonInternalError},
+		{failure: &panickingAsError{}, stage: "listener", want: reasonListenerBindFailed},
+		{failure: &panickingReasonError{}, stage: "builder", want: reasonInternalError},
+		{failure: &panickingReasonError{}, stage: "listener", want: reasonListenerBindFailed},
+	}
+	for _, test := range tests {
+		failure, stage := test.failure, test.stage
+		{
+			t.Run(fmt.Sprintf("%T/%s", failure, stage), func(t *testing.T) {
+				dependencies, _, _, _, logs, _ := successfulRunDependencies(phase7CTestConfig())
+				dependencies.newBuilder = func(*config.Config, *slog.Logger) Builder {
+					if stage == "builder" {
+						return func(Registrar) (Assembly, error) { return Assembly{}, failure }
+					}
+					return assembly
+				}
+				dependencies.listen = func(string, string) (net.Listener, error) { return nil, failure }
+				dependencies.prepare = func(options Options) (process, error) {
+					prepared, err := Prepare(options)
+					if prepared == nil {
+						return nil, err
+					}
+					return prepared, err
+				}
+
+				if exit := run(dependencies); exit != 1 {
+					t.Fatalf("exit = %d", exit)
+				}
+
+				record := failureRecord(t, logs.String())
+				requireFailure(t, record, "prepare", test.want, "")
+				if strings.Contains(logs.String(), "private classification panic") {
+					t.Fatalf("classification panic text leaked: %q", logs.String())
+				}
+			})
+		}
+	}
+}
+
+func TestConfigClassificationContainsPanickingErrors(t *testing.T) {
+	stderr := &bytes.Buffer{}
+	dependencies, _, _, _, _, _ := successfulRunDependencies(phase7CTestConfig())
+	dependencies.stderr = stderr
+	dependencies.loadConfig = func() (*config.Config, error) { return nil, &panickingAsError{} }
+
+	if exit := run(dependencies); exit != 1 {
+		t.Fatalf("exit = %d", exit)
+	}
+
+	requireFailure(t, failureRecord(t, stderr.String()), "config", reasonConfigInvalid, "")
+}
+
+func TestStartupReasonContainsPanics(t *testing.T) {
+	for _, err := range []error{&panickingAsError{}, &panickingReasonError{}} {
+		if got := startupReason(err, "fallback"); got != reasonInternalError {
+			t.Fatalf("startupReason(%T) = %q, want %q", err, got, reasonInternalError)
+		}
+	}
+}

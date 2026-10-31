@@ -62,10 +62,7 @@ func Prepare(options Options) (*daemon.Daemon, error) {
 	assembly, err := callBuilder(options.Build, ledger)
 	if err != nil {
 		ledger.unwind(options.CleanupTimeout)
-		reason := startupReason(err, reasonAssemblyFailed)
-		if errors.Is(err, ErrCollaboratorPanic) {
-			reason = reasonInternalError
-		}
+		reason := collaboratorFailureReason(err, startupReason(err, reasonAssemblyFailed))
 		return nil, safeWrapReason("build assembly failed", err, reason)
 	}
 	if err := validateAssembly(assembly); err != nil {
@@ -76,11 +73,7 @@ func Prepare(options Options) (*daemon.Daemon, error) {
 	listener, err := callListener(options.Listen, options.Network, options.Address)
 	if err != nil {
 		unwindPreparation(listener, ledger, nil, options.CleanupTimeout)
-		reason := reasonListenerBindFailed
-		if errors.Is(err, ErrCollaboratorPanic) {
-			reason = reasonInternalError
-		}
-		return nil, safeWrapReason("bind listener failed", err, reason)
+		return nil, safeWrapReason("bind listener failed", err, collaboratorFailureReason(err, reasonListenerBindFailed))
 	}
 	if isNilInterface(listener) {
 		ledger.unwind(options.CleanupTimeout)
