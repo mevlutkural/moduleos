@@ -171,6 +171,41 @@ socket. The default endpoint is `unix:///var/run/docker.sock`; containers must
 mount that socket at the configured path. Remote Docker transports are not
 supported.
 
+## Startup failure reasons
+
+When `moduleosd` cannot start, it logs exactly one `bootstrap failed` record
+and exits with status 1. The record carries the existing `phase` and one
+stable `reason`.
+
+Configuration failures also carry a `variable` attribute when a single
+environment variable is identified. Neither attribute ever contains a
+configured value, a path, a secret, or raw error text.
+
+| Phase | Reason | Meaning |
+|---|---|---|
+| `config` | `api_key_source_conflict` | Both `API_KEY` and `API_KEY_FILE` are set. |
+| `config` | `api_key_source_invalid` | The API key source is not allowed in this environment. For example, production sets `API_KEY` or omits `API_KEY_FILE`. |
+| `config` | `api_key_file_invalid` | `API_KEY_FILE` cannot be read safely, or its content is invalid. |
+| `config` | `value_empty` | A variable is set to an empty value. |
+| `config` | `value_unparsable` | A value cannot be parsed into its type. |
+| `config` | `value_invalid` | A value is outside its supported form or bounds. |
+| `config` | `value_required` | Production requires a variable that is not set. |
+| `prepare` | `database_open_failed` | The SQLite database cannot be opened or initialized. |
+| `prepare` | `database_migration_failed` | Schema migrations cannot be applied. Causes include a dirty or unknown migration version. |
+| `prepare` | `listener_bind_failed` | The HTTP listener cannot bind `LISTEN_ADDRESS` and `PORT`. |
+
+These reasons are defensive. No supported configuration triggers them; they
+indicate an internal fault:
+
+| Phase | Reason |
+|---|---|
+| `config` | `config_invalid` |
+| `logger` | `logger_unavailable` |
+| `banner` | `banner_failed` |
+| `prepare` | `docker_client_invalid` |
+| `prepare` | `assembly_failed` |
+| `prepare` | `internal_error` |
+
 ## Runtime-log limits
 
 Runtime log snapshots and live SSE sessions are bounded control-plane

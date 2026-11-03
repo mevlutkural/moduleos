@@ -34,17 +34,17 @@ func validateAPIKeySourceConflict(environment map[string]environmentValue) error
 
 func resolveAPIKey(cfg *Config, environment map[string]environmentValue, readFile apiKeyFileReader) error {
 	if cfg == nil || readFile == nil {
-		return errors.New("API key configuration cannot be resolved")
+		return loadFailure(ReasonAPIKeySourceInvalid, "", errors.New("API key configuration cannot be resolved"))
 	}
 
 	direct := environment["API_KEY"]
 	file := environment["API_KEY_FILE"]
 	if cfg.Env == "production" {
 		if direct.set {
-			return errors.New("API_KEY is not supported in production; configure API_KEY_FILE")
+			return loadFailure(ReasonAPIKeySourceInvalid, "API_KEY", errors.New("API_KEY is not supported in production; configure API_KEY_FILE"))
 		}
 		if !file.set {
-			return errors.New("API_KEY_FILE must be explicitly configured in production")
+			return loadFailure(ReasonAPIKeySourceInvalid, "API_KEY_FILE", errors.New("API_KEY_FILE must be explicitly configured in production"))
 		}
 	}
 	if !file.set {
@@ -53,7 +53,7 @@ func resolveAPIKey(cfg *Config, environment map[string]environmentValue, readFil
 
 	value, err := readFile(file.value)
 	if err != nil {
-		return err
+		return loadFailure(ReasonAPIKeyFileInvalid, "API_KEY_FILE", err)
 	}
 	cfg.APIKey = value
 	return nil

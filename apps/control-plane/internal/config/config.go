@@ -94,7 +94,7 @@ type dockerEndpointIdentity struct {
 func Load() (*Config, error) {
 	environment := captureEnvironment()
 	if err := validateAPIKeySourceConflict(environment); err != nil {
-		return nil, err
+		return nil, loadFailure(ReasonAPIKeySourceConflict, "", err)
 	}
 	if err := validateExplicitEnvironment(environment); err != nil {
 		return nil, err
@@ -105,7 +105,7 @@ func Load() (*Config, error) {
 		return nil, safeConfigurationParseError(err)
 	}
 	if err := validateEnvironmentName(cfg.Env); err != nil {
-		return nil, err
+		return nil, loadFailure(ReasonValueInvalid, "ENV", err)
 	}
 	if err := resolveAPIKey(cfg, environment, readAPIKeyFile); err != nil {
 		return nil, err
@@ -114,18 +114,18 @@ func Load() (*Config, error) {
 		cfg.CORSAllowedOrigins = nil
 	}
 	if err := resolveDockerEndpoint(cfg, environment); err != nil {
-		return nil, err
+		return nil, loadFailure(ReasonValueInvalid, leadingVariable(err.Error()), err)
 	}
 	origins, err := NormalizeCORSOrigins(cfg.CORSAllowedOrigins)
 	if err != nil {
-		return nil, fmt.Errorf("CORS_ALLOWED_ORIGINS: %w", err)
+		return nil, loadFailure(ReasonValueInvalid, "CORS_ALLOWED_ORIGINS", fmt.Errorf("CORS_ALLOWED_ORIGINS: %w", err))
 	}
 	cfg.CORSAllowedOrigins = origins
 	if err := cfg.Validate(); err != nil {
-		return nil, err
+		return nil, loadFailure(ReasonValueInvalid, leadingVariable(err.Error()), err)
 	}
 	if err := validateEnvironmentRequirements(cfg, environment); err != nil {
-		return nil, err
+		return nil, loadFailure(ReasonValueRequired, leadingVariable(err.Error()), err)
 	}
 	return cfg, nil
 }
@@ -278,7 +278,7 @@ func environmentSnapshot(environment map[string]environmentValue) map[string]str
 func safeConfigurationParseError(parseErr error) error {
 	var aggregate env.AggregateError
 	if !errors.As(parseErr, &aggregate) {
-		return errors.New("parse configuration: one or more environment values are invalid")
+		return loadFailure(ReasonValueUnparsable, "", errors.New("parse configuration: one or more environment values are invalid"))
 	}
 
 	keys := make(map[string]struct{}, len(aggregate.Errors))
@@ -298,7 +298,7 @@ func safeConfigurationParseError(parseErr error) error {
 		}
 	}
 	if len(keys) == 0 {
-		return errors.New("parse configuration: one or more environment values are invalid")
+		return loadFailure(ReasonValueUnparsable, "", errors.New("parse configuration: one or more environment values are invalid"))
 	}
 
 	names := make([]string, 0, len(keys))
@@ -306,7 +306,11 @@ func safeConfigurationParseError(parseErr error) error {
 		names = append(names, key)
 	}
 	sort.Strings(names)
-	return fmt.Errorf("parse configuration: invalid value for %s", strings.Join(names, ", "))
+	variable := ""
+	if len(names) == 1 {
+		variable = names[0]
+	}
+	return loadFailure(ReasonValueUnparsable, variable, fmt.Errorf("parse configuration: invalid value for %s", strings.Join(names, ", ")))
 }
 
 func isSQLiteMemoryDatabase(value string) bool {
@@ -377,7 +381,7 @@ func validateExplicitEnvironment(environment map[string]environmentValue) error 
 		value := environment[key]
 		_, mayBeEmpty := allowedEmpty[key]
 		if value.set && !mayBeEmpty && strings.TrimSpace(value.value) == "" {
-			return fmt.Errorf("%s cannot be explicitly empty", key)
+			return loadFailure(ReasonValueEmpty, key, fmt.Errorf("%s cannot be explicitly empty", key))
 		}
 	}
 	return nil

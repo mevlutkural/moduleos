@@ -26,6 +26,9 @@ var ErrStaleObservation = errors.New("stale observation")
 var ErrInvalidTransition = errors.New("invalid state transition")
 var ErrInvalidData = errors.New("invalid persisted data")
 
+// ErrMigrationFailed reports that schema migrations could not be applied.
+var ErrMigrationFailed = errors.New("migration failed")
+
 type SQLiteStore struct {
 	db               *sql.DB
 	deploymentCommit func(*sql.Tx) error
@@ -73,7 +76,7 @@ func newSQLiteStore(dbPath string, dependencies sqliteInitializationDependencies
 
 	store := &SQLiteStore{db: db}
 	if err := dependencies.runMigrations(store); err != nil {
-		return nil, fmt.Errorf("migration failed: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrMigrationFailed, err)
 	}
 
 	transferred = true
