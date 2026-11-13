@@ -1,0 +1,72 @@
+version: "3.8"
+
+services:
+  moduleosd:
+    image: ${MODULEOS_IMAGE:?MODULEOS_IMAGE is required}
+    environment:
+      API_KEY_FILE: /run/secrets/moduleos_api_key
+      DOCKER_ENDPOINT: unix:///var/run/docker.sock
+      SHUTDOWN_TIMEOUT: 15s
+      BASE_DOMAIN: ${MODULEOS_BASE_DOMAIN:?MODULEOS_BASE_DOMAIN is required}
+      ALLOWED_MOUNT_ROOTS: ${MODULEOS_APP_DATA_ROOT:?MODULEOS_APP_DATA_ROOT is required}
+      INGRESS_NETWORK: ${MODULEOS_INGRESS_NETWORK:?MODULEOS_INGRESS_NETWORK is required}
+      LOG_LEVEL: ${MODULEOS_LOG_LEVEL:?MODULEOS_LOG_LEVEL is required}
+      CORS_ALLOWED_ORIGINS: ${MODULEOS_CORS_ALLOWED_ORIGINS-}
+    ports:
+      - target: 3000
+        published: ${MODULEOS_PORT:?MODULEOS_PORT is required}
+        protocol: tcp
+        mode: host
+    volumes:
+      - type: volume
+        source: moduleos-data
+        target: /var/lib/moduleos
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+      - type: bind
+        source: ${MODULEOS_APP_DATA_ROOT:?MODULEOS_APP_DATA_ROOT is required}
+        target: ${MODULEOS_APP_DATA_ROOT:?MODULEOS_APP_DATA_ROOT is required}
+        read_only: true
+    secrets:
+      - source: moduleos-api-key
+        target: moduleos_api_key
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_READ_SEARCH]
+    stop_grace_period: 30s
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+        delay: 5s
+      update_config:
+        parallelism: 1
+        order: stop-first
+        failure_action: pause
+        monitor: 60s
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+        failure_action: pause
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  moduleos-data:
+    external: true
+    name: ${MODULEOS_DATA_VOLUME:?MODULEOS_DATA_VOLUME is required}
+
+secrets:
+  moduleos-api-key:
+    external: true
+    name: ${MODULEOS_API_KEY_SECRET:?MODULEOS_API_KEY_SECRET is required}

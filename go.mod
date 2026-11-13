@@ -1,6 +1,6 @@
 module github.com/mevlutkural/moduleos
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/caarlos0/env/v11 v11.4.0
@@ -13,12 +13,13 @@ require (
 	github.com/moby/moby/api v1.55.0
 	github.com/moby/moby/client v0.5.1
 	github.com/valyala/fasthttp v1.73.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.48.2
 )
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/andybalholm/brotli v1.2.2 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/docker/go-connections v0.7.0 // indirect
@@ -31,7 +32,7 @@ require (
 	github.com/go-openapi/swag/jsonname v0.25.5 // indirect
 	github.com/gofiber/schema v1.8.3 // indirect
 	github.com/gofiber/utils/v2 v2.4.1 // indirect
-	github.com/klauspost/compress v1.19.2 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mattn/go-sqlite3 v1.14.22 // indirect
