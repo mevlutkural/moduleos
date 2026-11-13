@@ -1,5 +1,7 @@
 # ModuleOS Control Plane
 
+For the official single-node Swarm deployment, see [deploy/swarm/README.md](../../deploy/swarm/README.md).
+
 The control plane is the long-running ModuleOS backend. It owns application use
 cases, desired state, reconciliation, runtime adapters, persistence, and the
 public API transport.

@@ -70,9 +70,9 @@ code stays with its owning application rather than moving into a generic package
 
 ### `deploy`
 
-Deployment definitions and operator-facing examples, such as Compose, systemd,
-or environment templates. These describe running ModuleOS; they do not build its
-release artifacts.
+The official single-node Swarm deployment, its preflight/deploy scripts, and
+operator-facing examples live under `deploy/swarm/`. These describe running
+ModuleOS; they do not build its release artifacts.
 
 ### `packaging`
 
