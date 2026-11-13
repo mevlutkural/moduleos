@@ -71,7 +71,7 @@ func TestPreflightAgainstFailClosedFakeDocker(t *testing.T) {
 			bin := filepath.Join(root, "bin")
 			appRoot := filepath.Join(root, "apps")
 			volumeRoot := filepath.Join(root, "volume")
-			dockerRoot := filepath.Join(root, "docker-root")
+			dockerRoot := filepath.Join(root, "docker-data")
 			for _, dir := range []string{bin, appRoot, volumeRoot, dockerRoot} {
 				if err := os.Mkdir(dir, 0755); err != nil {
 					t.Fatal(err)
