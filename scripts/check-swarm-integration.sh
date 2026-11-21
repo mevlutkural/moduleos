@@ -18,7 +18,8 @@ command -v docker >/dev/null 2>&1 || {
 readonly docker_endpoint="unix:///var/run/docker.sock"
 readonly -a docker_cmd=(docker --host "${docker_endpoint}")
 export MODULEOS_INTEGRATION_DOCKER_ENDPOINT="${docker_endpoint}"
-readonly integration_run_id="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+integration_run_id="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+readonly integration_run_id
 export MODULEOS_INTEGRATION_RUN_ID="${integration_run_id}"
 
 "${docker_cmd[@]}" info >/dev/null

@@ -2,6 +2,7 @@ package swarm_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
@@ -12,6 +13,9 @@ import (
 
 func TestSemanticClientRender(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
+		if os.Getenv("MODULEOS_REQUIRE_STACK_RENDER") == "1" {
+			t.Fatal("Docker CLI required for the deployment gate")
+		}
 		t.Skip("Docker CLI unavailable; render not executed")
 	}
 	cmd := exec.Command("docker", "--host", "unix:///tmp/moduleos-no-daemon.sock", "stack", "config", "-c", "stack.yml")
@@ -24,6 +28,13 @@ func TestSemanticClientRender(t *testing.T) {
 	render, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("client render failed: %v", err)
+	}
+	golden, err := os.ReadFile("testdata/stack.golden.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := compareRender(render, golden); err != nil {
+		t.Fatal(err)
 	}
 	missing := exec.Command("docker", "--host", "unix:///tmp/moduleos-no-daemon.sock", "stack", "config", "-c", "stack.yml")
 	for _, item := range cmd.Env {
@@ -143,5 +154,34 @@ func TestSemanticClientRender(t *testing.T) {
 	}
 	if bytes.Contains(render, []byte("API_KEY=")) {
 		t.Fatal("credential environment field present")
+	}
+}
+
+func compareRender(actual, golden []byte) error {
+	var a, b any
+	if err := yaml.Unmarshal(actual, &a); err != nil {
+		return err
+	}
+	if err := yaml.Unmarshal(golden, &b); err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(a, b) {
+		return fmt.Errorf("full stack render differs from testdata/stack.golden.yml")
+	}
+	return nil
+}
+
+func TestRenderRejectsDrift(t *testing.T) {
+	golden, err := os.ReadFile("testdata/stack.golden.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, changed := range [][]byte{
+		bytes.Replace(golden, []byte("read_only: true"), []byte("read_only: false"), 1),
+		append(append([]byte{}, golden...), []byte("unexpected_key: true\n")...),
+	} {
+		if err := compareRender(changed, golden); err == nil {
+			t.Fatal("drift accepted")
+		}
 	}
 }

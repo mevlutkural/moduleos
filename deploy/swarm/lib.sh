@@ -2,7 +2,8 @@
 # Trusted helpers for the two public Swarm commands. Never source the operator file.
 set -euo pipefail
 
-readonly stack_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+stack_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly stack_dir
 readonly stack_name=moduleos-system
 readonly service_name=moduleos-system_moduleosd
 readonly docker_endpoint=unix:///var/run/docker.sock
@@ -99,8 +100,8 @@ parse_env() {
   settings[MODULEOS_INGRESS_NETWORK]=${settings[MODULEOS_INGRESS_NETWORK]:-moduleos-ingress}
   settings[MODULEOS_LOG_LEVEL]=${settings[MODULEOS_LOG_LEVEL]:-info}
   settings[MODULEOS_CORS_ALLOWED_ORIGINS]=${settings[MODULEOS_CORS_ALLOWED_ORIGINS]:-}
-  [[ ${settings[MODULEOS_PORT]} =~ ^[1-9][0-9]{0,4}$ ]] && ((10#${settings[MODULEOS_PORT]} <= 65535)) || fail 'invalid_input: MODULEOS_PORT'
-  [[ ${settings[MODULEOS_BASE_DOMAIN]} =~ ^[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]$ && ${settings[MODULEOS_BASE_DOMAIN]} == *.* ]] || fail 'invalid_input: MODULEOS_BASE_DOMAIN'
+  if [[ ! ${settings[MODULEOS_PORT]} =~ ^[1-9][0-9]{0,4}$ ]] || ((10#${settings[MODULEOS_PORT]} > 65535)); then fail 'invalid_input: MODULEOS_PORT'; fi
+  if [[ ! ${settings[MODULEOS_BASE_DOMAIN]} =~ ^[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]$ || ${settings[MODULEOS_BASE_DOMAIN]} != *.* ]]; then fail 'invalid_input: MODULEOS_BASE_DOMAIN'; fi
   [[ ${settings[MODULEOS_LOG_LEVEL]} =~ ^(debug|info|warn|error)$ ]] || fail 'invalid_input: MODULEOS_LOG_LEVEL'
   if [[ -n ${settings[MODULEOS_CORS_ALLOWED_ORIGINS]} ]]; then
     [[ ${settings[MODULEOS_CORS_ALLOWED_ORIGINS]} != ,* && ${settings[MODULEOS_CORS_ALLOWED_ORIGINS]} != *, && ${settings[MODULEOS_CORS_ALLOWED_ORIGINS]} != *,,* ]] || fail 'invalid_input: MODULEOS_CORS_ALLOWED_ORIGINS'
@@ -113,7 +114,7 @@ parse_env() {
       [[ $origin =~ ^https?://(\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9.-]+)(:([0-9]+))?$ ]] || fail 'invalid_input: MODULEOS_CORS_ALLOWED_ORIGINS'
       cors_port=${BASH_REMATCH[3]:-}
       if [[ -n $cors_port ]]; then
-        [[ $cors_port =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$cors_port <= 65535)) || fail 'invalid_input: MODULEOS_CORS_ALLOWED_ORIGINS port'
+        if [[ ! $cors_port =~ ^[1-9][0-9]{0,4}$ ]] || ((10#$cors_port > 65535)); then fail 'invalid_input: MODULEOS_CORS_ALLOWED_ORIGINS port'; fi
       fi
     done
   fi
@@ -200,7 +201,7 @@ validate_image() {
     deployment_image=$image_id
   fi
   for index in "${!docker_env[@]}"; do
-    [[ ${docker_env[$index]} != MODULEOS_IMAGE=* ]] || docker_env[$index]="MODULEOS_IMAGE=$deployment_image"
+    [[ ${docker_env[index]} != MODULEOS_IMAGE=* ]] || docker_env[index]="MODULEOS_IMAGE=$deployment_image"
   done
 }
 
@@ -240,7 +241,7 @@ validate_render() {
 }
 
 preflight() {
-  local info version swarm nodes socket_group secret volume network network_json security_opts listed_services listed_networks fs_type
+  local info='' version='' nodes='' socket_group secret='' volume='' network_json='' security_opts listed_services='' listed_networks='' fs_type
   [[ $(uname -s) == Linux ]] || fail 'unsupported_host: Linux required'
   capture_docker info 65536 info --format '{{json .}}' 2>/dev/null || fail 'unsupported_host: Docker unavailable'
   [[ $(jq -r '.OSType' <<< "$info") == linux ]] || fail 'unsupported_host: Linux engine required'
@@ -251,10 +252,10 @@ preflight() {
   ((${version%%.*} > 1 || (${version%%.*} == 1 && ${version##*.} >= 42))) || fail 'unsupported_host: Docker API too old'
   [[ $(jq -r '.Swarm.LocalNodeState' <<< "$info") == active && $(jq -r '.Swarm.ControlAvailable' <<< "$info") == true ]] || fail 'unsupported_host: manager Swarm required'
   capture_docker nodes 65536 node ls --format '{{json .}}' 2>/dev/null || fail 'unsupported_host: cannot inspect Swarm nodes'
-  [[ $(wc -l <<< "$nodes") -eq 1 ]] && jq -e '.Status == "Ready" and .Availability == "Active" and .Self == true and .ManagerStatus != ""' <<< "$nodes" >/dev/null || fail 'unsupported_host: exactly one ready manager required'
+  if [[ $(wc -l <<< "$nodes") -ne 1 ]] || ! jq -e '.Status == "Ready" and .Availability == "Active" and .Self == true and .ManagerStatus != ""' <<< "$nodes" >/dev/null; then fail 'unsupported_host: exactly one ready manager required'; fi
   [[ -S /var/run/docker.sock ]] || fail 'unsupported_host: local Docker socket missing'
   socket_group=$(stat -c %g /var/run/docker.sock) || fail 'unsupported_host: Docker socket metadata'
-  [[ $socket_group =~ ^[0-9]+$ ]] && ((socket_group > 0)) || fail 'unsupported_host: Docker socket group zero'
+  if [[ ! $socket_group =~ ^[0-9]+$ ]] || ((socket_group <= 0)); then fail 'unsupported_host: Docker socket group zero'; fi
   capture_docker listed_services 8192 service ls --filter "name=$service_name" --format '{{.Name}}' 2>/dev/null || fail 'unsupported_host: cannot inspect services'
   local existing
   if [[ $listed_services == "$service_name" || $listed_services == *$'\n'"$service_name" || $listed_services == "$service_name"$'\n'* ]]; then

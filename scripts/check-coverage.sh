@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repository_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 profile_dir=$(mktemp -d "${TMPDIR:-/tmp}/moduleos-coverage.XXXXXX")
 trap 'rm -rf "$profile_dir"' EXIT HUP INT TERM
 
