@@ -81,6 +81,7 @@ remove_network_bounded() {
   done
   return 1
 }
+info=''
 capture_docker_cmd info 65536 info --format '{{json .}}'
 [[ $(jq -r '.OSType' <<< "$info") == linux ]] || { echo 'Linux Docker server required' >&2; exit 2; }
 security_options=$(jq -r '(.SecurityOptions // []) | join(" ")' <<< "$info")
@@ -195,7 +196,7 @@ cleanup() {
       echo 'Refusing to remove an unowned container' >&2; result=1
     fi
   done
-  for network in "moduleos-smoke-${run_id}-net"; do
+  network="moduleos-smoke-${run_id}-net"
     network_record=$(docker_cmd network inspect --format '{{.ID}}|{{.Name}}|{{index .Labels "moduleos.managed"}}|{{index .Labels "moduleos.resource.kind"}}' "$network" 2>/dev/null || true)
     if [[ -n "$network_record" ]]; then
       if [[ "$network_record" == *"|$network|true|project-network" && ( -z "$app_network_id" || "${network_record%%|*}" == "$app_network_id" ) ]]; then
@@ -204,7 +205,6 @@ cleanup() {
         echo 'Refusing to remove an unowned project network' >&2; result=1
       fi
     fi
-  done
   root_record=$(docker_cmd network inspect --format '{{.ID}}|{{.Name}}|{{index .Labels "moduleos.managed"}}|{{index .Labels "moduleos.resource.kind"}}' moduleos-root-net 2>/dev/null || true)
   if [[ -n "$root_record" ]]; then
     if [[ "$root_record" == *"|moduleos-root-net|true|project-network" && ( -z "$root_network_id" || "${root_record%%|*}" == "$root_network_id" ) ]]; then

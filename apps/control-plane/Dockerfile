@@ -79,6 +79,9 @@ EXPOSE 3000
 # The helper starts as root only to adjust ownership of the data directory and
 # exact SQLite files and to add the Docker socket group. It then drops to
 # 65532:65532 irreversibly and executes moduleosd, which runs as PID 1.
+# The tested helper needs root for descriptor-scoped preparation, then drops
+# irreversibly to 65532:65532 before executing the daemon.
+# hadolint ignore=DL3002
 USER 0:0
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \

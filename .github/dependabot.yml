@@ -1,5 +1,20 @@
 version: 2
 updates:
+  - package-ecosystem: "docker"
+    directory: "/apps/control-plane"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "09:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 5
+    assignees:
+      - "mevlutkural"
+    labels:
+      - "dependencies"
+      - "area/ci"
+    commit-message:
+      prefix: "build(deps)"
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:

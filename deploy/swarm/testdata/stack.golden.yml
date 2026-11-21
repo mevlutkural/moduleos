@@ -1,0 +1,75 @@
+version: "3.8"
+services:
+  moduleosd:
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_READ_SEARCH
+    cap_drop:
+      - ALL
+    deploy:
+      replicas: 1
+      update_config:
+        parallelism: 1
+        failure_action: pause
+        monitor: 1m0s
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        failure_action: pause
+        order: stop-first
+      restart_policy:
+        condition: any
+        delay: 5s
+      placement:
+        constraints:
+          - node.role == manager
+    environment:
+      ALLOWED_MOUNT_ROOTS: /srv/moduleos-apps
+      API_KEY_FILE: /run/secrets/moduleos_api_key
+      BASE_DOMAIN: moduleos.example
+      CORS_ALLOWED_ORIGINS: ""
+      DOCKER_ENDPOINT: unix:///var/run/docker.sock
+      INGRESS_NETWORK: moduleos-ingress
+      LOG_LEVEL: info
+      SHUTDOWN_TIMEOUT: 15s
+    image: example/moduleos:v1
+    logging:
+      driver: json-file
+      options:
+        max-file: "5"
+        max-size: 10m
+    ports:
+      - mode: host
+        target: 3000
+        published: 18888
+        protocol: tcp
+    read_only: true
+    secrets:
+      - source: moduleos-api-key
+        target: moduleos_api_key
+        uid: "65532"
+        gid: "65532"
+        mode: 256
+    stop_grace_period: 30s
+    volumes:
+      - type: volume
+        source: moduleos-data
+        target: /var/lib/moduleos
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+      - type: bind
+        source: /srv/moduleos-apps
+        target: /srv/moduleos-apps
+        read_only: true
+volumes:
+  moduleos-data:
+    name: moduleos-data
+    external: true
+secrets:
+  moduleos-api-key:
+    name: moduleos_api_key_v1
+    external: true

@@ -9,8 +9,8 @@ set -eu
 # exactly what it created. It never mounts the host Docker socket and never
 # touches Swarm, services, or networks.
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repository_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 cd "$repository_root"
 
 buildx() {
@@ -50,6 +50,10 @@ case "$native_architecture" in
     exit 2
     ;;
 esac
+if [ -n "${MODULEOS_EXPECT_ARCH:-}" ] && [ "$native_architecture" != "$MODULEOS_EXPECT_ARCH" ]; then
+  printf 'error: expected native %s, Docker Engine is %s\n' "$MODULEOS_EXPECT_ARCH" "$native_architecture" >&2
+  exit 2
+fi
 
 version=dev
 revision=$(git rev-parse HEAD)
@@ -103,3 +107,7 @@ MODULEOS_CONTAINER_REVISION="$revision" \
 MODULEOS_CONTAINER_BUILD_DATE="$build_date" \
 MODULEOS_CONTAINER_RUN_ID="$run_id" \
   go test -tags container -count=1 -timeout=20m -v ./apps/control-plane/containertest
+
+if [ "${MODULEOS_SCAN_IMAGE:-0}" = 1 ]; then
+  bash ./scripts/scan-container-image.sh "$image" "$native_architecture"
+fi

@@ -149,9 +149,17 @@ jobs:
         run: ./scripts/check-swarm-integration.sh
 
   container:
-    name: Container
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    name: Container + image scan (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -163,10 +171,44 @@ jobs:
           go-version-file: go.mod
           check-latest: false
           cache-dependency-path: go.sum
-      - name: Qualify the production container image
+      - name: Install verified image scanner
+        run: |
+          mkdir -p "$RUNNER_TEMP/moduleos-tools"
+          bash scripts/install-trivy.sh "$RUNNER_TEMP/moduleos-tools"
+          echo "$RUNNER_TEMP/moduleos-tools" >> "$GITHUB_PATH"
+      - name: Qualify and scan the same production container image
         env:
           GOTOOLCHAIN: local
+          MODULEOS_EXPECT_ARCH: ${{ matrix.arch }}
+          MODULEOS_SCAN_IMAGE: "1"
         run: ./scripts/check-container-image.sh
+
+  deploy-assets:
+    name: Deploy assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+      - name: Install verified linters
+        run: |
+          mkdir -p "$RUNNER_TEMP/moduleos-tools"
+          bash scripts/install-ci-tools.sh "$RUNNER_TEMP/moduleos-tools"
+          echo "$RUNNER_TEMP/moduleos-tools" >> "$GITHUB_PATH"
+      - name: Validate scripts, Dockerfile, and complete stack render
+        env:
+          GOTOOLCHAIN: local
+        run: bash scripts/check-deploy-assets.sh
+      - name: Verify checks leave the tree unchanged
+        run: git diff --exit-code
 
   stack-smoke:
     name: Stack smoke

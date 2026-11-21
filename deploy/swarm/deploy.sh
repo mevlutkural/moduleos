@@ -25,6 +25,7 @@ init_command "$@"
 preflight
 verify_critical_identities
 deadline=$((SECONDS + 300))
+state=''
 if ! docker_long stack deploy --detach=false --resolve-image "$resolve_image" -c "$render_file" "$stack_name" > "$work_dir/deploy.out" 2> "$work_dir/deploy.err"; then
   deployment_failure 'deployment_failed: inspect the preserved service state'
 fi
