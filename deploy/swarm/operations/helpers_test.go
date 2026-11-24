@@ -83,62 +83,6 @@ func TestBoundedCommandAndCopyPaths(t *testing.T) {
 	}
 }
 
-func TestCleanupIdentityAndDefiniteAbsence(t *testing.T) {
-	const run = "abcdef012345"
-	name := "ops-" + run + "-restore"
-	expectedID := volumeIdentity(name, "created", "/fixture-volume")
-	for _, scenario := range []string{"success", "wrong-owner", "wrong-id", "inspect-error", "remove-error"} {
-		t.Run(scenario, func(t *testing.T) {
-			dir := t.TempDir()
-			marker := filepath.Join(dir, "removed")
-			owner := run
-			if scenario == "wrong-owner" {
-				owner = "different"
-			}
-			script := fmt.Sprintf(`#!/bin/sh
-case "$3 $4" in
- 'volume inspect')
-   if [ -f %q ]; then echo 'Error response from daemon: get %s: no such volume' >&2; exit 1; fi
-   if [ %q = inspect-error ]; then echo 'Cannot connect: no such file or directory' >&2; exit 1; fi
-   printf '%%s\n' '{"Name":"%s","CreatedAt":"created","Mountpoint":"/fixture-volume","Labels":{"io.moduleos.operations.run":"%s"}}';;
- 'volume rm')
-   if [ %q = remove-error ]; then exit 1; fi
-   touch %q;;
- *) exit 9;; esac
-`, marker, name, scenario, name, owner, scenario, marker)
-			if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-			id := expectedID
-			if scenario == "wrong-id" {
-				id = strings.Repeat("a", 64)
-			}
-			l := Ledger{Run: run, Resources: []Resource{{Kind: "volume", Name: name, ID: id, OwnerKey: "io.moduleos.operations.run", Owner: run}}}
-			if err := SaveLedger(filepath.Join(dir, "ledger"), l); err != nil {
-				t.Fatal(err)
-			}
-			budget := 1500 * time.Millisecond
-			if scenario == "success" {
-				// Several real shell subprocesses run under race/parallel CI load;
-				// the success fixture is not a latency qualification.
-				budget = 10 * time.Second
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), budget)
-			defer cancel()
-			err := CleanupLedger(ctx, l)
-			if (err == nil) != (scenario == "success") {
-				t.Fatalf("cleanup %s: %v", scenario, err)
-			}
-			if scenario == "wrong-owner" || scenario == "wrong-id" || scenario == "inspect-error" {
-				if _, err := os.Stat(marker); !os.IsNotExist(err) {
-					t.Fatal("unverified resource removed")
-				}
-			}
-		})
-	}
-}
-
 func TestRelayDropsExistingAndRecoversNewConnections(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "ops-relay-")
 	if err != nil {

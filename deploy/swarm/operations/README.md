@@ -73,6 +73,12 @@ only after both the journey and all resource/file cleanup succeed. Test-only
 fixture resources are journaled before creation and removed by immutable identity
 plus ownership; independent canaries must survive the journey.
 
+Fixture cleanup uses the existing typed Moby Engine client on the fixed local
+Unix socket, negotiates the Engine API version, and verifies absence after
+deletion. Resource-not-found is a typed HTTP error, not a match against localized
+CLI text. Failures print only allowlisted kind/stage/reason diagnostics; guard,
+identity, transport, removal and verification failures cannot silently pass.
+
 ## CI contract
 
 `Operational qualification (amd64)` runs on its own fresh `ubuntu-24.04` runner.
