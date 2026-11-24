@@ -23,6 +23,26 @@ defaults:
 jobs:
   quality:
     name: Quality
+    needs: [source-quality, integration, operations, container, deploy-assets, stack-smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed on missing, skipped, cancelled, or failed qualification
+        env:
+          SOURCE_RESULT: ${{ needs.source-quality.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          OPERATIONS_RESULT: ${{ needs.operations.result }}
+          CONTAINER_RESULT: ${{ needs.container.result }}
+          DEPLOY_RESULT: ${{ needs.deploy-assets.result }}
+          STACK_RESULT: ${{ needs.stack-smoke.result }}
+        run: |
+          for result in "$SOURCE_RESULT" "$INTEGRATION_RESULT" "$OPERATIONS_RESULT" "$CONTAINER_RESULT" "$DEPLOY_RESULT" "$STACK_RESULT"; do
+            test "$result" = success || exit 1
+          done
+
+  source-quality:
+    name: Source quality
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -64,6 +84,10 @@ jobs:
         env:
           GOTOOLCHAIN: local
         run: go vet -tags stack ./deploy/swarm/stacktest/...
+      - name: Run static analysis on the operational suite
+        env:
+          GOTOOLCHAIN: local
+        run: go vet -tags operations ./deploy/swarm/operations/...
       - name: Build all packages
         env:
           GOTOOLCHAIN: local
@@ -147,6 +171,41 @@ jobs:
           GOTOOLCHAIN: local
           MODULEOS_INTEGRATION_DISPOSABLE: "1"
         run: ./scripts/check-swarm-integration.sh
+
+  operations:
+    name: Operational qualification (amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+      - name: Qualify real black-box operations
+        env:
+          GOTOOLCHAIN: local
+          MODULEOS_OPERATIONS_DISPOSABLE: "1"
+          MODULEOS_OPERATIONS_EVIDENCE_DIR: ${{ runner.temp }}/moduleos-operations-evidence
+        run: |
+          mkdir -m 0700 "$MODULEOS_OPERATIONS_EVIDENCE_DIR"
+          sudo env PATH="$PATH" GOTOOLCHAIN=local MODULEOS_OPERATIONS_DISPOSABLE=1 MODULEOS_OPERATIONS_EVIDENCE_DIR="$MODULEOS_OPERATIONS_EVIDENCE_DIR" bash scripts/check-operations.sh
+      - name: Publish sanitized operational summary
+        if: ${{ always() }}
+        env:
+          GOTOOLCHAIN: local
+          MODULEOS_OPERATIONS_EVIDENCE_DIR: ${{ runner.temp }}/moduleos-operations-evidence
+        run: |
+          if sudo test -f "$MODULEOS_OPERATIONS_EVIDENCE_DIR/results.jsonl"; then
+            sudo env PATH="$PATH" GOTOOLCHAIN=local go run ./deploy/swarm/operations/cmd/summary "$MODULEOS_OPERATIONS_EVIDENCE_DIR/results.jsonl" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Operational evidence unavailable; no qualification success is claimed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   container:
     name: Container + image scan (${{ matrix.arch }})

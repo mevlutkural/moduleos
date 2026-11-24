@@ -46,9 +46,27 @@ An ordinary regression test verifies rejection of security-field and new-key dri
 The runtime base digest must also match its OCI metadata; the Docker Dependabot
 ecosystem discovers both FROM inputs, and a base update must keep labels in sync.
 
-## Proposed protected-main checks
+## Short operational qualification
 
-After both native jobs have actually passed on GitHub, the maintainer can require:
+On a fresh, genuinely disposable **native Linux amd64** host, run
+`sudo env PATH="$PATH" MODULEOS_OPERATIONS_DISPOSABLE=1 bash scripts/check-operations.sh`.
+Never use a shared development engine or an existing Swarm. To retain safe
+evidence, additionally pass `MODULEOS_OPERATIONS_EVIDENCE_DIR` pointing to a
+new private directory; the runner writes `results.jsonl`. The allowlisted human
+and JSONL summaries are produced by `go run ./deploy/swarm/operations/cmd/summary`
+with that file as its argument. See [the operational suite](../deploy/swarm/operations/README.md)
+for guards, cases, time limits and diagnostics. Raw logs and working directories
+are not uploaded. This is not the Genesis 24-hour release qualification.
+
+The required Quality context now aggregates all runtime gates with `always()`
+and rejects failed, cancelled or skipped dependencies. This includes the native
+amd64 operational journey and the existing **native arm64** container smoke and
+image scan; a local compile or emulated build does not replace either runtime
+proof. No branch-protection setting is changed by this wiring.
+
+## Protected-main check names
+
+The individual check names remain available for explicit protection:
 
 - Quality
 - Coverage
@@ -60,8 +78,9 @@ After both native jobs have actually passed on GitHub, the maintainer can requir
 - Container + image scan (arm64)
 - Deploy assets
 - Stack smoke
+- Operational qualification (amd64)
 
 The two combined container checks qualify and scan the same image. None is
-path-filtered or intentionally skipped. These names are a rollout proposal,
-not evidence that protection has already been changed. No registry publication,
+path-filtered or intentionally skipped. The Quality aggregation enforces their
+success without changing repository settings. No registry publication,
 release signatures, SBOM generation or 24-hour qualification is performed here.
