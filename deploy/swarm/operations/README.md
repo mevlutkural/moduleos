@@ -63,8 +63,10 @@ reservation; this is a short qualification gate, not a longevity claim.
 
 Only sanitized `results.jsonl` is retained outside the private workspace.
 Allowlisted stage/status/reason, duration and source/image identities are printed
-as a human summary **and validated JSONL** in the GitHub job summary, also on
-failure. Raw Docker logs, credentials, environment files and SQLite snapshots are
+as a human summary **and validated JSONL** in both the job log and GitHub job
+summary, also on failure. Replacement diagnostics distinguish restart, ownership,
+relay entry and relay exit, and report only an allowlisted last unmet condition.
+Raw Docker logs, credentials, environment files and SQLite snapshots are
 never uploaded. A setup/registry error is not a product pass; timeouts, product
 mismatches and cleanup failure are distinct failures. Final success is emitted
 only after both the journey and all resource/file cleanup succeed. Test-only

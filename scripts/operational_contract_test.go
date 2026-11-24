@@ -80,6 +80,56 @@ func TestQualityRequiresOperationalAndNativeGates(t *testing.T) {
 		t.Fatal("native arm64 scan removed")
 	}
 }
+
+func TestOperationalSummaryLogsValidatedOutputAndPropagatesFailure(t *testing.T) {
+	data, err := os.ReadFile("../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w struct {
+		Jobs map[string]struct{ Steps []struct{ Name, Run string } }
+	}
+	if err := yaml.Unmarshal(data, &w); err != nil {
+		t.Fatal(err)
+	}
+	var run string
+	for _, step := range w.Jobs["operations"].Steps {
+		if step.Name == "Publish sanitized operational summary" {
+			run = step.Run
+		}
+	}
+	if run == "" {
+		t.Fatal("summary step missing")
+	}
+	for _, failed := range []bool{false, true} {
+		dir := t.TempDir()
+		executable(t, dir, "sudo", `if [ "$1" = test ]; then exit 0; fi
+if [ "$SUMMARY_FAIL" = 1 ]; then printf 'unvalidated-output'; exit 17; fi
+printf '%s\n' '{"stage":"outage","status":"failed","reason":"timeout"}'
+`)
+		file := filepath.Join(dir, "summary")
+		cmd := exec.Command("bash", "-e", "-o", "pipefail", "-c", run)
+		flag := "0"
+		if failed {
+			flag = "1"
+		}
+		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "SUMMARY_FAIL="+flag, "MODULEOS_OPERATIONS_EVIDENCE_DIR="+dir, "GITHUB_STEP_SUMMARY="+file)
+		output, err := cmd.CombinedOutput()
+		if (err != nil) != failed {
+			t.Fatalf("summary failure propagation: %v", err)
+		}
+		written, _ := os.ReadFile(file)
+		if failed {
+			if len(output) != 0 || len(written) != 0 {
+				t.Fatal("failed sanitizer output published")
+			}
+			continue
+		}
+		if !strings.Contains(string(output), `"stage":"outage"`) || string(written) != string(output) {
+			t.Fatal("safe summary absent from logs or job summary")
+		}
+	}
+}
 func TestOperationalRunnerRefusesBeforeDocker(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "docker-called")

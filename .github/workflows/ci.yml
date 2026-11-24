@@ -202,7 +202,9 @@ jobs:
           MODULEOS_OPERATIONS_EVIDENCE_DIR: ${{ runner.temp }}/moduleos-operations-evidence
         run: |
           if sudo test -f "$MODULEOS_OPERATIONS_EVIDENCE_DIR/results.jsonl"; then
-            sudo env PATH="$PATH" GOTOOLCHAIN=local go run ./deploy/swarm/operations/cmd/summary "$MODULEOS_OPERATIONS_EVIDENCE_DIR/results.jsonl" >> "$GITHUB_STEP_SUMMARY"
+            summary=$(sudo env PATH="$PATH" GOTOOLCHAIN=local go run ./deploy/swarm/operations/cmd/summary "$MODULEOS_OPERATIONS_EVIDENCE_DIR/results.jsonl")
+            printf '%s\n' "$summary"
+            printf '%s\n' "$summary" >> "$GITHUB_STEP_SUMMARY"
           else
             echo 'Operational evidence unavailable; no qualification success is claimed.' >> "$GITHUB_STEP_SUMMARY"
           fi

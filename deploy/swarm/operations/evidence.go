@@ -23,6 +23,8 @@ type Event struct {
 	ElapsedMS    int64  `json:"elapsed_ms"`
 	ExpectedHTTP int    `json:"expected_http,omitempty"`
 	ObservedHTTP int    `json:"observed_http,omitempty"`
+	Check        string `json:"check,omitempty"`
+	Observation  string `json:"observation,omitempty"`
 }
 
 var stages = map[string]bool{"setup": true, "boot": true, "lifecycle": true, "deploy": true, "logs": true, "restart": true, "ownership": true, "outage": true, "routing": true, "restore": true, "delete": true, "cleanup": true, "final": true}
@@ -32,6 +34,9 @@ var revision = regexp.MustCompile(`^(?:[a-f0-9]{40}|unknown)$`)
 var artifact = regexp.MustCompile(`^(?:sha256:[a-f0-9]{64}|unknown)$`)
 
 func (e Event) Validate() error {
+	if !replacementChecks[e.Check] || !replacementObservations[e.Observation] {
+		return errors.New("invalid_evidence")
+	}
 	if !identity.MatchString(e.Run) || (e.Arch != "amd64" && e.Arch != "unknown") || !revision.MatchString(e.Source) || !artifact.MatchString(e.Image) || !stages[e.Stage] || !reasons[e.Reason] || e.ElapsedMS < 0 {
 		return errors.New("invalid_evidence")
 	}
@@ -90,7 +95,7 @@ func Summary(input io.Reader, output io.Writer) error {
 		return errors.New("invalid_evidence")
 	}
 	for _, e := range events {
-		fmt.Fprintf(output, "- %s: %s (%s, %d ms); run=%s, arch=%s, source=%s, image=%s\n", e.Stage, e.Status, e.Reason, e.ElapsedMS, e.Run, e.Arch, e.Source, e.Image)
+		fmt.Fprintf(output, "- %s: %s (%s, %d ms); check=%s, observation=%s; run=%s, arch=%s, source=%s, image=%s\n", e.Stage, e.Status, e.Reason, e.ElapsedMS, e.Check, e.Observation, e.Run, e.Arch, e.Source, e.Image)
 	}
 	fmt.Fprintln(output, "\n```jsonl")
 	for _, e := range events {

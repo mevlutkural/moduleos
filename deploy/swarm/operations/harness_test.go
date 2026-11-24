@@ -96,10 +96,6 @@ type containerRecord struct {
 		Pid       int
 	}
 }
-type processIdentity struct {
-	Task, Container, Started string
-	PID                      int
-}
 type journey struct {
 	t                                                                                          *testing.T
 	ctx                                                                                        context.Context
@@ -188,6 +184,7 @@ func (j *journey) stage(name string, fn func()) {
 	j.observedHTTP = 0
 	start := time.Now()
 	j.require(AppendEvent(j.evidence, Event{Run: j.run, Arch: "amd64", Source: j.source, Image: j.image, Stage: name, Status: "started", Reason: "none", ElapsedMS: time.Since(start).Milliseconds()}) == nil, "infrastructure")
+	j.t.Logf("operations stage=%s status=started", name)
 	completed := false
 	defer func() {
 		status, reason := "passed", "none"
@@ -200,6 +197,7 @@ func (j *journey) stage(name string, fn func()) {
 		if AppendEvent(j.evidence, Event{Run: j.run, Arch: "amd64", Source: j.source, Image: j.image, Stage: name, Status: status, Reason: reason, ElapsedMS: time.Since(start).Milliseconds(), ExpectedHTTP: j.expectedHTTP, ObservedHTTP: j.observedHTTP}) != nil {
 			j.t.Error("evidence_write")
 		}
+		j.t.Logf("operations stage=%s status=%s reason=%s", name, status, reason)
 	}()
 	fn()
 	completed = true
@@ -485,31 +483,61 @@ func readProcess(ctx context.Context) (processIdentity, error) {
 	}
 	return processIdentity{task.ID, c.ID, c.State.StartedAt, c.State.Pid}, nil
 }
-func (j *journey) waitReplacement(before processIdentity, socketSource string) {
-	j.wait(120*time.Second, func(ctx context.Context) (bool, error) {
+func (j *journey) waitReplacement(before processIdentity, socketSource string, check replacementCheck) {
+	start := time.Now()
+	last := "process_inspect_failed"
+	j.require(replacementChecks[string(check)] && check != "", "replacement_check_invalid")
+	j.t.Logf("operations check=%s status=started", check)
+	err := Poll(j.ctx, 120*time.Second, func(ctx context.Context) (bool, error) {
 		now, err := readProcess(ctx)
-		if err != nil || now.Task == before.Task || now.Container == before.Container || now.Started == before.Started {
+		if err != nil {
+			last = "process_inspect_failed"
+			if replacementObservations[err.Error()] {
+				last = err.Error()
+			}
+			return false, nil
+		}
+		last = replacementIdentityCondition(before, now)
+		if last != "none" {
 			return false, nil
 		}
 		if socketSource != "" {
 			out, err := Docker(ctx, 5*time.Second, "container", "inspect", "--format", "{{json .Mounts}}", now.Container)
-			var mounts []struct{ Source, Destination string }
+			var mounts []socketMount
 			if err != nil || json.Unmarshal(out, &mounts) != nil {
+				last = "mount_inspect_failed"
 				return false, nil
 			}
-			found := false
-			for _, m := range mounts {
-				if m.Destination == "/var/run/docker.sock" && m.Source == socketSource {
-					found = true
-				}
-			}
-			if !found {
+			if !hasSocketMount(mounts, socketSource) {
+				last = "socket_mount_mismatch"
 				return false, nil
 			}
 		}
 		status, _, _, err := j.request(ctx, "GET", "/ready", nil, "", "", false)
-		return err == nil && status == 200, nil
+		last = "readiness_unavailable"
+		if err == nil && status == 200 {
+			last = "none"
+			return true, nil
+		}
+		return false, nil
 	})
+	stage := "outage"
+	if check == restartReplacement {
+		stage = "restart"
+	}
+	if check == ownershipReplacement {
+		stage = "ownership"
+	}
+	status, reason := "passed", "none"
+	if err != nil {
+		status, reason = "failed", "timeout"
+		if j.ctx.Err() == context.Canceled {
+			reason = "cancelled"
+		}
+	}
+	j.require(AppendEvent(j.evidence, Event{Run: j.run, Arch: "amd64", Source: j.source, Image: j.image, Stage: stage, Status: status, Reason: reason, ElapsedMS: time.Since(start).Milliseconds(), Check: string(check), Observation: last}) == nil, "evidence_write")
+	j.t.Logf("operations check=%s status=%s observation=%s", check, status, last)
+	j.require(err == nil, "replacement_timeout")
 }
 func (j *journey) deployOfficial() {
 	j.t.Helper()
