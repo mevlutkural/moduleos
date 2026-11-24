@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
+operations_mode=${MODULEOS_STACK_OPERATIONS:-0}
+source "$(dirname -- "${BASH_SOURCE[0]}")/operations-evidence.sh"
+operations_event() {
+  [[ $operations_mode == 1 ]] || return 0
+  local safe_run=pending safe_source=unknown safe_image=unknown elapsed_ms=${4:-$((SECONDS*1000))}
+  [[ ${run_id:-} =~ ^[a-f0-9]{12}$ ]] && safe_run=$run_id
+  [[ ${revision:-} =~ ^[a-f0-9]{40}$ ]] && safe_source=$revision
+  [[ ${image_id:-} =~ ^sha256:[a-f0-9]{64}$ ]] && safe_image=$image_id
+  printf '{"run":"%s","arch":"amd64","source":"%s","image":"%s","stage":"%s","status":"%s","reason":"%s","elapsed_ms":%s}\n' "$safe_run" "$safe_source" "$safe_image" "$1" "$2" "$3" "$elapsed_ms" >> "$MODULEOS_OPERATIONS_EVIDENCE"
+}
+if [[ $operations_mode == 1 ]]; then
+  [[ ${MODULEOS_OPERATIONS_DISPOSABLE:-} == 1 && -f ${MODULEOS_OPERATIONS_EVIDENCE:-} && ! -L ${MODULEOS_OPERATIONS_EVIDENCE:-} ]] || { echo 'Use check-operations.sh with a private evidence directory' >&2; exit 2; }
+  trap 'status=$?; operations_event final failed setup_failed; exit "$status"' EXIT
+fi
 
 [[ ${MODULEOS_STACK_DISPOSABLE:-} == 1 ]] || { echo 'Stack smoke requires MODULEOS_STACK_DISPOSABLE=1' >&2; exit 2; }
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Stack smoke requires disposable Linux amd64' >&2; exit 2; }
@@ -36,6 +51,7 @@ early_cleanup() {
   trap '' INT TERM
   stop_active_command || result=1
   rm -- "$capture_file" || result=1
+  if [[ $operations_mode == 1 ]]; then operations_event final failed setup_failed || result=1; fi
   exit "$result"
 }
 trap early_cleanup EXIT
@@ -125,15 +141,17 @@ app_service_id=''
 app_network_id=''
 default_network_id=''
 cleanup() {
-  local result=$? remaining inspect_status owned_containers
+  local suite_result=$? result=0 remaining inspect_status owned_containers cleanup_started=$SECONDS
   trap - EXIT
   trap '' INT TERM
   cleanup_active=1
   cleanup_deadline=$((SECONDS + 180))
   stop_active_command || result=1
   if [[ -n "$suite_pid" ]]; then
+    local suite_cancel_attempts=6
+    [[ $operations_mode != 1 ]] || suite_cancel_attempts=20
     kill -TERM -- "-$suite_pid" 2>/dev/null || true
-    for ((i=0;i<6;i++)); do
+    for ((i=0;i<suite_cancel_attempts;i++)); do
       kill -0 -- "-$suite_pid" 2>/dev/null || break
       sleep 0.5
     done
@@ -196,6 +214,15 @@ cleanup() {
       echo 'Refusing to remove an unowned container' >&2; result=1
     fi
   done
+  if [[ $operations_mode == 1 && -x $work_dir/operations-cleanup ]]; then
+    remaining=$((cleanup_deadline-SECONDS))
+    if ((remaining > 0)); then
+      ((remaining < 100)) || remaining=100
+      if ! timeout --signal=TERM --kill-after=5s "${remaining}s" "$work_dir/operations-cleanup" "$work_dir/operations-ledger.json" "$run_id"; then
+        echo 'Operational fixture cleanup failed' >&2; result=1
+      fi
+    else result=1; fi
+  fi
   network="moduleos-smoke-${run_id}-net"
     network_record=$(docker_cmd network inspect --format '{{.ID}}|{{.Name}}|{{index .Labels "moduleos.managed"}}|{{index .Labels "moduleos.resource.kind"}}' "$network" 2>/dev/null || true)
     if [[ -n "$network_record" ]]; then
@@ -334,11 +361,22 @@ cleanup() {
     echo 'Cleanup deadline expired before local files were removed' >&2
     result=1
   fi
+  if ((SECONDS >= cleanup_deadline)); then result=1; fi
+  if [[ $operations_mode == 1 ]]; then operations_outcome "$suite_result" "$result" "$(((SECONDS-cleanup_started)*1000))" "$((SECONDS*1000))" || result=1; fi
+  if ((suite_result != 0)); then result=$suite_result; fi
   exit "$result"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [[ $operations_mode == 1 ]]; then
+  timeout --signal=TERM --kill-after=5s 180s go build -o "$work_dir/operations-cleanup" ./deploy/swarm/operations/cmd/cleanup
+  engine_id=''
+  capture_docker_cmd engine_id 8192 info --format '{{.ID}}'
+  # The capture helper assigns the caller's variable without a subshell.
+  printf '%s %s' "$engine_id" "$run_id" > "$work_dir/guarded-run"
+  export MODULEOS_OPERATIONS_GUARD="$work_dir/guarded-run"
+fi
 advertise_addr="$(ip -4 route get 1.1.1.1 | awk 'NR==1 {for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
 [[ -n $advertise_addr ]] || { echo 'No Swarm advertise address' >&2; exit 2; }
 swarm_owned=1
@@ -381,7 +419,13 @@ export MODULEOS_STACK_ROOT_NETWORK_ID_FILE="$work_dir/root-network-id"
 export MODULEOS_STACK_DEFAULT_NETWORK_ID_FILE="$work_dir/default-network-id"
 export MODULEOS_STACK_PORT="$port"
 export MODULEOS_STACK_APP_ROOT="$app_root" MODULEOS_STACK_BAD_IMAGE="$bad_image"
-setsid timeout --signal=TERM --kill-after=5s 25m go test -tags=stack -count=1 -v -timeout=20m ./deploy/swarm/stacktest &
+if [[ $operations_mode == 1 ]]; then
+  export MODULEOS_OPERATIONS_SOURCE="$revision" MODULEOS_OPERATIONS_IMAGE_ID="$image_id"
+  export MODULEOS_OPERATIONS_WORK="$work_dir" MODULEOS_OPERATIONS_LEDGER="$work_dir/operations-ledger.json"
+  setsid timeout --signal=TERM --kill-after=5s 25m go test -tags=operations -run '^TestOperationalJourney$' -count=1 -v -timeout=23m ./deploy/swarm/operations &
+else
+  setsid timeout --signal=TERM --kill-after=5s 25m go test -tags=stack -count=1 -v -timeout=20m ./deploy/swarm/stacktest &
+fi
 suite_pid=$!
 if wait "$suite_pid"; then
   :

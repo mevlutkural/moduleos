@@ -230,6 +230,7 @@ func TestLogsTailValidatesInputAndMapsFailures(t *testing.T) {
 		{name: "unknown query", path: "/apps/api/logs?since=1", status: 422, code: "validation_failed"},
 		{name: "duplicate tail", path: "/apps/api/logs?tail=1&tail=2", status: 422, code: "validation_failed"},
 		{name: "noncanonical tail", path: "/apps/api/logs?tail=01", status: 422, code: "validation_failed"},
+		{name: "negative tail", path: "/apps/api/logs?tail=-1", status: 422, code: "validation_failed"},
 		{name: "tail too large", path: "/apps/api/logs?tail=1001", status: 422, code: "validation_failed"},
 		{name: "body", path: "/apps/api/logs", body: strings.NewReader("x"), status: 400, code: "invalid_request"},
 		{name: "missing", path: "/apps/api/logs", err: store.ErrNotFound, status: 404, code: "application_not_found"},
