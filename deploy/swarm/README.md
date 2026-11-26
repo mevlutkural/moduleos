@@ -19,7 +19,7 @@ docker buildx build --platform linux/amd64 --load \
 
 Choose the host's native platform. For a local tag, preflight inspects the image, submits its immutable local image ID to Swarm with `--resolve-image never`, and checks the running container's ID. The inspected image must remain on the single manager. Digest references are suitable for registry-backed releases. The scripts do not publish images.
 
-The operator creates a versioned Docker Secret, external volume and canonical app-data directory. Keep a private copy of the key for API clients; do not put the key in this repository, command arguments or environment variables. For example, with a regular key file containing 32–4096 bytes:
+The operator creates a versioned Docker Secret, external volume and canonical app-data directory. Keep a private copy of the key for API clients; do not put the key in this repository, command arguments or environment variables. Use a private regular key file satisfying the [credential rules](../../docs/control-plane/configuration.md#credential-rules):
 
 ```sh
 docker secret create moduleos_api_key_v1 - < /secure/private/moduleos-api-key
@@ -49,6 +49,6 @@ Deployment waits for a healthy task and `GET /api/v1/live`. Check `docker servic
 docker stack rm moduleos-system
 ```
 
-Stack removal is asynchronous. The external Secret and volume remain. Back up the entire SQLite data directory, including possible WAL sidecars, before an upgrade; full rotation, backup/restore and recovery procedures belong to the later operations phase.
+Stack removal is asynchronous. The external Secret and volume remain, as do managed workload services. Follow the [operator runbook](../../docs/control-plane/operations.md) for authenticated verification, planned single-key rotation, offline full-directory backup, same-image restore and troubleshooting. The [configuration reference](../../docs/control-plane/configuration.md) separates daemon settings from supported operator env-file keys. Never assume a binary rollback reverses schema migrations.
 
 **Security boundary:** the API is published on host interfaces. The operator must arrange TLS termination and firewall/network restriction externally. The local Docker socket grants host-level Docker API authority even when bind-mounted read-only. Only trusted operators should control the stack and its image.

@@ -16,6 +16,11 @@ best-effort basis and does not include a service-level agreement.
 
 ## Useful information
 
+Start with the [operator runbook](docs/control-plane/operations.md) and
+[configuration reference](docs/control-plane/configuration.md). The runbook
+distinguishes safe health/status output from private logs, database snapshots
+and Docker inspection data; do not upload those raw assets to ask for help.
+
 When asking for help, include the relevant ModuleOS version or commit, operating
 system, runtime version, configuration with secrets removed, expected behavior,
 actual behavior, and the smallest reproducible example you can provide.

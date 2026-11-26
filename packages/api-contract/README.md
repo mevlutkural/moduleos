@@ -14,7 +14,9 @@ go test -count=1 ./packages/api-contract/... ./apps/control-plane/internal/api/.
 ```
 
 System health routes are intentionally unauthenticated. Protected resource
-routes use the Bearer scheme when those vertical slices are introduced.
+routes use the Bearer scheme. Production requires a validated file-backed key;
+see the [configuration reference](../../docs/control-plane/configuration.md#credential-rules)
+and [operator runbook](../../docs/control-plane/operations.md).
 
 Live application logs use authenticated `text/event-stream` responses. Native
 browser `EventSource` cannot attach the required Bearer header, so browser

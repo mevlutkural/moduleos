@@ -18,6 +18,17 @@ Create an ADR for material changes to areas such as:
 Routine implementation details do not need an ADR unless they establish a
 lasting constraint.
 
+## Accepted decisions
+
+- [0001: Application identity and mutations](0001-application-identity-and-mutations.md)
+- [0002: Reconciliation and runtime ownership](0002-reconciliation-and-ownership.md)
+- [0003: SQLite and offline recovery](0003-sqlite-and-offline-recovery.md)
+- [0004: Single-node networking and external ingress](0004-single-node-networking-and-external-ingress.md)
+- [0005: Secret-backed authentication and Docker host trust](0005-secret-auth-and-host-trust.md)
+
+These records describe existing public implementation decisions. They do not
+introduce new runtime capabilities or release guarantees.
+
 ## Format
 
 Use a four-digit sequence and a short slug:
