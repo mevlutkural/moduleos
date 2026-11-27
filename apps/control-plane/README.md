@@ -39,8 +39,10 @@ sockets. Its test-only Docker HTTP server proves process startup, readiness,
 signal, in-flight readiness cancellation, stream-cancellation, exit-code, and
 cleanup behavior; it does not
 claim Docker Engine, Swarm, or Traefik compatibility. Real runtime integration
-and the evidence-producing 24-hour Genesis qualification remain separate later
-release gates. Database and Docker cleanup registration and reverse-order
+and black-box operations have separate suites; see the
+[qualified reference and architecture](../../docs/control-plane/architecture.md#what-is-actually-qualified).
+The evidence-producing 24-hour Genesis release gate remains separate.
+Database and Docker cleanup registration and reverse-order
 execution are verified by the bootstrap and daemon component suites; process
 exit alone is not treated as proof that an individual cleanup callback ran.
 
@@ -211,20 +213,10 @@ indicate an internal fault:
 ## Runtime-log limits
 
 Runtime log snapshots and live SSE sessions are bounded control-plane
-operations. The relevant environment settings are:
-
-| Variable | Default | Purpose |
-|---|---:|---|
-| `MAX_LOG_TAIL` | `1000` | Maximum accepted `tail` line count. |
-| `MAX_LOG_PAYLOAD_BYTES` | `1048576` | Snapshot aggregate and per-stream-entry byte ceiling. |
-| `MAX_SSE_CONNECTIONS` | `20` | Global live-log session limit. |
-| `MAX_SSE_CONNECTIONS_PER_APP` | `3` | Per-application live-log session limit. |
-| `LOG_TAIL_TIMEOUT` | `10s` | Snapshot open/read deadline. |
-| `SSE_OPEN_TIMEOUT` | `10s` | Live Docker stream open deadline. |
-| `SSE_HEARTBEAT_INTERVAL` | `15s` | Keepalive comment interval. |
-| `SSE_IDLE_TIMEOUT` | `5m` | Maximum interval without an application log entry. |
-| `SSE_MAX_DURATION` | `30m` | Absolute live-session lifetime. |
-| `SSE_INITIAL_TAIL` | `50` | Default initial backlog for a live session. |
+operations. All runtime variables, defaults, validation and production overrides
+are listed in the [canonical configuration reference](../../docs/control-plane/configuration.md).
+Use the [operator runbook](../../docs/control-plane/operations.md) for deployment,
+authentication, rotation, offline recovery and troubleshooting.
 
 All values are validated at startup. Live sessions are intentionally finite;
 clients reconnect after the maximum duration and may receive duplicate backlog

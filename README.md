@@ -17,6 +17,29 @@ ModuleOS is maintained as a monorepo. Deployable components live under `apps/`, 
 
 Directories are added when their implementation is introduced; the repository does not use empty placeholders for future components. The intended boundaries and naming rules are documented in [Repository Structure](docs/REPOSITORY_STRUCTURE.md).
 
+## Current control-plane scope
+
+The public pre-release source manages image-based application workloads through
+a versioned HTTP API, persistent desired state, reconciliation, projects and
+network links, deployment history/rollback, and bounded runtime logs/SSE.
+The official deployment uses one control-plane replica on a dedicated rootful
+Linux single-node Swarm manager, local Docker Unix socket and local SQLite WAL
+volume. Workload replica scaling does not imply a replicated control plane.
+
+Genesis does not include a dashboard, CLI, installer, source-build pipeline,
+registry service, multi-node placement, federation, HA control plane, user/RBAC
+management or automatic DNS/TLS. External Traefik, management TLS and host
+network restrictions are operator responsibilities. This describes implemented
+source, not a claim that Genesis has been released or passed its separate
+mandatory 24-hour release qualification.
+
+- [Deploy on a dedicated Swarm manager](deploy/swarm/README.md)
+- [Operate: verify, rotate credentials, back up and recover](docs/control-plane/operations.md)
+- [Configuration reference](docs/control-plane/configuration.md)
+- [Architecture and exact qualification boundaries](docs/control-plane/architecture.md)
+- [Public API contract](packages/api-contract/README.md)
+- [Control-plane development and image](apps/control-plane/README.md)
+
 ## Project documents
 
 - [Contributing](CONTRIBUTING.md)
