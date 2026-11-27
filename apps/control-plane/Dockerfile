@@ -7,7 +7,7 @@
 # The context is restricted by apps/control-plane/Dockerfile.dockerignore.
 
 # golang:1.26.11-trixie (multi-architecture index)
-FROM --platform=$BUILDPLATFORM golang:1.26.11-trixie@sha256:fa340cb59ebeb1d53ac1cccfc334201d938fe5f3458003cccb767096d8e032b8 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3-trixie@sha256:af1bfc2614ebb1dbd31af514b78740fd678850e76498762b425ecee4c5c6ea80 AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH
